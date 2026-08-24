@@ -42,9 +42,12 @@ import {
   persistCircuitBreakerWithPolicy,
   resolveEffectiveParams,
   evaluateScalpReservationRetry,
+  decideAuthenticatedQuoteRetry,
   SCALP_AUTH_RETRY_COOLDOWN_MS,
+  SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS,
   SCALP_BALANCE_RETRY_COOLDOWN_MS,
   SCALP_GUARD_RETRY_COOLDOWN_MS,
+  SCALP_MAX_AUTHENTICATED_QUOTE_RETRIES,
   SCALP_MAX_SUBMISSIONS_PER_WINDOW,
   SCALP_PREFLIGHT_LEAD_SECONDS,
   type FreefallSample,
@@ -743,6 +746,53 @@ describe("evaluateScalpReservationRetry", () => {
       assert.equal(decision.terminal, true, `${outcome.status}:${outcome.reason}`);
       assert.equal(decision.retryAfterMs, null, `${outcome.status}:${outcome.reason}`);
     }
+  });
+});
+
+describe("decideAuthenticatedQuoteRetry", () => {
+  it("retries only transient invalid or one-sided authenticated quotes", () => {
+    assert.deepEqual(decideAuthenticatedQuoteRetry({
+      quoteReason: "final_requote_invalid",
+      retryCount: 0,
+      secondsRemaining:
+        SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS / 1_000,
+      sameWindow: true,
+    }), { retry: true, reason: "transient_invalid_quote" });
+
+    assert.equal(decideAuthenticatedQuoteRetry({
+      quoteReason: "final_requote_outside_band",
+      retryCount: 0,
+      secondsRemaining: 30,
+      sameWindow: true,
+    }).retry, false);
+    assert.equal(decideAuthenticatedQuoteRetry({
+      quoteReason: "side_flipped_final_requote",
+      retryCount: 0,
+      secondsRemaining: 30,
+      sameWindow: true,
+    }).retry, false);
+  });
+
+  it("never exceeds the retry limit or crosses the pinned window deadline", () => {
+    assert.deepEqual(decideAuthenticatedQuoteRetry({
+      quoteReason: "final_requote_invalid",
+      retryCount: SCALP_MAX_AUTHENTICATED_QUOTE_RETRIES,
+      secondsRemaining: 30,
+      sameWindow: true,
+    }), { retry: false, reason: "quote_retry_limit_reached" });
+    assert.deepEqual(decideAuthenticatedQuoteRetry({
+      quoteReason: "final_requote_invalid",
+      retryCount: 0,
+      secondsRemaining:
+        SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS / 1_000 - 0.001,
+      sameWindow: true,
+    }), { retry: false, reason: "deadline_before_quote_retry" });
+    assert.deepEqual(decideAuthenticatedQuoteRetry({
+      quoteReason: "final_requote_invalid",
+      retryCount: 0,
+      secondsRemaining: 30,
+      sameWindow: false,
+    }), { retry: false, reason: "window_expired_before_quote_retry" });
   });
 });
 
@@ -2812,7 +2862,7 @@ describe("execution wiring (static source assertions)", () => {
 
   it("requalifies the authenticated quote after other awaits and before intent without bypassing band or side", () => {
     const finalBalance = idx("FINAL live balance check");
-    const requote = idx("const finalRequoteResult = await runtime.fetchOrderbookPrices(ticker)");
+    const requote = idx("const finalRequoteStartedAtMs = runtime.nowMs()");
     const authoritative = idx("AUTHORITATIVE FINAL VALIDATION (post-await)");
     const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
     assert.ok(finalBalance >= 0 && requote > finalBalance, "requote must run after the other awaited safety reads");
@@ -2824,7 +2874,7 @@ describe("execution wiring (static source assertions)", () => {
       /initialSide,[\s\S]*?if \(!finalRequalification\.ok\)/,
       "a failed or side-flipped requalification must return before intent",
     );
-    assert.match(svc, /quotedReason: finalRequalification\.reason/);
+    assert.match(svc, /quotedReason: terminalQuoteReason/);
   });
 
   it("does not size from a re-resolved params2 budget", () => {
@@ -2835,7 +2885,7 @@ describe("execution wiring (static source assertions)", () => {
   it("AUTHORITATIVE post-await validation runs AFTER final balance, final requote, and final freefall", () => {
     const finalFf = idx("FINAL FREEFALL GUARD");
     const finalBal = idx("FINAL live balance check");
-    const finalRequote = idx("const finalRequoteResult = await runtime.fetchOrderbookPrices(ticker)");
+    const finalRequote = idx("const finalRequoteStartedAtMs = runtime.nowMs()");
     const authoritative = idx("AUTHORITATIVE FINAL VALIDATION (post-await)");
     assert.ok(authoritative >= 0, "authoritative post-await validation block must exist");
     assert.ok(finalFf >= 0 && finalBal >= 0);
@@ -2967,7 +3017,7 @@ describe("execution wiring (static source assertions)", () => {
     const parallelBoundary = svc.slice(executeStart, finalFf);
     assert.match(parallelBoundary, /await Promise\.all\(\[[\s\S]*?runtime\.collectPriceSample\(/);
     const block = svc.slice(finalFf, idx("Size the order STRICTLY"));
-    assert.match(block, /evaluateFreefallPreSubmitGuard\(\{[\s\S]*?freshSampleSucceeded: freshSampleResult/);
+    assert.match(block, /evaluateFreefallPreSubmitGuard\(\{[\s\S]*?freshSampleSucceeded: authoritativeFreshSampleSucceeded/);
     // Must NOT swallow the final fetch with a silent .catch.
     assert.ok(!/runtime\.collectPriceSample\([^)]*\)\.catch\(/.test(parallelBoundary), "final sample must not be best-effort .catch");
     // Fetch failure → unavailable skip before any intent/submit.

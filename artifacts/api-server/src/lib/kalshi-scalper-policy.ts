@@ -322,6 +322,10 @@ export function secondsUntilEligible(
  * rather than trading strategy. */
 export const SCALP_SCAN_INTERVAL_MS = 250;
 export const SCALP_AUTH_RETRY_COOLDOWN_MS = 500;
+/** Maximum additional authenticated quote requests within one reserved attempt. */
+export const SCALP_MAX_AUTHENTICATED_QUOTE_RETRIES = 2;
+/** Leave enough time for a retry response and the synchronous safety boundary. */
+export const SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS = 2_000;
 export const SCALP_GUARD_RETRY_COOLDOWN_MS = 1_000;
 export const SCALP_BALANCE_RETRY_COOLDOWN_MS = 2_000;
 export const SCALP_MAX_SUBMISSIONS_PER_WINDOW = 3;
@@ -338,6 +342,48 @@ export function scalpPreflightRefreshMs(startsInSeconds: number): number {
   return startsInSeconds <= SCALP_PREFLIGHT_FAST_ZONE_SECONDS
     ? SCALP_PREFLIGHT_REFRESH_MS
     : SCALP_PREFLIGHT_EARLY_REFRESH_MS;
+}
+
+export type AuthenticatedQuoteRetryDecision =
+  | { retry: true; reason: "transient_invalid_quote" }
+  | {
+      retry: false;
+      reason: "quote_retry_limit_reached" | "deadline_before_quote_retry" | "window_expired_before_quote_retry";
+    };
+
+/**
+ * Decide whether an invalid/one-sided authenticated quote may be retried
+ * synchronously inside the current reserved attempt.
+ *
+ * This deliberately does not retry a valid quote that moved outside the band:
+ * that is a real price decision, not a data-quality failure. Every successful
+ * retry still passes the same band and final safety checks at the caller.
+ */
+export function decideAuthenticatedQuoteRetry(input: {
+  quoteReason: "final_requote_invalid" | "final_requote_outside_band" | "side_flipped_final_requote";
+  retryCount: number;
+  secondsRemaining: number;
+  sameWindow: boolean;
+}): AuthenticatedQuoteRetryDecision {
+  if (!input.sameWindow) {
+    return { retry: false, reason: "window_expired_before_quote_retry" };
+  }
+  if (input.quoteReason !== "final_requote_invalid") {
+    return { retry: false, reason: "quote_retry_limit_reached" };
+  }
+  if (
+    !Number.isFinite(input.secondsRemaining)
+    || input.secondsRemaining * 1_000 < SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS
+  ) {
+    return { retry: false, reason: "deadline_before_quote_retry" };
+  }
+  if (
+    !Number.isFinite(input.retryCount)
+    || input.retryCount >= SCALP_MAX_AUTHENTICATED_QUOTE_RETRIES
+  ) {
+    return { retry: false, reason: "quote_retry_limit_reached" };
+  }
+  return { retry: true, reason: "transient_invalid_quote" };
 }
 
 export interface ScalpReservationRetryDecision {

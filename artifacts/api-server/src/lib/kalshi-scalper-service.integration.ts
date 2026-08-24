@@ -7,6 +7,132 @@ import {
   runControlledScalperLayeringExercise,
 } from "./kalshi-scalper-service.ts";
 
+describe("authenticated final quote retry boundary", () => {
+  const valid = { yesAsk: 0.97, yesBid: 0.02 };
+  const oneSided = { yesAsk: 0.97, yesBid: null };
+
+  it("recovers a transient one-sided quote without changing the pinned band, budget, or exposure", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      authenticatedQuoteSequence: [valid, oneSided, { yesAsk: 0.98, yesBid: 0.02 }],
+    });
+
+    assert.equal(result.quoteFetches, 3);
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 1);
+    assert.deepEqual(result.submittedLimitPrices, [0.99]);
+    assert.deepEqual(result.submittedCounts, [2]);
+  });
+
+  it("does not retry a valid above-cap or below-floor quote and records the exact terminal value", async () => {
+    const above = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      authenticatedQuoteSequence: [valid, { yesAsk: 0.995, yesBid: 0.001 }],
+    });
+    assert.equal(above.quoteFetches, 2);
+    assert.equal(above.brokerSubmissions, 0);
+    assert.equal(above.skippedAttempts.at(-1)?.reason, "final_quote_above_cap");
+    assert.equal(above.skippedAttempts.at(-1)?.evidence?.quoteYesAsk, 0.995);
+    assert.equal(above.skippedAttempts.at(-1)?.evidence?.quoteRetryCount, 0);
+
+    const below = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      authenticatedQuoteSequence: [valid, { yesAsk: 0.95, yesBid: 0.10 }],
+    });
+    assert.equal(below.quoteFetches, 2);
+    assert.equal(below.brokerSubmissions, 0);
+    assert.equal(below.skippedAttempts.at(-1)?.reason, "final_quote_below_floor");
+    assert.equal(below.skippedAttempts.at(-1)?.evidence?.quoteYesAsk, 0.95);
+
+    const sideFlip = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      authenticatedQuoteSequence: [valid, { yesAsk: 0.995, yesBid: 0.02 }],
+    });
+    assert.equal(sideFlip.skippedAttempts.at(-1)?.reason, "side_flipped_final_requote");
+    assert.equal(
+      sideFlip.skippedAttempts.at(-1)?.evidence?.quoteAttempts?.at(-1)?.reason,
+      "side_flipped_final_requote",
+    );
+  });
+
+  it("stops before retry when the remaining deadline budget is too small", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      startSecondsRemaining: 3,
+      quoteFetchAdvanceMs: 600,
+      authenticatedQuoteSequence: [valid, oneSided, valid],
+    });
+
+    assert.equal(result.quoteFetches, 2);
+    assert.equal(result.intentWrites, 0);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.equal(result.skippedAttempts.at(-1)?.reason, "deadline_before_quote_retry");
+    assert.equal(result.skippedAttempts.at(-1)?.evidence?.quoteRetryCount, 0);
+    assert.equal(result.skippedAttempts.at(-1)?.evidence?.quoteAttempts?.length, 1);
+  });
+
+  it("re-runs the final window boundary after a successful retry and cannot submit late", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      authenticatedQuoteSequence: [valid, oneSided, valid],
+      windowChangesAfterQuoteFetchCount: 3,
+    });
+
+    assert.equal(result.quoteFetches, 3);
+    assert.equal(result.intentWrites, 0);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.equal(result.skippedAttempts.at(-1)?.reason, "window_expired_before_submit");
+  });
+
+  it("refreshes the underlying alongside a retry and re-runs target proximity before intent", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      targetProximityGuardEnabled: true,
+      authenticatedQuoteSequence: [valid, oneSided, { yesAsk: 0.98, yesBid: 0.02 }],
+      underlyingPriceSequence: [105, 100.01],
+    });
+
+    assert.equal(result.quoteFetches, 3);
+    assert.equal(result.intentWrites, 0);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.equal(result.skippedAttempts.at(-1)?.reason, "target_proximity_too_close");
+    assert.equal(result.skippedAttempts.at(-1)?.evidence?.underlyingPrice, 100.01);
+  });
+
+  it("records stale underlying data when the retry's authoritative refresh fails", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      targetProximityGuardEnabled: true,
+      authenticatedQuoteSequence: [valid, oneSided, valid],
+      underlyingSampleSuccessSequence: [true, false],
+    });
+
+    assert.equal(result.intentWrites, 0);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.equal(result.skippedAttempts.at(-1)?.reason, "stale_underlying_after_quote_retry");
+  });
+
+  it("re-runs target proximity after intent and aborts before the broker on a late move", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      targetProximityGuardEnabled: true,
+      authenticatedQuoteSequence: [valid, oneSided, { yesAsk: 0.98, yesBid: 0.02 }],
+      underlyingPriceSequence: [105, 105],
+      intentWriteUnderlyingPrice: 100.01,
+    });
+
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.deepEqual(
+      result.abortedBeforeSubmitReasons,
+      ["aborted_before_submit:target_proximity_too_close"],
+    );
+    assert.equal(result.abortedBeforeSubmitEvidences[0]?.quoteYesAsk, 0.98);
+    assert.equal(result.abortedBeforeSubmitEvidences[0]?.quoteRetryCount, 1);
+    assert.equal(result.abortedBeforeSubmitEvidences[0]?.quoteAttempts?.length, 2);
+  });
+});
+
 describe("real Scalper service Freefall boundary", () => {
   it("blocks actual intent/submit sinks, enforces cooldown, and recovers on fresh clear data", async () => {
     const result = await runControlledFreefallServiceExercise();

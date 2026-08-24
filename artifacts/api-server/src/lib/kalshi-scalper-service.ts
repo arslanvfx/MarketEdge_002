@@ -60,18 +60,22 @@ import {
   type PlaceOrderClassification,
   buildExecutionRiskSnapshot,
   compareRiskSnapshot,
+  decideAuthenticatedQuoteRetry,
   sizeOrderWithinReservedBudget,
   evaluateScalpReservationRetry,
   describeScalpCircuitBreakerReason,
   preserveNewerScalpBreakerState,
   persistCircuitBreakerWithPolicy,
   SCALP_AUTH_RETRY_COOLDOWN_MS,
+  SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS,
   SCALP_GUARD_RETRY_COOLDOWN_MS,
+  SCALP_MAX_AUTHENTICATED_QUOTE_RETRIES,
   SCALP_MAX_CONCURRENT_CANDIDATES,
   SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES,
   SCALP_MAX_SUBMISSIONS_PER_WINDOW,
   SCALP_PREFLIGHT_LEAD_SECONDS,
   SCALP_SCAN_INTERVAL_MS,
+  FREEFALL_MAX_SAMPLE_AGE_MS,
   scalpPreflightRefreshMs,
   type FreefallSample,
   type ExecutionRiskSnapshot,
@@ -2410,18 +2414,67 @@ async function _executeScalpAttempt(
   let effectiveSide = match2.side;
   let winningAsk = match2.winningAsk;
   const targetPriceNum = Number(identityResult.target);
-  const finalPriceSamples = _priceSamples.get(symbol) ?? [];
-  const latestFinalPriceSample =
+  let authoritativeFreshSampleSucceeded = freshSampleResult;
+  let finalPriceSamples = _priceSamples.get(symbol) ?? [];
+  let latestFinalPriceSample =
     priceGuardSampleRequested && freshSampleResult
       ? finalPriceSamples[finalPriceSamples.length - 1] ?? null
       : null;
-  const finalProximityResult = latestFinalPriceSample == null
+  let finalProximityResult = latestFinalPriceSample == null
     ? null
     : checkTargetProximityGuard(
         latestFinalPriceSample.price,
         targetPriceNum,
         snapshot.targetProximityThresholdPct,
       );
+  const evaluatePinnedProximityAt = (nowMs: number): {
+    allowed: boolean;
+    reason: string | null;
+    result: ReturnType<typeof checkTargetProximityGuard> | null;
+    latestSample: FreefallSample | null;
+  } => {
+    if (!snapshot.targetProximityGuardEnabled) {
+      return { allowed: true, reason: null, result: null, latestSample: null };
+    }
+    if (!coin) {
+      return {
+        allowed: false,
+        reason: "target_proximity_unavailable_no_product",
+        result: null,
+        latestSample: null,
+      };
+    }
+    const samples = _priceSamples.get(symbol) ?? [];
+    const latestSample = samples[samples.length - 1] ?? null;
+    if (
+      latestSample == null
+      || !Number.isFinite(latestSample.price)
+      || latestSample.price <= 0
+      || !Number.isFinite(latestSample.at)
+      || latestSample.at > nowMs
+      || nowMs - latestSample.at > FREEFALL_MAX_SAMPLE_AGE_MS
+    ) {
+      return {
+        allowed: false,
+        reason: "target_proximity_unavailable_stale",
+        result: null,
+        latestSample,
+      };
+    }
+    const result = checkTargetProximityGuard(
+      latestSample.price,
+      targetPriceNum,
+      snapshot.targetProximityThresholdPct,
+    );
+    return {
+      allowed: result.evaluable && !result.blocked,
+      reason: result.evaluable && !result.blocked
+        ? null
+        : result.reason ?? "target_proximity_blocked_final",
+      result,
+      latestSample,
+    };
+  };
   let regularLayerCompatibility = runtime.regularPositionCompatibilitySync(
     mode,
     symbol,
@@ -2515,8 +2568,8 @@ async function _executeScalpAttempt(
   const evaluatePinnedFreefallAt = (nowMs: number) => evaluateFreefallPreSubmitGuard({
     directionEnabled: snapshot.freefallGuardEnabled,
     hasProduct: coin != null,
-    freshSampleSucceeded: freshSampleResult,
-    samples: finalPriceSamples,
+    freshSampleSucceeded: authoritativeFreshSampleSucceeded,
+    samples: _priceSamples.get(symbol) ?? finalPriceSamples,
     side: effectiveSide,
     nowMs,
     eligibilityStartMs:
@@ -2841,65 +2894,155 @@ async function _executeScalpAttempt(
   }
 
   // The first authenticated quote overlaps identity, balance, and fresh guard
-  // inputs. Once every other await is complete, requalify exactly once in the
-  // existing bounded candidate lane immediately before the intent boundary.
-  // This catches quote churn without increasing scan cadence or permitting a
-  // stale, crossed, side-flipped, or out-of-band quote to submit.
+  // inputs. Once every other await is complete, requalify in the existing
+  // bounded candidate lane immediately before the intent boundary. Only a
+  // transient invalid/one-sided result may retry, at most twice, and only while
+  // enough close-time budget remains. Valid out-of-band and side-flipped quotes
+  // are real price decisions and remain terminal for this attempt.
   const finalRequoteStartedAtMs = runtime.nowMs();
-  const finalRequoteResult = await runtime.fetchOrderbookPrices(ticker).then(
-    (orderbook) => ({ ok: true as const, orderbook }),
-    (error) => ({ ok: false as const, error, orderbook: null }),
-  );
-  const finalRequoteMs = runtime.nowMs() - finalRequoteStartedAtMs;
-  if (latency) latency.finalRequoteMs = finalRequoteMs;
-  const finalRequalification = finalRequoteResult.ok && finalRequoteResult.orderbook
-    ? requalifyAuthenticatedScalpQuote({
-        orderbook: finalRequoteResult.orderbook,
-        ticker,
-        closeTime,
-        bandMin: snapshot.bandMin,
-        bandMax: snapshot.bandMax,
-        initialSide,
-      })
-    : {
-        ok: false as const,
-        reason: "final_requote_invalid" as const,
-        quote: null,
-        selectedSide: null,
-        winningAsk: null,
-      };
-  if (!finalRequalification.ok) {
+  const quoteAttempts: NonNullable<ScalpSkipEvidence["quoteAttempts"]> = [];
+  let quoteRetryCount = 0;
+  let finalRequoteResult:
+    | { ok: true; orderbook: Awaited<ReturnType<typeof fetchOrderbookPrices>> }
+    | { ok: false; error: unknown; orderbook: null };
+  let finalRequoteFreshSampleSucceeded = authoritativeFreshSampleSucceeded;
+  let finalRequalification: ReturnType<typeof requalifyAuthenticatedScalpQuote>;
+  let terminalQuoteReason:
+    | "final_requote_invalid"
+    | "final_requote_outside_band"
+    | "side_flipped_final_requote"
+    | "final_quote_above_cap"
+    | "final_quote_below_floor"
+    | "deadline_before_quote_retry"
+    | "window_expired_before_quote_retry" = "final_requote_invalid";
+
+  while (true) {
+    const refreshUnderlyingForRetry =
+      quoteRetryCount > 0
+      && priceGuardSampleRequested
+      && coin != null;
+    const [quoteResult, retrySampleResult] = await Promise.all([
+      runtime.fetchOrderbookPrices(ticker).then(
+        (orderbook) => ({ ok: true as const, orderbook }),
+        (error) => ({ ok: false as const, error, orderbook: null }),
+      ),
+      refreshUnderlyingForRetry && coin
+        ? runtime.collectPriceSample(coin.symbol, coin.product)
+        : Promise.resolve(authoritativeFreshSampleSucceeded),
+    ]);
+    finalRequoteResult = quoteResult;
+    if (refreshUnderlyingForRetry) {
+      finalRequoteFreshSampleSucceeded = retrySampleResult;
+      authoritativeFreshSampleSucceeded = retrySampleResult;
+      finalPriceSamples = _priceSamples.get(symbol) ?? finalPriceSamples;
+      latestFinalPriceSample = retrySampleResult
+        ? finalPriceSamples[finalPriceSamples.length - 1] ?? null
+        : null;
+      finalProximityResult = latestFinalPriceSample == null
+        ? null
+        : checkTargetProximityGuard(
+            latestFinalPriceSample.price,
+            targetPriceNum,
+            snapshot.targetProximityThresholdPct,
+          );
+    }
+    finalRequalification = finalRequoteResult.ok && finalRequoteResult.orderbook
+      ? requalifyAuthenticatedScalpQuote({
+          orderbook: finalRequoteResult.orderbook,
+          ticker,
+          closeTime,
+          bandMin: snapshot.bandMin,
+          bandMax: snapshot.bandMax,
+          initialSide,
+        })
+      : {
+          ok: false as const,
+          reason: "final_requote_invalid" as const,
+          quote: null,
+          selectedSide: null,
+          winningAsk: null,
+        };
     const rawYesAsk = finalRequoteResult.ok
       ? finalRequoteResult.orderbook?.yesAsk ?? null
       : null;
     const rawNoAsk = finalRequoteResult.ok && finalRequoteResult.orderbook?.yesBid != null
       ? 1 - finalRequoteResult.orderbook.yesBid
       : null;
+    quoteAttempts.push({
+      attempt: quoteAttempts.length + 1,
+      fetchedAt: new Date(runtime.nowMs()).toISOString(),
+      fetchOk: finalRequoteResult.ok,
+      yesAsk: finalRequalification.quote?.yesAsk ?? rawYesAsk,
+      noAsk: finalRequalification.quote?.noAsk ?? rawNoAsk,
+      reason: finalRequalification.ok ? null : finalRequalification.reason,
+    });
+    if (finalRequalification.ok) {
+      break;
+    }
+
+    const secondsRemaining = (Date.parse(closeTime) - runtime.nowMs()) / 1_000;
+    const retryDecision = decideAuthenticatedQuoteRetry({
+      quoteReason: finalRequalification.reason,
+      retryCount: quoteRetryCount,
+      secondsRemaining,
+      sameWindow: runtime.currentWindowKey() === windowKey,
+    });
+    if (!retryDecision.retry) {
+      if (
+        retryDecision.reason === "deadline_before_quote_retry"
+        || retryDecision.reason === "window_expired_before_quote_retry"
+      ) {
+        terminalQuoteReason = retryDecision.reason;
+      } else if (
+        finalRequalification.reason === "final_requote_outside_band"
+        && finalRequalification.quote
+      ) {
+        const directAsk = initialSide === "yes"
+          ? finalRequalification.quote.yesAsk
+          : finalRequalification.quote.noAsk;
+        terminalQuoteReason = directAsk > snapshot.bandMax
+          ? "final_quote_above_cap"
+          : directAsk < snapshot.bandMin
+            ? "final_quote_below_floor"
+            : finalRequalification.reason;
+      } else {
+        terminalQuoteReason = finalRequalification.reason;
+      }
+      break;
+    }
+    quoteRetryCount += 1;
+  }
+  const finalRequoteMs = runtime.nowMs() - finalRequoteStartedAtMs;
+  if (latency) latency.finalRequoteMs = finalRequoteMs;
+  if (!finalRequalification.ok) {
+    const lastQuoteAttempt = quoteAttempts[quoteAttempts.length - 1] ?? null;
     await runtime.updateReservationStatus(
       mode,
       symbol,
       windowKey,
       "skipped",
-      finalRequalification.reason,
+      terminalQuoteReason,
       true,
       {
         ..._timingEvidence(),
         quoteFetchOk: finalRequoteResult.ok,
-        quotedReason: finalRequalification.reason,
-        quoteYesAsk: finalRequalification.quote?.yesAsk ?? rawYesAsk,
-        quoteNoAsk: finalRequalification.quote?.noAsk ?? rawNoAsk,
+        quotedReason: terminalQuoteReason,
+        quoteYesAsk: lastQuoteAttempt?.yesAsk ?? null,
+        quoteNoAsk: lastQuoteAttempt?.noAsk ?? null,
         winningAsk: finalRequalification.winningAsk,
         selectedSide: finalRequalification.selectedSide,
         bandMin: snapshot.bandMin,
         bandMax: snapshot.bandMax,
         quoteRefreshMs: finalRequoteMs,
+        quoteAttempts,
+        quoteRetryCount,
       },
     );
     runtime.recordFunnelEvent?.(mode, windowKey, symbol, "final_quote_loss");
     _rememberReservationOutcome(
       attemptKey,
       "skipped",
-      finalRequalification.reason,
+      terminalQuoteReason,
       priorSubmittedOrders,
       runtime.nowMs(),
     );
@@ -2907,6 +3050,71 @@ async function _executeScalpAttempt(
   }
   effectiveSide = finalRequalification.side;
   winningAsk = finalRequalification.winningAsk;
+  const acceptedFinalQuoteEvidence = {
+    quoteYesAsk: finalRequalification.quote.yesAsk,
+    quoteNoAsk: finalRequalification.quote.noAsk,
+    winningAsk,
+    selectedSide: effectiveSide,
+    bandMin: snapshot.bandMin,
+    bandMax: snapshot.bandMax,
+    quoteAttempts,
+    quoteRetryCount,
+  } satisfies ScalpSkipEvidence;
+
+  // A successful retry has added awaited time after the original guard sample.
+  // Pair each retry with the reserved authoritative underlying lane, then rerun
+  // both target proximity and Freefall before any intent can be written.
+  if (quoteRetryCount > 0 && priceGuardSampleRequested) {
+    if (!finalRequoteFreshSampleSucceeded) {
+      const reason = "stale_underlying_after_quote_retry";
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", reason, true, {
+        ..._timingEvidence(),
+        ...acceptedFinalQuoteEvidence,
+        quotedReason: reason,
+        targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
+      });
+      _rememberReservationOutcome(attemptKey, "skipped", reason, priorSubmittedOrders, runtime.nowMs());
+      return;
+    }
+
+    const postRetryProximity = evaluatePinnedProximityAt(runtime.nowMs());
+    if (!postRetryProximity.allowed) {
+      const reason = postRetryProximity.reason ?? "target_proximity_blocked_after_quote_retry";
+      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", reason, true, {
+        ..._timingEvidence(),
+        ...acceptedFinalQuoteEvidence,
+        quotedReason: reason,
+        distancePct: postRetryProximity.result?.distancePct ?? null,
+        minimumPct: snapshot.targetProximityThresholdPct,
+        targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
+        underlyingPrice: postRetryProximity.latestSample?.price ?? null,
+      });
+      _rememberReservationOutcome(attemptKey, "skipped", reason, priorSubmittedOrders, runtime.nowMs());
+      return;
+    }
+
+    if (snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled) {
+      const postRetryFreefallAtMs = runtime.nowMs();
+      const postRetryFreefall = evaluatePinnedFreefallAt(postRetryFreefallAtMs);
+      finalFreefallResult = postRetryFreefall.guardResult;
+      guardEvaluatedAtMs = postRetryFreefallAtMs;
+      if (!postRetryFreefall.allowed) {
+        const reason = postRetryFreefall.reason ?? "freefall_blocked_after_quote_retry";
+        await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", reason, true, {
+          ..._timingEvidence(),
+          ...acceptedFinalQuoteEvidence,
+          quotedReason: reason,
+          adverseMovePct: postRetryFreefall.guardResult?.adverseMovePct ?? null,
+          targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
+          underlyingPrice: postRetryFreefall.guardResult?.latestPrice ?? null,
+          samplesUsed: postRetryFreefall.guardResult?.samplesUsed ?? null,
+          sampleCoverageMs: postRetryFreefall.sampleCoverageMs,
+        });
+        _rememberReservationOutcome(attemptKey, "skipped", reason, priorSubmittedOrders, runtime.nowMs());
+        return;
+      }
+    }
+  }
 
   // ── AUTHORITATIVE FINAL VALIDATION (post-await) ───────────────────────────
   // Every awaited pre-submit step (authenticated quote requalification,
@@ -2922,6 +3130,7 @@ async function _executeScalpAttempt(
     );
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", finalReason1, true, {
       ..._timingEvidence(),
+      ...acceptedFinalQuoteEvidence,
       elapsedMs: runtime.nowMs() - attemptStartMs,
     });
     return;
@@ -2943,6 +3152,7 @@ async function _executeScalpAttempt(
       true,
       {
         ..._timingEvidence(),
+        ...acceptedFinalQuoteEvidence,
         selectedSide: effectiveSide,
         regularPositionId: regularLayerCompatibility.position.id,
         regularPositionSide: regularLayerCompatibility.position.direction,
@@ -3207,6 +3417,7 @@ async function _executeScalpAttempt(
       );
       await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", finalReasonPaper, true, {
         ..._timingEvidence(),
+        ...acceptedFinalQuoteEvidence,
         elapsedMs: runtime.nowMs() - attemptStartMs,
       });
       return;
@@ -3228,10 +3439,33 @@ async function _executeScalpAttempt(
         true,
         {
           ..._timingEvidence(),
+          ...acceptedFinalQuoteEvidence,
           selectedSide: effectiveSide,
           regularPositionId: finalLayerPaper.position.id,
           regularPositionSide: finalLayerPaper.position.direction,
           layerDecision: "opposite_side_block",
+          elapsedMs: runtime.nowMs() - attemptStartMs,
+        },
+      );
+      return;
+    }
+    const finalProximityPaper = evaluatePinnedProximityAt(runtime.nowMs());
+    if (!finalProximityPaper.allowed) {
+      const reason = finalProximityPaper.reason ?? "target_proximity_blocked_final";
+      await runtime.updateReservationStatus(
+        mode,
+        symbol,
+        windowKey,
+        "skipped",
+        reason,
+        true,
+        {
+          ..._timingEvidence(),
+          ...acceptedFinalQuoteEvidence,
+          distancePct: finalProximityPaper.result?.distancePct ?? null,
+          minimumPct: snapshot.targetProximityThresholdPct,
+          targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
+          underlyingPrice: finalProximityPaper.latestSample?.price ?? null,
           elapsedMs: runtime.nowMs() - attemptStartMs,
         },
       );
@@ -3260,6 +3494,7 @@ async function _executeScalpAttempt(
         true,
         {
           ..._timingEvidence(),
+          ...acceptedFinalQuoteEvidence,
           directionalMovePct:
             finalFreefallPaper.guardResult?.directionalMovePct ?? null,
           wrongWayResetCount:
@@ -3368,6 +3603,7 @@ async function _executeScalpAttempt(
       effectiveSide,
     );
     const finalFreefallLiveAtMs = runtime.nowMs();
+    const finalProximityLive = evaluatePinnedProximityAt(finalFreefallLiveAtMs);
     const finalFreefallLive =
       snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled
         ? evaluatePinnedFreefallAt(finalFreefallLiveAtMs)
@@ -3381,6 +3617,9 @@ async function _executeScalpAttempt(
     }
     const finalAbortReason = finalReasonLive
       ?? (finalLayerLive.status === "opposite_side" ? "opposite_regular_position" : null)
+      ?? (!finalProximityLive.allowed
+        ? finalProximityLive.reason ?? "target_proximity_blocked_final"
+        : null)
       ?? (
         finalFreefallLive && !finalFreefallLive.allowed
           ? finalFreefallLive.reason ?? "freefall_blocked_final"
@@ -3394,6 +3633,7 @@ async function _executeScalpAttempt(
       const guardOutcomeStudy =
         finalReasonLive === null
         && finalLayerLive.status !== "opposite_side"
+        && finalProximityLive.allowed
         && finalFreefallLive
         && !finalFreefallLive.allowed
           ? _buildGuardOutcomeStudy(
@@ -3411,12 +3651,7 @@ async function _executeScalpAttempt(
         entryGuardEvidence: orderRecord.entryGuardEvidence,
         skipEvidence: {
           ..._timingEvidence(),
-          selectedSide: effectiveSide,
-          winningAsk,
-          quoteYesAsk: quote2.yesAsk,
-          quoteNoAsk: quote2.noAsk,
-          bandMin: snapshot.bandMin,
-          bandMax: snapshot.bandMax,
+          ...acceptedFinalQuoteEvidence,
           regularPositionId: finalLayerLive.status === "opposite_side"
             ? finalLayerLive.position.id
             : null,
@@ -3464,13 +3699,17 @@ async function _executeScalpAttempt(
             finalFreefallLive?.guardResult?.projectedPrice ?? null,
           secondsRemaining:
             finalFreefallLive?.guardResult?.secondsRemaining ?? null,
-          distancePct: finalProximityResult?.distancePct ?? null,
+          distancePct:
+            finalProximityLive.result?.distancePct
+            ?? finalProximityResult?.distancePct
+            ?? null,
           minimumPct: snapshot.targetProximityGuardEnabled
             ? snapshot.targetProximityThresholdPct
             : null,
           targetPrice: Number.isFinite(targetPriceNum)
             ? targetPriceNum
             : null,
+          underlyingPrice: finalProximityLive.latestSample?.price ?? null,
           targetSideWindowConfirmed:
             finalFreefallLive?.guardResult?.targetSideWindowConfirmed ?? null,
           targetSideViolationPrice:
@@ -3790,9 +4029,13 @@ export interface ControlledFreefallServiceExerciseResult {
   submittedEntryEvidence: ScalpEntryGuardEvidence | null;
   submittedEntryEvidences: ScalpEntryGuardEvidence[];
   abortedBeforeSubmitReasons: string[];
+  abortedBeforeSubmitEvidences: ScalpSkipEvidence[];
   intentWrites: number;
   brokerSubmissions: number;
   paperSubmissions: number;
+  quoteFetches: number;
+  submittedLimitPrices: number[];
+  submittedCounts: number[];
 }
 
 export interface ControlledFreefallServiceExerciseOptions {
@@ -3805,6 +4048,25 @@ export interface ControlledFreefallServiceExerciseOptions {
   runSecondSubmission?: boolean;
   /** Controlled clock advance while the durable live intent is being written. */
   intentWriteAdvanceMs?: number;
+  /** Test-only authenticated orderbooks consumed in fetch order. */
+  authenticatedQuoteSequence?: Array<{
+    yesAsk: number | null;
+    yesBid: number | null;
+  }>;
+  /** Controlled clock advance applied after every authenticated quote response. */
+  quoteFetchAdvanceMs?: number;
+  /** Start closer to expiry for deadline-boundary exercises. */
+  startSecondsRemaining?: number;
+  /** Run only the clear-path attempt rather than the full Freefall scenario. */
+  onlyRecoveredStep?: boolean;
+  /** Simulate a window rollover after this many quote fetches. */
+  windowChangesAfterQuoteFetchCount?: number;
+  /** Test-only underlying values consumed by authoritative sample fetches. */
+  underlyingPriceSequence?: number[];
+  /** Test-only success/failure sequence for authoritative sample fetches. */
+  underlyingSampleSuccessSequence?: boolean[];
+  /** Simulate an underlying move while the durable intent is being written. */
+  intentWriteUnderlyingPrice?: number;
 }
 
 export interface ControlledSampleSchedulerExerciseResult {
@@ -4182,6 +4444,9 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
     executionPolicy: {
       scanIntervalMs: SCALP_SCAN_INTERVAL_MS,
       authenticatedRetryCooldownMs: SCALP_AUTH_RETRY_COOLDOWN_MS,
+      maxAuthenticatedQuoteRetries: SCALP_MAX_AUTHENTICATED_QUOTE_RETRIES,
+      authenticatedQuoteRetryMinRemainingMs:
+        SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS,
       maxSubmissionsPerWindow: SCALP_MAX_SUBMISSIONS_PER_WINDOW,
       maxConcurrentCandidates: SCALP_MAX_CONCURRENT_CANDIDATES,
       maxConcurrentBackgroundSamples: SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES,
@@ -4868,15 +5133,21 @@ Promise<ControlledFreefallServiceExerciseResult> {
   const originalSamples = _priceSamples.get(symbol);
   const originalNextAttemptAt = _nextAttemptAt.get(attemptKey);
   const wasTerminal = _terminalAttemptKeys.has(attemptKey);
-  let nowMs = windowOpenMs + 14 * 60_000 + 20_000;
+  let nowMs = windowOpenMs + 15 * 60_000
+    - (options.startSecondsRemaining ?? 40) * 1_000;
   let freshSampleSucceeded = true;
   let currentSamples: FreefallSample[] = [];
   let intentWrites = 0;
   let brokerSubmissions = 0;
   let paperSubmissions = 0;
+  let quoteFetches = 0;
+  let underlyingSampleFetches = 0;
+  const submittedLimitPrices: number[] = [];
+  const submittedCounts: number[] = [];
   let submittedEntryEvidence: ScalpEntryGuardEvidence | null = null;
   const submittedEntryEvidences: ScalpEntryGuardEvidence[] = [];
   const abortedBeforeSubmitReasons: string[] = [];
+  const abortedBeforeSubmitEvidences: ScalpSkipEvidence[] = [];
   const skippedAttempts: ControlledFreefallServiceExerciseResult["skippedAttempts"] = [];
   const steps: ControlledFreefallServiceExerciseResult["steps"] = [];
 
@@ -4887,6 +5158,14 @@ Promise<ControlledFreefallServiceExerciseResult> {
       price,
       at: oldestAt + index * 1_000,
     }));
+  };
+  const setLatestControlledPrice = (price: number): void => {
+    const samples = _priceSamples.get(symbol) ?? currentSamples;
+    const next = samples.length > 0
+      ? [...samples.slice(0, -1), { price, at: nowMs }]
+      : [{ price, at: nowMs }];
+    currentSamples = next;
+    _priceSamples.set(symbol, next);
   };
 
   _config = {
@@ -4932,15 +5211,38 @@ Promise<ControlledFreefallServiceExerciseResult> {
 
   const runtime: ScalpAttemptRuntime = {
     nowMs: () => nowMs,
-    currentWindowKey: () => windowKey,
+    currentWindowKey: () =>
+      options.windowChangesAfterQuoteFetchCount != null
+      && quoteFetches >= options.windowChangesAfterQuoteFetchCount
+        ? "2026-08-22T07:15"
+        : windowKey,
     fetchKalshiTarget: async () => 100,
-    fetchOrderbookPrices: async () => ({
-      yesAsk: side === "yes" ? 0.97 : 0.03,
-      yesBid: 0.02,
-      yesDepth: [[0.02, 100]],
-      noDepth: [[0.03, 100]],
-    }),
-    collectPriceSample: async () => freshSampleSucceeded,
+    fetchOrderbookPrices: async () => {
+      const sequence = options.authenticatedQuoteSequence;
+      const configured = sequence != null && sequence.length > 0
+        ? sequence[quoteFetches] ?? sequence[sequence.length - 1]
+        : undefined;
+      quoteFetches += 1;
+      nowMs += options.quoteFetchAdvanceMs ?? 0;
+      return {
+        yesAsk: configured ? configured.yesAsk : side === "yes" ? 0.97 : 0.03,
+        yesBid: configured ? configured.yesBid : 0.02,
+        yesDepth: [[0.02, 100]],
+        noDepth: [[0.03, 100]],
+      };
+    },
+    collectPriceSample: async () => {
+      const fetchIndex = underlyingSampleFetches;
+      underlyingSampleFetches += 1;
+      const succeeded =
+        options.underlyingSampleSuccessSequence?.[fetchIndex]
+        ?? freshSampleSucceeded;
+      const controlledPrice = options.underlyingPriceSequence?.[fetchIndex];
+      if (succeeded && controlledPrice != null) {
+        setLatestControlledPrice(controlledPrice);
+      }
+      return succeeded;
+    },
     getBalance: async () => ({ availableBalance: 100, totalBalance: 100 }),
     getKalshiCachedData: () => ({
       value: 100,
@@ -4965,6 +5267,9 @@ Promise<ControlledFreefallServiceExerciseResult> {
         submittedEntryEvidences.push(order.entryGuardEvidence);
       }
       nowMs += options.intentWriteAdvanceMs ?? 0;
+      if (options.intentWriteUnderlyingPrice != null) {
+        setLatestControlledPrice(options.intentWriteUnderlyingPrice);
+      }
     },
     finalizePaperOrderAndReleaseReservation: async (order) => {
       paperSubmissions += 1;
@@ -4975,9 +5280,14 @@ Promise<ControlledFreefallServiceExerciseResult> {
     },
     abortIntentAndReleaseReservation: async (args) => {
       abortedBeforeSubmitReasons.push(args.reason);
+      if (args.skipEvidence != null) {
+        abortedBeforeSubmitEvidences.push(args.skipEvidence);
+      }
     },
-    placeScalpOrderStrict: async () => {
+    placeScalpOrderStrict: async (order) => {
       brokerSubmissions += 1;
+      submittedLimitPrices.push(order.limitPrice);
+      submittedCounts.push(order.count);
       return {
         outcome: "zero_fill",
         reason: "controlled_zero_fill",
@@ -4997,7 +5307,11 @@ Promise<ControlledFreefallServiceExerciseResult> {
         }
       }
     },
-    finalRiskValidationSync: () => null,
+    finalRiskValidationSync: () =>
+      options.windowChangesAfterQuoteFetchCount != null
+      && quoteFetches >= options.windowChangesAfterQuoteFetchCount
+        ? "window_expired_before_submit"
+        : null,
     regularPositionCompatibilitySync: () => ({ status: "none", position: null }),
   };
 
@@ -5072,23 +5386,25 @@ Promise<ControlledFreefallServiceExerciseResult> {
       ? [106, 107, 108, 109, 110]
       : [94, 93, 92, 91, 90];
 
-    await runStep("adverse", coveredSamples(adversePrices), true);
-    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
-    await runStep("adverse_cooldown", coveredSamples(favorablePrices), true);
+    if (!options.onlyRecoveredStep) {
+      await runStep("adverse", coveredSamples(adversePrices), true);
+      nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
+      await runStep("adverse_cooldown", coveredSamples(favorablePrices), true);
 
-    nowMs += 1;
-    await runStep("fetch_failed", coveredSamples(favorablePrices), false);
-    nowMs += 250;
-    await runStep("fetch_cooldown", coveredSamples(favorablePrices), true);
+      nowMs += 1;
+      await runStep("fetch_failed", coveredSamples(favorablePrices), false);
+      nowMs += 250;
+      await runStep("fetch_cooldown", coveredSamples(favorablePrices), true);
 
-    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 250;
-    await runStep("stale", coveredSamples(favorablePrices, 6_000), true);
-    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
-    await runStep("stale_cooldown", coveredSamples(favorablePrices), true);
+      nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 250;
+      await runStep("stale", coveredSamples(favorablePrices, 6_000), true);
+      nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS - 1;
+      await runStep("stale_cooldown", coveredSamples(favorablePrices), true);
 
-    nowMs += 1;
-    await runStep("target_crossing", coveredSamples(targetCrossingPrices), true);
-    nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS;
+      nowMs += 1;
+      await runStep("target_crossing", coveredSamples(targetCrossingPrices), true);
+      nowMs += SCALP_GUARD_RETRY_COOLDOWN_MS;
+    }
     await runStep("recovered", coveredSamples(favorablePrices), true);
     if (options.runSecondSubmission) {
       nowMs += SCALP_AUTH_RETRY_COOLDOWN_MS;
@@ -5101,9 +5417,13 @@ Promise<ControlledFreefallServiceExerciseResult> {
       submittedEntryEvidence,
       submittedEntryEvidences,
       abortedBeforeSubmitReasons,
+      abortedBeforeSubmitEvidences,
       intentWrites,
       brokerSubmissions,
       paperSubmissions,
+      quoteFetches,
+      submittedLimitPrices,
+      submittedCounts,
     };
   } finally {
     _config = originalConfig;

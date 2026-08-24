@@ -591,6 +591,17 @@ export interface ScalpSkipEvidence {
   refreshedTicker?: string | null;
   /** Close time returned by the final identity refresh. */
   refreshedCloseTimeIso?: string | null;
+  /** Every authenticated quote observed while qualifying this attempt. */
+  quoteAttempts?: Array<{
+    attempt: number;
+    fetchedAt: string;
+    fetchOk: boolean;
+    yesAsk: number | null;
+    noAsk: number | null;
+    reason: string | null;
+  }>;
+  /** Number of bounded in-attempt quote retries performed. */
+  quoteRetryCount?: number;
 
   // ── Latency / timing measurements ────────────────────────────────────────
   /** Elapsed ms from attempt start to skip decision (diagnostic only). */
