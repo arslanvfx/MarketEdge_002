@@ -2869,7 +2869,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
         <div className="min-w-0 flex flex-col">
           <div className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-indigo-400" />
-            <h2 className="font-bold text-lg text-indigo-100 tracking-tight">Contrarian Spike</h2>
+            <h2 className="font-bold text-lg text-indigo-100 tracking-tight">Contrarian Spike <span className="text-xs font-semibold text-indigo-400">Strict Reversal Profile</span></h2>
           </div>
           <span className="text-[10px] uppercase font-bold tracking-widest text-indigo-400 mt-0.5">Adverse Momentum Counter-Execution</span>
         </div>
@@ -2927,8 +2927,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
       <div className="px-3 sm:px-5 py-3 border-b border-indigo-500/20 bg-indigo-950/40 text-xs text-indigo-200/80 leading-relaxed flex items-start gap-3">
         <Target className="w-4 h-4 shrink-0 mt-0.5 text-indigo-400" />
         <div>
-          {report.disclaimer} This logic relies on existing Scalper final adverse/freefall guards projecting or recording a target crossing.
-          It does not use generic volatility. <strong className="text-indigo-300">{merged.mode === "live" ? "Real funds are at risk independently of normal scalper." : "Currently running in safe paper simulation."}</strong>
+          {report.disclaimer} Strict candidates require an authenticated opposite ask of 1–3¢ during the final 0–2 minutes, repeated target-specific adverse movement, and an actual or credibly reachable target crossing. Broad normal Scalper safety-guard blocks are not strict candidates. <strong className="text-indigo-300">{merged.mode === "live" ? "Real funds are at risk independently of normal scalper." : "Currently running in safe paper simulation."}</strong>
         </div>
       </div>
 
@@ -2999,12 +2998,12 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
             <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide">Ceiling: $10</span>
           </div>
           <div className="flex flex-col gap-1.5">
-            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Contract Cap</label>
+            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Strict Direct Ask Cap</label>
             <div className="relative">
-              <input type="number" step="1" max="10" min="1" value={Math.round(merged.maxDirectContractCost * 100)} onChange={e => handleConfigChange('maxDirectContractCost', Number(e.target.value) / 100)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-sm font-mono text-indigo-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all disabled:opacity-50" disabled={!canManage} />
+              <input type="number" step="1" max="3" min="1" value={Math.round(merged.maxDirectContractCost * 100)} onChange={e => handleConfigChange('maxDirectContractCost', Number(e.target.value) / 100)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-sm font-mono text-indigo-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all disabled:opacity-50" disabled={!canManage} />
               <span className="absolute right-2 top-1.5 text-slate-500 text-sm">¢</span>
             </div>
-            <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide text-right">Ceiling: 10¢</span>
+            <span className="text-[9px] text-indigo-400/60 font-medium tracking-wide text-right">Strict range: 1–3¢</span>
           </div>
           <div className="flex flex-col gap-1.5 h-[34px] sm:h-auto sm:mb-[18px]">
             {hasDraft && (
@@ -3139,7 +3138,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
 
       <div className="border-t border-indigo-500/20 bg-slate-900/30">
         <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-800">
-          Recent Observations
+          Strict Candidates &amp; Rejected Monitored Opportunities
         </div>
         {report.recentObservations.length > 0 ? (
           <div className="divide-y divide-slate-800 max-h-[200px] overflow-y-auto">
@@ -3154,7 +3153,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
                      ) : (
                        <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-bold tracking-widest uppercase">Rejected</span>
                      )}
-                     <span className="text-slate-400">{obs.reason || "Processed normally"}</span>
+                      <span className="text-slate-400">Strict reason: {obs.reason || "Processed normally"}</span>
                    </div>
                    <div className="text-slate-500 truncate">
                       Protected {obs.protectedSide} &rarr; Opposed {obs.oppositeSide}. Ask: {formatContrarianCents(obs.directAsk)} (Yes: {formatContrarianCents(obs.yesAsk)} / No: {formatContrarianCents(obs.noAsk)})
@@ -3171,7 +3170,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
           </div>
         ) : (
           <div className="px-4 py-6 text-center text-slate-500 text-xs">
-            No recent eligible or rejected observations. Awaiting final preflight logic to flag adverse targets.
+            No recent strict candidates or rejected monitored opportunities. Settled hypothetical and actual outcomes appear above in the outcome study and execution ledger.
           </div>
         )}
       </div>

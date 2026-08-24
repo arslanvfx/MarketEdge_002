@@ -1107,6 +1107,13 @@ export interface ScalperContrarianConfig {
   circuitBreakerEnabled: boolean;
   circuitBreaker: boolean;
   circuitBreakerReason: string | null;
+  strictEligibility: {
+    finalWindowSeconds: number;
+    minDirectAsk: number;
+    maxDirectAsk: number;
+    minRepeatedAdverseMoves: number;
+    requireTargetCrossingOrReachableProjection: true;
+  };
 }
 
 export interface ScalperContrarianSummaryMode {
@@ -1147,6 +1154,8 @@ export interface ScalperContrarianEvidence {
   finalGuard?: ScalperContrarianGuardEvidence | null;
   freshGuard?: ScalperContrarianGuardEvidence | null;
   guard?: ScalperContrarianGuardEvidence | null;
+  strictRejectionReason?: string | null;
+  monitoringPhase?: string | null;
 }
 
 export interface ScalperContrarianOrder {

@@ -113,6 +113,7 @@ let breakerReasonInMemory: string | null = null;
 let breakerGeneration = 0;
 let configTail: Promise<void> = Promise.resolve();
 const attemptsInFlight = new Set<string>();
+const recentObservationKeys = new Map<string, number>();
 const lastReconcileAt = new Map<string, number>();
 const lastSettlementAt = new Map<string, number>();
 const lastGuardOutcomeSettlementAt = new Map<string, number>();
@@ -290,6 +291,17 @@ async function persistObservation(input: {
   const oppositeSide: ContrarianSide =
     input.trigger.protectedSide === "yes" ? "no" : "yes";
   try {
+    // Monitoring runs frequently; retain one identical strict decision per
+    // symbol/window/reason per short interval while preserving state changes.
+    const dedupeKey = `${input.snapshot.config.mode}:${input.trigger.symbol.toUpperCase()}:${input.trigger.windowKey}:${input.eligible}:${input.reason}`;
+    const now = Date.now();
+    // Keep this process-local anti-spam map bounded even over long-running
+    // processes and many completed windows.
+    for (const [key, expiresAt] of recentObservationKeys) {
+      if (expiresAt + 60_000 <= now) recentObservationKeys.delete(key);
+    }
+    if ((recentObservationKeys.get(dedupeKey) ?? 0) + 30_000 > now) return null;
+    recentObservationKeys.set(dedupeKey, now);
     return await recordContrarianObservation({
       executionMode: input.snapshot.config.mode,
       sourceMode: input.trigger.sourceMode,
@@ -440,6 +452,7 @@ function validateFreshContext(
   const freshEligibility = evaluateContrarianGuardEligibility(
     context.decision,
     trigger.protectedSide,
+    config.strictEligibility,
   );
   if (!freshEligibility.eligible) {
     return { ok: false, reason: `fresh_guard_${freshEligibility.reason}` };
@@ -465,6 +478,7 @@ function validateFreshContext(
   const plan = planContrarianOrder({
     budgetDollars: config.budgetDollars,
     maxDirectContractCost: config.maxDirectContractCost,
+    minDirectContractCost: config.strictEligibility.minDirectAsk,
     directAsk,
     oppositeSide: expectedOpposite,
   });
@@ -520,18 +534,27 @@ function synchronousFinalReason(
 export async function triggerContrarianFromNormalGuard(
   trigger: ContrarianTriggerInput,
 ): Promise<void> {
-  const initialEligibility = evaluateContrarianGuardEligibility(
-    trigger.decision,
-    trigger.protectedSide,
-  );
-  if (!initialEligibility.eligible) return;
-
   const config = effectiveConfig();
   if (!config.enabled) return;
   const snapshot: ConfigSnapshot = {
     version: configRecord.version,
     config: { ...config },
   };
+  const initialEligibility = evaluateContrarianGuardEligibility(
+    trigger.decision,
+    trigger.protectedSide,
+    snapshot.config.strictEligibility,
+  );
+  if (!initialEligibility.eligible) {
+    await persistObservation({
+      trigger,
+      snapshot,
+      eligible: false,
+      reason: initialEligibility.reason,
+      evidence: { strictEligibility: initialEligibility.evidence ?? null, monitoringPhase: "strict_classifier" },
+    });
+    return;
+  }
   const key = `${config.mode}:${trigger.symbol.toUpperCase()}:${trigger.windowKey}`;
   if (attemptsInFlight.has(key)) return;
   attemptsInFlight.add(key);

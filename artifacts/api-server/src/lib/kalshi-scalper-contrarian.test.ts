@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   ContrarianExposureRegistry,
+  ContrarianMonitorAttemptScheduler,
   DEFAULT_CONTRARIAN_CONFIG,
   buildContrarianGuardOutcomeHypothesis,
   buildContrarianGuardOutcomeStudyPayload,
   computeContrarianFillSpend,
   computeContrarianPnl,
   evaluateContrarianGuardEligibility,
+  isPinnedContrarianIdentityCurrent,
   parseContrarianConfigPatch,
   planContrarianOrder,
   replayContrarianGuardOutcomeRows,
@@ -47,8 +49,12 @@ describe("contrarian spike experiment pure boundary", () => {
     assert.deepEqual(DEFAULT_CONTRARIAN_CONFIG, {
       enabled: false, mode: "paper", budgetDollars: 0.25, dailyCapDollars: 1,
       openCapDollars: 0.5, perWindowCapDollars: 0.25,
-      maxDirectContractCost: 0.05, circuitBreakerEnabled: true,
+      maxDirectContractCost: 0.03, circuitBreakerEnabled: true,
       circuitBreaker: false, circuitBreakerReason: null,
+      strictEligibility: {
+        finalWindowSeconds: 120, minDirectAsk: 0.01, maxDirectAsk: 0.03,
+        minRepeatedAdverseMoves: 4, requireTargetCrossingOrReachableProjection: true,
+      },
     });
   });
 
@@ -59,6 +65,51 @@ describe("contrarian spike experiment pure boundary", () => {
     assert.equal(evaluateContrarianGuardEligibility(decision({ projectedPrice: 100.01 }), "yes").eligible, false);
     assert.equal(evaluateContrarianGuardEligibility(decision({ directionalBlocked: false, rapidMoveBlocked: true }), "yes").eligible, false);
     assert.equal(evaluateContrarianGuardEligibility({ ...decision(), allowed: true }, "yes").eligible, false);
+  });
+
+  it("rejects strict-window, weak, stale, generic, and unreachable evidence", () => {
+    assert.equal(evaluateContrarianGuardEligibility(decision({ secondsRemaining: 121 }), "yes").reason, "outside_strict_final_window");
+    assert.equal(evaluateContrarianGuardEligibility(decision({ consecutiveWrongWayMoves: 3 }), "yes").reason, "insufficient_repeated_adverse_movement");
+    assert.equal(evaluateContrarianGuardEligibility(decision({ evaluable: false }), "yes").reason, "guard_unevaluable_or_stale");
+    assert.equal(evaluateContrarianGuardEligibility(decision({ reason: "rapid_move", directionalBlocked: false, rapidMoveBlocked: true }), "yes").reason, "generic_or_wrong_direction_guard_block");
+    assert.equal(evaluateContrarianGuardEligibility(decision({ projectedPrice: 99, adversePacePctPerSecond: null }), "yes").reason, "target_not_crossed_or_credibly_projected");
+  });
+
+  it("only plans authenticated opposite asks in the strict 1–3¢ band", () => {
+    assert.equal(planContrarianOrder({
+      budgetDollars: 0.25, maxDirectContractCost: 0.03, minDirectContractCost: 0.01,
+      directAsk: 0.04, oppositeSide: "no",
+    }).ok, false);
+    assert.equal(planContrarianOrder({
+      budgetDollars: 0.25, maxDirectContractCost: 0.03, minDirectContractCost: 0.01,
+      directAsk: 0.005, oppositeSide: "no",
+    }).ok, false);
+  });
+
+  it("fails closed when a forced or final cached target no longer matches the pinned identity", () => {
+    const pinned = {
+      pinnedTicker: "KXBTC", pinnedCloseTime: "2026-01-01T00:00:00.000Z",
+      pinnedTargetPrice: 100,
+    };
+    assert.equal(isPinnedContrarianIdentityCurrent({
+      ...pinned, ticker: "KXBTC", closeTime: pinned.pinnedCloseTime, targetPrice: 100,
+    }), true);
+    assert.equal(isPinnedContrarianIdentityCurrent({
+      ...pinned, ticker: "KXBTC", closeTime: pinned.pinnedCloseTime, targetPrice: 100.01,
+    }), false);
+    assert.equal(isPinnedContrarianIdentityCurrent({
+      ...pinned, ticker: "KXBTC-OTHER", closeTime: pinned.pinnedCloseTime, targetPrice: 100,
+    }), false);
+  });
+
+  it("bounds independent monitor attempts per mode, market, window, and side", () => {
+    const scheduler = new ContrarianMonitorAttemptScheduler(3_000);
+    assert.equal(scheduler.allow("paper", "btc", "w1", "yes", 1_000), true);
+    assert.equal(scheduler.allow("paper", "btc", "w1", "yes", 1_250), false);
+    assert.equal(scheduler.allow("paper", "btc", "w1", "no", 1_250), true);
+    assert.equal(scheduler.allow("paper", "btc", "w1", "yes", 4_000), true);
+    scheduler.clearExceptWindow("w2");
+    assert.equal(scheduler.allow("paper", "btc", "w1", "yes", 4_100), true);
   });
 
   it("permits only the exact existing coordinated projected-crossing reason", () => {
@@ -374,5 +425,17 @@ describe("contrarian spike durable ownership boundaries", () => {
       scalperServiceSource,
       /scheduleGuardOutcomeStudy|recordContrarianGuardOutcomeStudy/,
     );
+  });
+
+  it("runs the independent strict monitor before normal disabled and breaker exits", () => {
+    const scan = scalperServiceSource.slice(
+      scalperServiceSource.indexOf("async function _doScanTick"),
+      scalperServiceSource.indexOf("interface Candidate"),
+    );
+    const monitor = scan.indexOf("_monitorStrictContrarianMarkets(wk, Date.now())");
+    assert.ok(monitor >= 0);
+    assert.ok(monitor < scan.indexOf("if (!_config.enabled)"));
+    assert.ok(monitor < scan.indexOf("if (_isCircuitBreakerBlocking())"));
+    assert.match(scalperServiceSource, /new ContrarianMonitorAttemptScheduler/);
   });
 });

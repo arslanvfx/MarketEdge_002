@@ -109,7 +109,9 @@ import {
 } from "./kalshi-scalper-contrarian-service.ts";
 import {
   buildContrarianGuardOutcomeStudyPayload,
+  ContrarianMonitorAttemptScheduler,
   evaluateContrarianGuardEligibility,
+  isPinnedContrarianIdentityCurrent,
 } from "./kalshi-scalper-contrarian.ts";
 import {
   loadScalpConfigFromDB,
@@ -1444,6 +1446,7 @@ async function _executeScanPass(): Promise<void> {
 }
 
 const _scanRunner = createCoalescedAsyncRunner(_executeScanPass);
+const _contrarianMonitorAttempts = new ContrarianMonitorAttemptScheduler();
 
 async function _doScanTick(): Promise<void> {
   const wk = currentWindowKey();
@@ -1459,6 +1462,7 @@ async function _doScanTick(): Promise<void> {
     // A new market window owns a new real-time direction baseline. Preflight
     // samples from the previous market must never count toward eligibility.
     _priceSamples.clear();
+    _contrarianMonitorAttempts.clearExceptWindow(wk);
     _resetPreflightState();
   }
 
@@ -1473,6 +1477,10 @@ async function _doScanTick(): Promise<void> {
       }
     }
   }
+  // This lane intentionally precedes the normal enabled/breaker/candidate
+  // returns. It observes every supported final-two-minute market from existing
+  // cache/sample state and never mutates normal Scalper ownership.
+  _monitorStrictContrarianMarkets(wk, Date.now());
 
   if (!_config.enabled) {
     _scheduleShadowObservation(wk);
@@ -1515,6 +1523,83 @@ async function _doScanTick(): Promise<void> {
     await _evaluateCandidate(candidate, wk, mode);
   });
   _scheduleShadowObservation(wk);
+}
+
+function _monitorStrictContrarianMarkets(windowKey: string, nowMs: number): void {
+  for (const coin of CRYPTO_COINS) {
+    const symbol = coin.symbol.toUpperCase();
+    if (!KALSHI_SERIES[symbol]) continue;
+    const cached = getKalshiCachedData(symbol);
+    const closeTime = cached?.closeTime;
+    const ticker = cached?.ticker;
+    const targetPrice = cached?.value;
+    if (!closeTime || !ticker || targetPrice == null || !Number.isFinite(targetPrice)) continue;
+    if (!isInFinalWindow(closeTime, nowMs, 120, windowKey)) continue;
+    const makeDecision = (side: "yes" | "no", at: number, decisionTarget: number) => evaluateFreefallPreSubmitGuard({
+      // Contrarian owns this monitoring lane. Normal Scalper guard toggles and
+      // thresholds must not disable or reshape strict reversal detection.
+      directionEnabled: true,
+      hasProduct: true,
+      freshSampleSucceeded: true,
+      samples: _priceSamples.get(symbol) ?? [],
+      side,
+      nowMs: at,
+      eligibilityStartMs: Date.parse(closeTime) - 120_000,
+      consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: true,
+      coordinatedDirectionClearanceEnabled: false,
+      targetPrice: decisionTarget,
+      targetProximityGuardEnabled: false,
+      targetProximityThresholdPct: 0,
+      secondsRemaining: Math.max(0, (Date.parse(closeTime) - at) / 1_000),
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+    });
+    for (const protectedSide of ["yes", "no"] as const) {
+      if (!_contrarianMonitorAttempts.allow(_config.mode, symbol, windowKey, protectedSide, nowMs)) continue;
+      const pinnedTarget = targetPrice;
+      const decision = makeDecision(protectedSide, nowMs, pinnedTarget);
+      void triggerContrarianFromNormalGuard({
+        sourceMode: _config.mode, symbol, windowKey, ticker, closeTime, protectedSide, decision,
+        refreshAndRevalidate: async () => {
+          const [identity, book, sampled] = await Promise.all([
+            fetchKalshiTarget(symbol, new Date(closeTime), true).catch(() => null),
+            fetchOrderbookPrices(ticker).catch(() => null),
+            _collectPriceSample(symbol, coin.product, "background"),
+          ]);
+          const fresh = getKalshiCachedData(symbol);
+          const quote = book ? validateOrderbookQuote(book, ticker, closeTime) : null;
+          if (!identity || !isPinnedContrarianIdentityCurrent({
+            ticker: fresh?.ticker, closeTime: fresh?.closeTime, targetPrice: fresh?.value,
+            pinnedTicker: ticker, pinnedCloseTime: closeTime, pinnedTargetPrice: pinnedTarget,
+          }) || Math.abs(identity - pinnedTarget) > 1e-9 || !sampled || !quote) {
+            return { ok: false, reason: !quote ? "fresh_authenticated_quote_invalid" : "fresh_revalidation_failed", decision: null, yesAsk: null, noAsk: null, targetPrice: identity, closeTime: fresh?.closeTime ?? null, evidence: { monitoringPhase: "independent_strict_monitor", sampled } };
+          }
+          return { ok: true, reason: null, decision: makeDecision(protectedSide, Date.now(), identity), yesAsk: quote.yesAsk, noAsk: quote.noAsk, targetPrice: identity, closeTime, evidence: { monitoringPhase: "independent_strict_monitor" } };
+        },
+        finalValidationSync: () => {
+          const current = getKalshiCachedData(symbol);
+          if (currentWindowKey() !== windowKey || !isPinnedContrarianIdentityCurrent({
+            ticker: current?.ticker, closeTime: current?.closeTime, targetPrice: current?.value,
+            pinnedTicker: ticker, pinnedCloseTime: closeTime, pinnedTargetPrice: pinnedTarget,
+          }) || !isInFinalWindow(closeTime, Date.now(), 120, windowKey)) return "outside_strict_window_before_submit";
+          const strict = evaluateContrarianGuardEligibility(
+            makeDecision(protectedSide, Date.now(), pinnedTarget),
+            protectedSide,
+            {
+              finalWindowSeconds: 120,
+              minDirectAsk: 0.01,
+              maxDirectAsk: 0.03,
+              minRepeatedAdverseMoves: 4,
+              requireTargetCrossingOrReachableProjection: true,
+            },
+          );
+          return strict.eligible ? null : `final_strict_${strict.reason}`;
+        },
+      }).catch((error) => logger.warn({ error, symbol }, "[kalshi-scalper] strict contrarian monitor failed"));
+    }
+  }
 }
 
 interface Candidate {

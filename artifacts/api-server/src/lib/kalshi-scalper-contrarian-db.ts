@@ -201,10 +201,25 @@ export async function runContrarianMigrations(): Promise<void> {
 
 function mergeConfig(raw: Record<string, unknown>): ContrarianConfig {
   const positive = (key: keyof ContrarianConfig) => typeof raw[key] === "number" && Number.isFinite(raw[key]) && (raw[key] as number) > 0 ? raw[key] as number : DEFAULT_CONTRARIAN_CONFIG[key] as number;
+  // The strict profile narrowed the legacy direct-ask ceiling from 5¢ to 3¢.
+  // Migrate that persisted value at read time so an old safe config does not
+  // cause the isolated experiment to disable during startup.
+  const maxDirectContractCost = Math.min(
+    positive("maxDirectContractCost"),
+    DEFAULT_CONTRARIAN_CONFIG.strictEligibility.maxDirectAsk,
+  );
+  const rawStrict = json(raw.strictEligibility);
+  const strictEligibility = (
+    rawStrict.finalWindowSeconds === 120
+    && rawStrict.minDirectAsk === 0.01
+    && rawStrict.maxDirectAsk === 0.03
+    && rawStrict.minRepeatedAdverseMoves === 4
+    && rawStrict.requireTargetCrossingOrReachableProjection === true
+  ) ? { ...DEFAULT_CONTRARIAN_CONFIG.strictEligibility } : { ...DEFAULT_CONTRARIAN_CONFIG.strictEligibility };
   return { enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONTRARIAN_CONFIG.enabled, mode: raw.mode === "live" || raw.mode === "paper" ? raw.mode : DEFAULT_CONTRARIAN_CONFIG.mode,
-    budgetDollars: positive("budgetDollars"), dailyCapDollars: positive("dailyCapDollars"), openCapDollars: positive("openCapDollars"), perWindowCapDollars: positive("perWindowCapDollars"), maxDirectContractCost: positive("maxDirectContractCost"),
+    budgetDollars: positive("budgetDollars"), dailyCapDollars: positive("dailyCapDollars"), openCapDollars: positive("openCapDollars"), perWindowCapDollars: positive("perWindowCapDollars"), maxDirectContractCost,
     circuitBreakerEnabled: typeof raw.circuitBreakerEnabled === "boolean" ? raw.circuitBreakerEnabled : DEFAULT_CONTRARIAN_CONFIG.circuitBreakerEnabled, circuitBreaker: typeof raw.circuitBreaker === "boolean" ? raw.circuitBreaker : DEFAULT_CONTRARIAN_CONFIG.circuitBreaker,
-    circuitBreakerReason: typeof raw.circuitBreakerReason === "string" ? raw.circuitBreakerReason : null };
+    circuitBreakerReason: typeof raw.circuitBreakerReason === "string" ? raw.circuitBreakerReason : null, strictEligibility };
 }
 export async function loadContrarianConfigRecord(): Promise<ContrarianConfigRecord> {
   const result = await pool.query(`INSERT INTO kalshi_scalp_contrarian_config(id,config) VALUES('singleton',$1) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id RETURNING config,updated_at,version`, [JSON.stringify(DEFAULT_CONTRARIAN_CONFIG)]);
