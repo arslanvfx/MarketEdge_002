@@ -18,6 +18,7 @@ import type {
   ScalpConfig,
   ScalpMode,
   ScalpShadowActualSummary,
+  ScalpShadowComparisonCoverage,
   ScalpShadowStudyReport,
   ScalpShadowStudyRecord,
   ScalpShadowVariantSummary,
@@ -268,6 +269,75 @@ export function resolveScalpShadowStudyScope(input: {
   };
 }
 
+function normalizedVariantSeconds(values: readonly number[]): number[] {
+  return [
+    ...new Set(
+      values.filter(
+        (value) => Number.isFinite(value) && value >= 1 && value <= 900,
+      ),
+    ),
+  ].sort((a, b) => a - b);
+}
+
+export function resolveScalpShadowVariantSeconds(input: {
+  configuredWindowSeconds: number;
+  overrideWindowSeconds: readonly (number | null | undefined)[];
+}): number[] {
+  return normalizedVariantSeconds([
+    ...SCALP_SHADOW_VARIANT_SECONDS,
+    input.configuredWindowSeconds,
+    ...input.overrideWindowSeconds.filter(
+      (value): value is number => value != null,
+    ),
+  ]);
+}
+
+export function selectScalpShadowComparisonCohort(
+  rows: readonly ScalpShadowStudyRecord[],
+  variantSeconds: readonly number[],
+): {
+  rows: ScalpShadowStudyRecord[];
+  coverage: ScalpShadowComparisonCoverage;
+} {
+  const requiredVariants = normalizedVariantSeconds(variantSeconds);
+  const required = new Set(requiredVariants);
+  const variantsByOpportunity = new Map<string, Set<number>>();
+  const relevantRows = rows.filter((row) => required.has(row.variantSeconds));
+
+  for (const row of relevantRows) {
+    const key = `${row.mode}:${row.symbol.toUpperCase()}:${row.windowKey}`;
+    const observed = variantsByOpportunity.get(key) ?? new Set<number>();
+    observed.add(row.variantSeconds);
+    variantsByOpportunity.set(key, observed);
+  }
+
+  const completeKeys = new Set(
+    [...variantsByOpportunity.entries()]
+      .filter(([, observed]) => observed.size === requiredVariants.length)
+      .map(([key]) => key),
+  );
+  const matchedRows = relevantRows.filter((row) =>
+    completeKeys.has(
+      `${row.mode}:${row.symbol.toUpperCase()}:${row.windowKey}`,
+    )
+  );
+  const coverageDates = matchedRows
+    .map((row) => Date.parse(row.createdAt))
+    .filter(Number.isFinite);
+
+  return {
+    rows: matchedRows,
+    coverage: {
+      sharedOpportunities: completeKeys.size,
+      excludedIncompleteOpportunities:
+        variantsByOpportunity.size - completeKeys.size,
+      coverageStart: coverageDates.length > 0
+        ? new Date(Math.min(...coverageDates)).toISOString()
+        : null,
+    },
+  };
+}
+
 export function summarizeScalpShadowStudyRows(
   rows: readonly ScalpShadowStudyRecord[],
   variantSeconds: readonly number[],
@@ -342,14 +412,14 @@ export function buildScalpShadowStudyReport(
     scopeEnd?: string;
     actualComparison?: ScalpShadowActualSummary;
     actualOutsideShadowCoverage?: ScalpShadowActualSummary | null;
+    comparisonCoverage?: ScalpShadowComparisonCoverage;
   },
 ): ScalpShadowStudyReport {
   const configuredWindowSeconds = options?.configuredWindowSeconds ?? 120;
   const effectiveWindowSecondsBySymbol =
     options?.effectiveWindowSecondsBySymbol ?? {};
-  const variantSeconds = [
-    ...new Set(
-      options?.variantSeconds ?? [
+  const variantSeconds = normalizedVariantSeconds(
+    options?.variantSeconds ?? [
         ...SCALP_SHADOW_VARIANT_SECONDS,
         configuredWindowSeconds,
         ...Object.values(effectiveWindowSecondsBySymbol),
@@ -357,11 +427,15 @@ export function buildScalpShadowStudyReport(
           (summary) => summary.variantSeconds,
         ),
       ],
-    ),
-  ]
-    .filter((value) => Number.isFinite(value) && value >= 1 && value <= 900)
-    .sort((a, b) => a - b);
-  const computedSummaries = summarizeScalpShadowStudyRows(rows, variantSeconds);
+  );
+  const comparisonCohort = selectScalpShadowComparisonCohort(
+    rows,
+    variantSeconds,
+  );
+  const computedSummaries = summarizeScalpShadowStudyRows(
+    comparisonCohort.rows,
+    variantSeconds,
+  );
   const suppliedSummaries = new Map(
     (options?.variantSummaries ?? []).map(
       (summary) => [summary.variantSeconds, summary],
@@ -398,10 +472,12 @@ export function buildScalpShadowStudyReport(
       ?? emptyActualSummary(scopeStart, scopeEnd),
     actualOutsideShadowCoverage:
       options?.actualOutsideShadowCoverage ?? null,
+    comparisonCoverage:
+      options?.comparisonCoverage ?? comparisonCohort.coverage,
     variants,
-    recent: (options?.recentRows ?? rows).slice(0, 48),
+    recent: (options?.recentRows ?? comparisonCohort.rows).slice(0, 48),
     disclaimer:
-      "Counterfactual cached quotes only. Shadow timing cards and actual Scalper totals share the displayed time scope, but they are different bets. Passing the study does not prove an IOC order would have filled, and shadow rows never affect live execution or performance totals.",
+      "Counterfactual cached quotes only. Every timing card uses the same coin/window cohort, although timing-specific safety-guard horizons can still produce different qualification patterns. Shadow cards and actual Scalper totals share the displayed time scope, but they are different bets. Passing the study does not prove an IOC order would have filled, and shadow rows never affect live execution or performance totals.",
   };
 }
 

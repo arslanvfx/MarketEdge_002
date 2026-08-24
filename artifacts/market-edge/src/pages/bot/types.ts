@@ -1012,6 +1012,12 @@ export interface ScalperShadowActualSummary {
   totalSpent: number;
 }
 
+export interface ScalperShadowComparisonCoverage {
+  sharedOpportunities: number;
+  excludedIncompleteOpportunities: number;
+  coverageStart: string | null;
+}
+
 export interface ScalperShadowStudyReport {
   mode: "paper" | "live";
   configuredWindowSeconds: number;
@@ -1022,6 +1028,7 @@ export interface ScalperShadowStudyReport {
   scopeEnd?: string;
   actualComparison?: ScalperShadowActualSummary;
   actualOutsideShadowCoverage?: ScalperShadowActualSummary | null;
+  comparisonCoverage?: ScalperShadowComparisonCoverage;
   variants: ScalperShadowVariantSummary[];
   recent: ScalperShadowStudyRecord[];
   disclaimer: string;

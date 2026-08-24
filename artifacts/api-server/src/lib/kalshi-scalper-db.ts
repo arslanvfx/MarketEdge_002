@@ -19,6 +19,7 @@ import {
   type ScalpSkipEvidence,
   type ScalpFunnelEventStage,
   type ScalpShadowStudyRecord,
+  type ScalpShadowComparisonCoverage,
   type ScalpShadowVariantSummary,
   type ScalpShadowVariantSeconds,
   type ScalpPerMarketOverride,
@@ -1491,16 +1492,60 @@ export async function getScalpShadowStudyStartedAt(
   }
 }
 
-/** Full-period SQL aggregate. Recent-row limits must never affect these totals. */
+/** Full-period matched-cohort aggregate. Recent-row limits never affect totals. */
 export async function getScalpShadowStudyVariantSummaries(
   mode: ScalpMode,
   trackingSince: Date,
   trackingUntil: Date,
-): Promise<ScalpShadowVariantSummary[]> {
+  variantSeconds: readonly number[],
+): Promise<{
+  variants: ScalpShadowVariantSummary[];
+  coverage: ScalpShadowComparisonCoverage;
+}> {
   const client = await pool.connect();
   try {
+    const requiredVariants = [...new Set(variantSeconds)];
+    if (requiredVariants.length === 0) {
+      return {
+        variants: [],
+        coverage: {
+          sharedOpportunities: 0,
+          excludedIncompleteOpportunities: 0,
+          coverageStart: null,
+        },
+      };
+    }
     const result = await client.query(
-      `SELECT variant_seconds,
+      `WITH required_variants AS (
+         SELECT DISTINCT variant_seconds
+           FROM UNNEST($4::DOUBLE PRECISION[]) AS required(variant_seconds)
+       ),
+       candidate_rows AS (
+         SELECT shadow.*
+           FROM kalshi_scalp_shadow_entries shadow
+           JOIN required_variants required USING (variant_seconds)
+          WHERE shadow.mode = $1
+            AND shadow.created_at >= $2
+            AND shadow.created_at <= $3
+       ),
+       opportunity_coverage AS (
+         SELECT mode, symbol, window_key,
+                COUNT(DISTINCT variant_seconds)::INTEGER AS observed_variants
+           FROM candidate_rows
+          GROUP BY mode, symbol, window_key
+       ),
+       complete_cohort AS (
+         SELECT mode, symbol, window_key
+           FROM opportunity_coverage
+          WHERE observed_variants = (SELECT COUNT(*) FROM required_variants)
+       ),
+       matched_rows AS (
+         SELECT candidate.*
+           FROM candidate_rows candidate
+           JOIN complete_cohort cohort USING (mode, symbol, window_key)
+       ),
+       variant_summaries AS (
+         SELECT variant_seconds,
               COUNT(*)::INTEGER AS observed,
               COUNT(*) FILTER (
                 WHERE first_safe_entry_at IS NOT NULL
@@ -1528,15 +1573,41 @@ export async function getScalpShadowStudyVariantSummaries(
                 WHERE first_safe_entry_at IS NOT NULL
                   AND settlement_result IS NOT NULL
               ), 0) AS hypothetical_pnl
-         FROM kalshi_scalp_shadow_entries
-        WHERE mode = $1
-          AND created_at >= $2
-          AND created_at <= $3
+         FROM matched_rows
         GROUP BY variant_seconds
-        ORDER BY variant_seconds`,
-      [mode, trackingSince, trackingUntil],
+       ),
+       coverage AS (
+         SELECT
+           (SELECT COUNT(*) FROM complete_cohort)::INTEGER
+             AS shared_opportunities,
+           (
+             (SELECT COUNT(*) FROM opportunity_coverage)
+             - (SELECT COUNT(*) FROM complete_cohort)
+           )::INTEGER AS excluded_incomplete_opportunities,
+           (SELECT MIN(created_at) FROM matched_rows) AS coverage_start
+       )
+       SELECT required.variant_seconds,
+              COALESCE(summary.observed, 0)::INTEGER AS observed,
+              COALESCE(summary.candidates, 0)::INTEGER AS candidates,
+              COALESCE(summary.settled, 0)::INTEGER AS settled,
+              COALESCE(summary.wins, 0)::INTEGER AS wins,
+              COALESCE(summary.losses, 0)::INTEGER AS losses,
+              COALESCE(
+                summary.candidates_before_later_quote_issue,
+                0
+              )::INTEGER AS candidates_before_later_quote_issue,
+              summary.average_first_safe_seconds_remaining,
+              COALESCE(summary.hypothetical_pnl, 0) AS hypothetical_pnl,
+              coverage.shared_opportunities,
+              coverage.excluded_incomplete_opportunities,
+              coverage.coverage_start
+         FROM required_variants required
+         LEFT JOIN variant_summaries summary USING (variant_seconds)
+         CROSS JOIN coverage
+        ORDER BY required.variant_seconds`,
+      [mode, trackingSince, trackingUntil, requiredVariants],
     );
-    return result.rows.map((row) => {
+    const variants = result.rows.map((row) => {
       const settled = Number(row["settled"] ?? 0);
       const wins = Number(row["wins"] ?? 0);
       const losses = Number(row["losses"] ?? 0);
@@ -1558,6 +1629,24 @@ export async function getScalpShadowStudyVariantSummaries(
         hypotheticalPnl: Number(row["hypothetical_pnl"] ?? 0),
       };
     });
+    const coverageRow = result.rows[0];
+    const coverageStart = coverageRow?.["coverage_start"];
+    return {
+      variants,
+      coverage: {
+        sharedOpportunities: Number(
+          coverageRow?.["shared_opportunities"] ?? 0,
+        ),
+        excludedIncompleteOpportunities: Number(
+          coverageRow?.["excluded_incomplete_opportunities"] ?? 0,
+        ),
+        coverageStart: coverageStart == null
+          ? null
+          : (coverageStart instanceof Date
+            ? coverageStart
+            : new Date(String(coverageStart))).toISOString(),
+      },
+    };
   } finally {
     client.release();
   }
@@ -1568,20 +1657,43 @@ export async function getRecentScalpShadowStudies(
   limit = 48,
   trackingSince: Date,
   trackingUntil: Date,
+  variantSeconds: readonly number[],
 ): Promise<ScalpShadowStudyRecord[]> {
   const client = await pool.connect();
   try {
     const capped = Math.max(1, Math.min(100, Math.floor(limit)));
+    const requiredVariants = [...new Set(variantSeconds)];
+    if (requiredVariants.length === 0) return [];
     const result = await client.query(
-      `SELECT *
-         FROM kalshi_scalp_shadow_entries
-        WHERE mode = $1
-          AND created_at >= $2
-          AND created_at <= $3
-          AND first_safe_entry_at IS NOT NULL
-        ORDER BY first_eligible_at DESC, symbol, variant_seconds DESC
+      `WITH required_variants AS (
+         SELECT DISTINCT variant_seconds
+           FROM UNNEST($5::DOUBLE PRECISION[]) AS required(variant_seconds)
+       ),
+       candidate_rows AS (
+         SELECT shadow.*
+           FROM kalshi_scalp_shadow_entries shadow
+           JOIN required_variants required USING (variant_seconds)
+          WHERE shadow.mode = $1
+            AND shadow.created_at >= $2
+            AND shadow.created_at <= $3
+       ),
+       complete_cohort AS (
+         SELECT mode, symbol, window_key
+           FROM candidate_rows
+          GROUP BY mode, symbol, window_key
+         HAVING COUNT(DISTINCT variant_seconds) = (
+           SELECT COUNT(*) FROM required_variants
+         )
+       )
+       SELECT candidate.*
+         FROM candidate_rows candidate
+         JOIN complete_cohort cohort USING (mode, symbol, window_key)
+        WHERE candidate.first_safe_entry_at IS NOT NULL
+        ORDER BY candidate.first_eligible_at DESC,
+                 candidate.symbol,
+                 candidate.variant_seconds DESC
         LIMIT $4`,
-      [mode, trackingSince, trackingUntil, capped],
+      [mode, trackingSince, trackingUntil, capped, requiredVariants],
     );
     return result.rows.map((row) =>
       mapScalpShadowRow(row as Record<string, unknown>)

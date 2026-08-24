@@ -6,7 +6,9 @@ import {
   createBoundedScalpShadowWriter,
   buildScalpShadowStudyReport,
   evaluateScalpShadowEntry,
+  resolveScalpShadowVariantSeconds,
   resolveScalpShadowStudyScope,
+  selectScalpShadowComparisonCohort,
   settleScalpShadowRecord,
   summarizeScalpShadowStudyRows,
 } from "./kalshi-scalper-shadow.ts";
@@ -139,7 +141,7 @@ describe("shadow report projection", () => {
   it("reports every time-left comparison, selected timing, and excludes open rows from outcomes", () => {
     const settled = settleScalpShadowRecord(shadowRecord(), "yes");
     const open105 = {
-      ...shadowRecord("ETH"),
+      ...shadowRecord(),
       variantSeconds: 105 as const,
       settlementResult: null,
       outcome: null,
@@ -149,17 +151,85 @@ describe("shadow report projection", () => {
       configuredWindowSeconds: 80.1234,
       effectiveWindowSecondsBySymbol: { BTC: 80.1234, ETH: 105 },
       trackingSince: "2026-08-23T16:00:00.000Z",
+      variantSeconds: [105, 120],
     });
     assert.deepEqual(
       report.variants.map((variant) => variant.variantSeconds),
-      [...SCALP_SHADOW_VARIANT_SECONDS, 80.1234].sort((a, b) => a - b),
+      [105, 120],
     );
     assert.equal(report.variants.find((row) => row.variantSeconds === 120)?.wins, 1);
     assert.equal(report.variants.find((row) => row.variantSeconds === 105)?.settled, 0);
-    assert.equal(report.variants.find((row) => row.variantSeconds === 60)?.observed, 0);
+    assert.equal(report.variants.length, 2);
     assert.equal(report.configuredWindowSeconds, 80.1234);
     assert.equal(report.effectiveWindowSecondsBySymbol.ETH, 105);
     assert.equal(report.trackingSince, "2026-08-23T16:00:00.000Z");
+    assert.equal(report.comparisonCoverage.sharedOpportunities, 1);
+  });
+
+  it("matches timing cards to the same production-shaped opportunity cohort", () => {
+    const makeRow = (
+      opportunity: number,
+      variantSeconds: number,
+      qualified: boolean,
+    ): ScalpShadowStudyRecord => ({
+      ...shadowRecord(),
+      windowKey: `window-${opportunity}`,
+      variantSeconds,
+      firstSafeEntryAt: qualified
+        ? "2026-08-23T16:13:04.000Z"
+        : null,
+      firstSafeSecondsRemaining: qualified ? variantSeconds - 4 : null,
+      side: qualified ? "yes" : null,
+      winningAsk: qualified ? 0.97 : null,
+      hypotheticalContracts: qualified ? 2 : 0,
+      status: qualified ? "candidate_found" : "closed_no_candidate",
+    });
+    const rows = Array.from({ length: 612 }, (_, opportunity) => [
+      makeRow(
+        opportunity,
+        60,
+        opportunity < 55 || (opportunity >= 227 && opportunity < 292),
+      ),
+      makeRow(
+        opportunity,
+        75,
+        opportunity < 76 || (opportunity >= 227 && opportunity < 314),
+      ),
+      ...(opportunity < 227
+        ? [makeRow(opportunity, 80, opportunity < 80)]
+        : []),
+    ]).flat();
+    const raw = summarizeScalpShadowStudyRows(rows, [60, 75, 80]);
+    assert.deepEqual(
+      raw.map((summary) => [summary.observed, summary.candidates]),
+      [[612, 120], [612, 163], [227, 80]],
+    );
+
+    const cohort = selectScalpShadowComparisonCohort(rows, [60, 75, 80]);
+    const matched = summarizeScalpShadowStudyRows(
+      cohort.rows,
+      [60, 75, 80],
+    );
+    assert.deepEqual(
+      matched.map((summary) => [summary.observed, summary.candidates]),
+      [[227, 55], [227, 76], [227, 80]],
+    );
+    assert.deepEqual(cohort.coverage, {
+      sharedOpportunities: 227,
+      excludedIncompleteOpportunities: 385,
+      coverageStart: "2026-08-23T16:13:00.000Z",
+    });
+  });
+
+  it("observes global and override timings for every market", () => {
+    const variants = resolveScalpShadowVariantSeconds({
+      configuredWindowSeconds: 80,
+      overrideWindowSeconds: [60, 77, 80, undefined],
+    });
+    assert.deepEqual(
+      variants,
+      [...SCALP_SHADOW_VARIANT_SECONDS, 77, 80].sort((a, b) => a - b),
+    );
   });
 
   it("keeps an older loss in card totals after recent details are bounded", () => {
@@ -259,6 +329,8 @@ describe("shadow report projection", () => {
     assert.ok(aggregateStart >= 0 && recentStart > aggregateStart);
     const aggregateSource = dbSource.slice(aggregateStart, recentStart);
     assert.match(aggregateSource, /GROUP BY variant_seconds/);
+    assert.match(aggregateSource, /complete_cohort/);
+    assert.match(aggregateSource, /COUNT\(DISTINCT variant_seconds\)/);
     assert.doesNotMatch(aggregateSource, /\bLIMIT\b/);
 
     const panelSource = readFileSync(
@@ -272,6 +344,7 @@ describe("shadow report projection", () => {
     assert.match(panelSource, /shadowStudyData\.scopeEnd/);
     assert.match(panelSource, /shadowStudyData\.actualComparison\.losses/);
     assert.match(panelSource, /actualOutsideShadowCoverage/);
+    assert.match(panelSource, /comparisonCoverage\.sharedOpportunities/);
   });
 });
 

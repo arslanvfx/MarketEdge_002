@@ -2008,7 +2008,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 </h3>
                 <p className="mt-1 max-w-3xl text-[10px] leading-relaxed text-muted-foreground">
                   Every displayed time means <strong className="text-foreground">time left before market close</strong>.
-                  The study compares 1:00 through 2:00, plus any configured Scalper
+                   The study compares 1:00 through 3:00, plus any configured Scalper
                   timing outside that range. Live timing and safety rules stay unchanged.
                 </p>
                 {shadowStudyData.scopeStart && shadowStudyData.scopeEnd ? (
@@ -2048,6 +2048,37 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 </button>
               </div>
             </div>
+
+            {shadowStudyData.comparisonCoverage && (
+              <div
+                className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2.5"
+                data-testid="panel-scalper-shadow-shared-cohort"
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <div className="text-[9px] font-bold uppercase tracking-wide text-emerald-200">
+                    Matched timing comparison
+                  </div>
+                  <div className="font-mono text-xs font-black text-emerald-300">
+                    {shadowStudyData.comparisonCoverage.sharedOpportunities} shared{" "}
+                    {shadowStudyData.comparisonCoverage.sharedOpportunities === 1
+                      ? "opportunity"
+                      : "opportunities"}
+                  </div>
+                </div>
+                <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">
+                  Every timing card below uses these same coin/window opportunities.
+                  {shadowStudyData.comparisonCoverage.excludedIncompleteOpportunities > 0
+                    ? ` ${shadowStudyData.comparisonCoverage.excludedIncompleteOpportunities} older or incomplete opportunities are excluded because at least one displayed timing was not recorded.`
+                    : " No incomplete opportunities are excluded."}
+                  {shadowStudyData.comparisonCoverage.coverageStart
+                    ? ` Shared coverage begins ${fmtDateTime(shadowStudyData.comparisonCoverage.coverageStart)}.`
+                    : " Shared coverage will begin after every displayed timing has completed its first common coin/window."}
+                </p>
+                <p className="mt-1 text-[8px] leading-relaxed text-muted-foreground/80">
+                  Safety guards evaluate each timing&apos;s own observation horizon, so legitimate edge cases do not have to be perfectly nested.
+                </p>
+              </div>
+            )}
 
             <div className="mt-3 grid gap-2 rounded-lg border border-border/60 bg-background/20 p-3 sm:grid-cols-3">
               <div>

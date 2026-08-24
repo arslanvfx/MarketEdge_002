@@ -202,7 +202,7 @@ router.get("/crypto/scalper/shadow-study", async (req, res): Promise<void> => {
     const config = getScalpConfig();
     const mode = parseMode(req.query["mode"]) ?? config.mode;
     // This limit applies only to recent candidate detail rows. Timing-card
-    // aggregates are computed over the full selected scope in SQL.
+    // aggregates use the full matched cohort in the selected scope in SQL.
     const limitParam = typeof req.query["limit"] === "string"
       ? Number.parseInt(req.query["limit"], 10)
       : 48;

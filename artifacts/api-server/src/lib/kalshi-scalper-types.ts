@@ -391,6 +391,15 @@ export interface ScalpShadowActualSummary {
   totalSpent: number;
 }
 
+export interface ScalpShadowComparisonCoverage {
+  /** Coin/window opportunities containing every timing displayed in the report. */
+  sharedOpportunities: number;
+  /** Coin/window opportunities omitted because at least one displayed timing is absent. */
+  excludedIncompleteOpportunities: number;
+  /** First durable row in the shared cohort, or null while no complete cohort exists. */
+  coverageStart: string | null;
+}
+
 export interface ScalpShadowStudyReport {
   mode: ScalpMode;
   /** Saved global Scalper entry timing. This marks the primary selected card. */
@@ -409,6 +418,8 @@ export interface ScalpShadowStudyReport {
   actualComparison: ScalpShadowActualSummary;
   /** Actual baseline results that predate Shadow tracking and cannot be compared. */
   actualOutsideShadowCoverage: ScalpShadowActualSummary | null;
+  /** Coverage shared by every timing card; all card denominators match this count. */
+  comparisonCoverage: ScalpShadowComparisonCoverage;
   variants: ScalpShadowVariantSummary[];
   recent: ScalpShadowStudyRecord[];
   disclaimer: string;

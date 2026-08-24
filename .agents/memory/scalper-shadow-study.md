@@ -15,4 +15,6 @@ Shadow timing-card totals must come from the full selected reporting period, nev
 
 **Why:** A recent-row cap once hid older Shadow losses while the nearby actual-performance panel still covered them, making the two panels appear contradictory. Late-contract payout asymmetry makes aligned P&L and loss counts especially important.
 
-**How to apply:** Keep full-period aggregates independent from bounded dashboard details, capture one shared scope end for all reads, and make visual resets non-destructive view boundaries that affect both Shadow and actual comparison metrics.
+**How to apply:** Keep full-period aggregates independent from bounded dashboard details, capture one shared scope end for all reads, and make visual resets non-destructive view boundaries that affect both Shadow and actual comparison metrics. Timing cards must additionally aggregate only coin/window opportunities that have every displayed timing; expose the shared count, excluded incomplete opportunities, and effective coverage start. Observe the standard, global, and override timing set for every market going forward—configuration badges must never choose a card's population.
+
+**Why:** Standard timings were recorded for every market while a configured custom timing was recorded only for markets using it, so raw card totals compared different populations. Matching the common cohort restores a meaningful timing comparison without deleting or fabricating historical observations.

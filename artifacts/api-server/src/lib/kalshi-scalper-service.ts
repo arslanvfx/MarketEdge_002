@@ -39,7 +39,6 @@ import type {
 } from "./kalshi-scalper-types.ts";
 import {
   DEFAULT_SCALP_CONFIG,
-  SCALP_SHADOW_VARIANT_SECONDS,
 } from "./kalshi-scalper-types.ts";
 import {
   resolveEffectiveParams,
@@ -92,6 +91,7 @@ import {
   createBoundedScalpShadowWriter,
   buildScalpShadowStudyReport,
   evaluateScalpShadowEntry,
+  resolveScalpShadowVariantSeconds,
   resolveScalpShadowStudyScope,
   settleScalpShadowRecord,
 } from "./kalshi-scalper-shadow.ts";
@@ -257,8 +257,8 @@ function _finalizeShadowWindow(windowKey: string, nowMs: number): void {
 }
 
 /**
- * Read-only observation of standard 60s–180s counterfactuals plus each market's
- * configured timing. It reuses cached
+ * Read-only observation of standard 60s–180s counterfactuals plus every global
+ * or override timing for every market. It reuses cached
  * public quotes and existing Scalper-owned underlying samples; no network,
  * reservation, cap, balance, intent, broker, or reconciliation path is called.
  */
@@ -268,6 +268,12 @@ function _observeShadowEntries(windowKey: string, nowMs: number): void {
   _lastShadowObservationAt = nowMs;
   const expectedCloseTime = _currentWindowCloseTime(windowKey);
   if (!expectedCloseTime) return;
+  const variantSecondsToObserve = resolveScalpShadowVariantSeconds({
+    configuredWindowSeconds: _config.finalWindowSeconds,
+    overrideWindowSeconds: _config.perMarketOverrides.map(
+      (override) => override.windowSeconds,
+    ),
+  });
 
   for (const coin of CRYPTO_COINS) {
     const symbol = coin.symbol.toUpperCase();
@@ -276,12 +282,6 @@ function _observeShadowEntries(windowKey: string, nowMs: number): void {
     const cached = getKalshiCachedData(symbol);
     const samples = _priceSamples.get(symbol) ?? [];
 
-    const variantSecondsToObserve = [
-      ...new Set([
-        ...SCALP_SHADOW_VARIANT_SECONDS,
-        params.finalWindowSeconds,
-      ]),
-    ];
     for (const variantSeconds of variantSecondsToObserve) {
       const evaluation = evaluateScalpShadowEntry({
         nowMs,
@@ -4158,24 +4158,25 @@ export async function getScalpShadowStudy(
         resolveEffectiveParams(_config, symbol, "").finalWindowSeconds,
       ]),
   );
-  const variantSeconds = [
-    ...new Set([
-      ...SCALP_SHADOW_VARIANT_SECONDS,
-      _config.finalWindowSeconds,
-      ...Object.values(effectiveWindowSecondsBySymbol),
-    ]),
-  ];
-  const [variantSummaries, recentRows, performanceOrders] = await Promise.all([
+  const variantSeconds = resolveScalpShadowVariantSeconds({
+    configuredWindowSeconds: _config.finalWindowSeconds,
+    overrideWindowSeconds: _config.perMarketOverrides.map(
+      (override) => override.windowSeconds,
+    ),
+  });
+  const [variantReport, recentRows, performanceOrders] = await Promise.all([
     getScalpShadowStudyVariantSummaries(
       mode,
       scope.scopeStart,
       scope.scopeEnd,
+      variantSeconds,
     ),
     getRecentScalpShadowStudies(
       mode,
       limit,
       scope.scopeStart,
       scope.scopeEnd,
+      variantSeconds,
     ),
     getScalpOrdersForPerformance(mode, baseline.trackingSince),
   ]);
@@ -4230,13 +4231,14 @@ export async function getScalpShadowStudy(
     effectiveWindowSecondsBySymbol,
     trackingSince,
     variantSeconds,
-    variantSummaries,
+    variantSummaries: variantReport.variants,
     recentRows,
     studyStartedAt: studyStartedAt?.toISOString() ?? null,
     scopeStart: scope.scopeStart.toISOString(),
     scopeEnd: scope.scopeEnd.toISOString(),
     actualComparison,
     actualOutsideShadowCoverage,
+    comparisonCoverage: variantReport.coverage,
   });
 }
 
