@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
@@ -17,6 +17,10 @@ import {
   validateContrarianConfig,
 } from "./kalshi-scalper-contrarian.ts";
 import type { FreefallPreSubmitDecision } from "./kalshi-scalper-policy.ts";
+
+const RUN_CONTRARIAN_DB_TESTS =
+  Boolean(process.env["DATABASE_URL"])
+  && process.env["CONTRARIAN_DB_TEST"] === "1";
 
 function decision(overrides: Record<string, unknown> = {}): FreefallPreSubmitDecision {
   return {
@@ -347,6 +351,10 @@ describe("contrarian spike durable ownership boundaries", () => {
     new URL("./kalshi-scalper-contrarian-db.ts", import.meta.url),
     "utf8",
   );
+  const contrarianServiceSource = readFileSync(
+    new URL("./kalshi-scalper-contrarian-service.ts", import.meta.url),
+    "utf8",
+  );
   const scalperServiceSource = readFileSync(
     new URL("./kalshi-scalper-service.ts", import.meta.url),
     "utf8",
@@ -382,6 +390,137 @@ describe("contrarian spike durable ownership boundaries", () => {
       contrarianDbSource,
       /WHERE id=\$1\s+AND status IN \('submitting','unknown'\)\s+RETURNING \*/,
     );
+  });
+
+  it("preserves stale claims that still belong to an active attempt", () => {
+    const reconciliation = contrarianDbSource.slice(
+      contrarianDbSource.indexOf(
+        "export async function reconcileStaleContrarianReservations",
+      ),
+      contrarianDbSource.indexOf("async function finalize"),
+    );
+    assert.match(
+      reconciliation,
+      /activeReservationIds\.has\(reservationId\)[\s\S]*outcome: "preserved_active"/,
+    );
+    assert.match(
+      contrarianServiceSource,
+      /activeReservationByAttempt\.set\(key, reservation\.id\)/,
+    );
+    assert.match(
+      contrarianServiceSource,
+      /activeReservationIds: \[\.\.\.activeReservationByAttempt\.values\(\)\]/,
+    );
+  });
+
+  it("releases only confirmed paper orphans and writes durable audit evidence", () => {
+    const reconciliation = contrarianDbSource.slice(
+      contrarianDbSource.indexOf(
+        "export async function reconcileStaleContrarianReservations",
+      ),
+      contrarianDbSource.indexOf("async function finalize"),
+    );
+    assert.match(
+      reconciliation,
+      /executionMode === "live"[\s\S]*"stale_paper_orphan_released"/,
+    );
+    assert.match(
+      reconciliation,
+      /AND NOT EXISTS \([\s\S]*FROM kalshi_scalp_contrarian_orders o[\s\S]*RETURNING \*/,
+    );
+    assert.match(
+      reconciliation,
+      /recordReservationReconciliationIncident\([\s\S]*reason,[\s\S]*evidence,[\s\S]*true/,
+    );
+    assert.match(
+      reconciliation,
+      /SET status='released',[\s\S]*reserved_budget=0/,
+    );
+  });
+
+  it("uses a cross-worker ownership lease before reconciling a stale claim", () => {
+    assert.match(
+      contrarianDbSource,
+      /pg_try_advisory_lock\(hashtextextended\(\$1,0\)\) AS acquired/,
+    );
+    assert.match(
+      contrarianDbSource,
+      /pg_try_advisory_xact_lock\(hashtextextended\(\$1,0\)\) AS acquired/,
+    );
+    assert.match(
+      contrarianDbSource,
+      /reservationOwnershipLockKey\(\{[\s\S]*executionMode,[\s\S]*symbol:/,
+    );
+    const claimToIntent = contrarianServiceSource.slice(
+      contrarianServiceSource.indexOf(
+        "reservationOwnership = await acquireContrarianReservationOwnership",
+      ),
+      contrarianServiceSource.indexOf("const postIntentReason"),
+    );
+    const acquire = claimToIntent.indexOf(
+      "acquireContrarianReservationOwnership",
+    );
+    const claim = claimToIntent.indexOf("claimContrarianReservation");
+    const intent = claimToIntent.indexOf("insertContrarianOrderIntent");
+    const release = claimToIntent.indexOf("completedOwnership.release()");
+    assert.ok(acquire >= 0 && acquire < claim);
+    assert.ok(claim >= 0 && claim < intent);
+    assert.ok(intent >= 0 && intent < release);
+    assert.match(
+      contrarianDbSource,
+      /MAX_CONTRARIAN_RESERVATION_OWNERSHIP_LEASES = 2/,
+    );
+  });
+
+  it("keeps live and ambiguous stale reservations fail-closed for review", () => {
+    const reconciliation = contrarianDbSource.slice(
+      contrarianDbSource.indexOf(
+        "export async function reconcileStaleContrarianReservations",
+      ),
+      contrarianDbSource.indexOf("async function finalize"),
+    );
+    assert.match(
+      reconciliation,
+      /if \(hasOrderIntent \|\| executionMode === "live"\)[\s\S]*outcome: "review_required"/,
+    );
+    assert.match(
+      reconciliation,
+      /"stale_claim_has_order_intent_review_required"/,
+    );
+    assert.match(reconciliation, /"stale_live_claim_review_required"/);
+    assert.match(
+      reconciliation,
+      /recordReservationReconciliationIncident\([\s\S]*false/,
+    );
+  });
+
+  it("runs bounded stale-claim recovery at startup and during lifecycle ticks", () => {
+    assert.match(
+      contrarianDbSource,
+      /CONTRARIAN_RESERVATION_STALE_TIMEOUT_MS = 2 \* 60_000/,
+    );
+    assert.match(
+      contrarianDbSource,
+      /CONTRARIAN_RESERVATION_RECONCILE_BATCH_SIZE = 100/,
+    );
+    const initialization = contrarianServiceSource.slice(
+      contrarianServiceSource.indexOf(
+        "export async function initContrarianExperiment",
+      ),
+      contrarianServiceSource.indexOf(
+        "export function getContrarianConfig",
+      ),
+    );
+    assert.match(initialization, /reconcileStaleContrarianReservations/);
+    const lifecycle = contrarianServiceSource.slice(
+      contrarianServiceSource.indexOf(
+        "export async function evaluateContrarianLifecycle",
+      ),
+      contrarianServiceSource.indexOf(
+        "export async function getContrarianReport",
+      ),
+    );
+    assert.match(lifecycle, /reconcileStaleContrarianReservations/);
   });
 
   it("keeps the prospective guard study isolated and deduplicated", () => {
@@ -439,3 +578,280 @@ describe("contrarian spike durable ownership boundaries", () => {
     assert.match(scalperServiceSource, /new ContrarianMonitorAttemptScheduler/);
   });
 });
+
+describe(
+  "contrarian stale reservation reconciliation (PostgreSQL)",
+  {
+    skip: !RUN_CONTRARIAN_DB_TESTS
+      ? "set CONTRARIAN_DB_TEST=1 with a development DATABASE_URL"
+      : false,
+  },
+  () => {
+    let contrarianDb: typeof import("./kalshi-scalper-contrarian-db.ts");
+    let pool: {
+      connect: () => Promise<{
+        query: (
+          sql: string,
+          params?: readonly unknown[],
+        ) => Promise<{ rows: Array<Record<string, unknown>> }>;
+        release: (error?: Error | boolean) => void;
+      }>;
+    };
+    const prefix = "DBTEST-CONTRARIAN-";
+
+    async function cleanup(): Promise<void> {
+      const c = await pool.connect();
+      try {
+        await c.query(
+          `DELETE FROM kalshi_scalp_contrarian_incidents
+            WHERE window_key LIKE $1`,
+          [`${prefix}%`],
+        );
+        await c.query(
+          `DELETE FROM kalshi_scalp_contrarian_orders
+            WHERE window_key LIKE $1`,
+          [`${prefix}%`],
+        );
+        await c.query(
+          `DELETE FROM kalshi_scalp_contrarian_reservations
+            WHERE window_key LIKE $1`,
+          [`${prefix}%`],
+        );
+      } finally {
+        c.release();
+      }
+    }
+
+    async function claim(
+      executionMode: "paper" | "live",
+      suffix: string,
+      symbol = "BTC",
+    ) {
+      const windowKey = `${prefix}${suffix}-${Date.now()}`;
+      const result = await contrarianDb.claimContrarianReservation({
+        executionMode,
+        sourceMode: executionMode,
+        symbol,
+        windowKey,
+        ticker: `KX${symbol}-${suffix}`,
+        requestedBudget: 1,
+        dailyCap: 100,
+        openCap: 100,
+        perWindowCap: 100,
+      });
+      assert.equal(result.claimed, true);
+      if (!result.claimed) throw new Error("test claim failed");
+      return result.reservation;
+    }
+
+    async function ageReservation(reservationId: string): Promise<void> {
+      const c = await pool.connect();
+      try {
+        await c.query(
+          `UPDATE kalshi_scalp_contrarian_reservations
+              SET updated_at=NOW() - INTERVAL '3 minutes'
+            WHERE id=$1`,
+          [reservationId],
+        );
+      } finally {
+        c.release();
+      }
+    }
+
+    async function reservationStatus(
+      reservationId: string,
+    ): Promise<{ status: string; reservedBudget: number }> {
+      const c = await pool.connect();
+      try {
+        const result = await c.query(
+          `SELECT status,reserved_budget
+             FROM kalshi_scalp_contrarian_reservations
+            WHERE id=$1`,
+          [reservationId],
+        );
+        assert.ok(result.rows[0]);
+        return {
+          status: String(result.rows[0]["status"]),
+          reservedBudget: Number(result.rows[0]["reserved_budget"]),
+        };
+      } finally {
+        c.release();
+      }
+    }
+
+    before(async () => {
+      contrarianDb = await import("./kalshi-scalper-contrarian-db.ts");
+      const db = await import("@workspace/db");
+      pool = db.pool as typeof pool;
+      await contrarianDb.runContrarianMigrations();
+    });
+    beforeEach(cleanup);
+    after(async () => {
+      await cleanup();
+      const db = await import("@workspace/db");
+      await db.pool.end();
+    });
+
+    it("preserves an old paper claim listed as locally active", async () => {
+      const reservation = await claim("paper", "active");
+      await ageReservation(reservation.id);
+      const result = await contrarianDb.reconcileStaleContrarianReservations({
+        activeReservationIds: [reservation.id],
+        reservationIds: [reservation.id],
+        staleAfterMs: 1_000,
+      });
+      assert.equal(result.preservedActive, 1);
+      assert.equal(result.results[0]?.reason, "active_contrarian_attempt");
+      assert.deepEqual(await reservationStatus(reservation.id), {
+        status: "claimed",
+        reservedBudget: 1,
+      });
+    });
+
+    it("releases an old paper orphan and persists resolved audit evidence", async () => {
+      const reservation = await claim("paper", "orphan");
+      await ageReservation(reservation.id);
+      const result = await contrarianDb.reconcileStaleContrarianReservations({
+        reservationIds: [reservation.id],
+        staleAfterMs: 1_000,
+      });
+      assert.equal(result.released, 1);
+      assert.deepEqual(await reservationStatus(reservation.id), {
+        status: "released",
+        reservedBudget: 0,
+      });
+      const c = await pool.connect();
+      try {
+        const incidents = await c.query(
+          `SELECT reason,evidence,resolved_at
+             FROM kalshi_scalp_contrarian_incidents
+            WHERE reservation_id=$1`,
+          [reservation.id],
+        );
+        assert.equal(incidents.rows[0]?.["reason"], "stale_paper_orphan_released");
+        assert.equal(
+          (incidents.rows[0]?.["evidence"] as Record<string, unknown>)?.["source"],
+          "stale_reservation_reconciliation",
+        );
+        assert.ok(incidents.rows[0]?.["resolved_at"]);
+      } finally {
+        c.release();
+      }
+    });
+
+    it("honors concurrent ownership without exhausting the shared pool", async () => {
+      const windowKey = `${prefix}owned-${Date.now()}`;
+      const owner = await contrarianDb.acquireContrarianReservationOwnership({
+        executionMode: "paper",
+        symbol: "ETH",
+        windowKey,
+      });
+      assert.ok(owner);
+      const reservation = await contrarianDb.claimContrarianReservation({
+        executionMode: "paper",
+        sourceMode: "paper",
+        symbol: "ETH",
+        windowKey,
+        ticker: "KXETH-OWNED",
+        requestedBudget: 1,
+        dailyCap: 100,
+        openCap: 100,
+        perWindowCap: 100,
+      });
+      assert.equal(reservation.claimed, true);
+      if (!reservation.claimed || !owner) throw new Error("ownership setup failed");
+      await ageReservation(reservation.reservation.id);
+
+      const second = await contrarianDb.acquireContrarianReservationOwnership({
+        executionMode: "paper",
+        symbol: "SOL",
+        windowKey: `${prefix}second-${Date.now()}`,
+      });
+      assert.ok(second);
+      const saturated = await contrarianDb.acquireContrarianReservationOwnership({
+        executionMode: "paper",
+        symbol: "XRP",
+        windowKey: `${prefix}saturated-${Date.now()}`,
+      });
+      assert.equal(saturated, null);
+
+      const preserved = await contrarianDb.reconcileStaleContrarianReservations({
+        reservationIds: [reservation.reservation.id],
+        staleAfterMs: 1_000,
+      });
+      assert.equal(preserved.preservedActive, 1);
+      assert.equal(preserved.results[0]?.reason, "concurrent_contrarian_owner");
+      await second?.release();
+      await owner.release();
+
+      const released = await contrarianDb.reconcileStaleContrarianReservations({
+        reservationIds: [reservation.reservation.id],
+        staleAfterMs: 1_000,
+      });
+      assert.equal(released.released, 1);
+    });
+
+    it("retains live and intent-bearing reservations for review", async () => {
+      const live = await claim("live", "live", "SOL");
+      const ambiguous = await claim("paper", "intent", "XRP");
+      await contrarianDb.insertContrarianOrderIntent({
+        reservationId: ambiguous.id,
+        executionMode: "paper",
+        sourceMode: "paper",
+        symbol: ambiguous.symbol,
+        windowKey: ambiguous.windowKey,
+        ticker: ambiguous.ticker,
+        protectedSide: "yes",
+        oppositeSide: "no",
+        contractCount: 1,
+        yesLimitPrice: 0.98,
+        directAsk: 0.02,
+        yesAsk: 0.98,
+        noAsk: 0.02,
+        clientOrderId: `paper-${ambiguous.id}`,
+        evidence: { source: "db_test" },
+      });
+      await ageReservation(live.id);
+      await ageReservation(ambiguous.id);
+
+      const result = await contrarianDb.reconcileStaleContrarianReservations({
+        reservationIds: [live.id, ambiguous.id],
+        staleAfterMs: 1_000,
+      });
+      assert.equal(result.released, 0);
+      assert.equal(result.reviewRequired, 2);
+      assert.deepEqual(await reservationStatus(live.id), {
+        status: "claimed",
+        reservedBudget: 1,
+      });
+      assert.deepEqual(await reservationStatus(ambiguous.id), {
+        status: "claimed",
+        reservedBudget: 1,
+      });
+      const reasons = result.results.map((row) => row.reason).sort();
+      assert.deepEqual(reasons, [
+        "stale_claim_has_order_intent_review_required",
+        "stale_live_claim_review_required",
+      ]);
+      const c = await pool.connect();
+      try {
+        const incidents = await c.query(
+          `SELECT reason,resolved_at
+             FROM kalshi_scalp_contrarian_incidents
+            WHERE reservation_id=ANY($1)
+            ORDER BY reason`,
+          [[live.id, ambiguous.id]],
+        );
+        assert.deepEqual(
+          incidents.rows.map((row) => [row["reason"], row["resolved_at"]]),
+          [
+            ["stale_claim_has_order_intent_review_required", null],
+            ["stale_live_claim_review_required", null],
+          ],
+        );
+      } finally {
+        c.release();
+      }
+    });
+  },
+);

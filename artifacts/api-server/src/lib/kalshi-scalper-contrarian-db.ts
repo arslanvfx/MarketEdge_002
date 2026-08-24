@@ -17,6 +17,9 @@ import type {
 
 export type ContrarianReservationStatus = "claimed" | "released" | "filled" | "unknown" | "settled";
 export type ContrarianOrderStatus = "submitting" | "zero_fill" | "filled" | "unknown" | "settled";
+export const CONTRARIAN_RESERVATION_STALE_TIMEOUT_MS = 2 * 60_000;
+export const CONTRARIAN_RESERVATION_RECONCILE_BATCH_SIZE = 100;
+export const MAX_CONTRARIAN_RESERVATION_OWNERSHIP_LEASES = 2;
 export interface ContrarianConfigRecord { config: ContrarianConfig; updatedAt: Date; version: number; }
 export interface ContrarianObservation {
   id: string; executionMode: ContrarianMode; sourceMode: ContrarianMode; symbol: string; windowKey: string;
@@ -43,6 +46,30 @@ export interface ContrarianIncident {
 export interface ContrarianClaimInput {
   executionMode: ContrarianMode; sourceMode: ContrarianMode; symbol: string; windowKey: string; ticker: string;
   requestedBudget: number; dailyCap: number; openCap: number; perWindowCap: number; reason?: string;
+}
+export interface ContrarianReservationReconciliation {
+  reservationId: string;
+  executionMode: ContrarianMode;
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  ageMs: number;
+  outcome: "released" | "preserved_active" | "review_required";
+  reason: string;
+  incidentId: string | null;
+}
+export interface ContrarianReservationReconciliationSummary {
+  scanned: number;
+  released: number;
+  preservedActive: number;
+  reviewRequired: number;
+  results: ContrarianReservationReconciliation[];
+}
+export interface ContrarianReservationOwnership {
+  executionMode: ContrarianMode;
+  symbol: string;
+  windowKey: string;
+  release: () => Promise<void>;
 }
 export type ContrarianClaimResult =
   | { claimed: true; reservation: ContrarianReservation; dailyCommitted: number; openCommitted: number; windowCommitted: number }
@@ -412,33 +439,418 @@ export async function claimContrarianReservation(input: ContrarianClaimInput): P
 
 export async function insertContrarianOrderIntent(input: ContrarianOrderIntentInput): Promise<ContrarianOrder> {
   if (!Number.isInteger(input.contractCount) || input.contractCount < 1) throw new Error("contractCount must be a positive integer");
-  const result = await pool.query(`INSERT INTO kalshi_scalp_contrarian_orders(id,reservation_id,execution_mode,source_mode,symbol,window_key,ticker,protected_side,opposite_side,contract_count,yes_limit_price,direct_ask,yes_ask,no_ask,client_order_id,evidence)
-    SELECT $1,r.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
-    FROM kalshi_scalp_contrarian_reservations r
-    WHERE r.id=$2 AND r.status='claimed' AND r.reserved_budget > 0
-      AND r.execution_mode=$3 AND r.source_mode=$4 AND r.symbol=$5
-      AND r.window_key=$6 AND r.ticker=$7
-    RETURNING *`, [crypto.randomUUID(),input.reservationId,input.executionMode,input.sourceMode,input.symbol,input.windowKey,input.ticker,input.protectedSide,input.oppositeSide,input.contractCount,input.yesLimitPrice,input.directAsk,input.yesAsk ?? null,input.noAsk ?? null,input.clientOrderId,JSON.stringify(input.evidence)]);
-  if (!result.rows[0]) throw new Error("contrarian reservation is no longer claimable");
-  return orderRow(result.rows[0] as DbRow);
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    // Reconciliation uses this same lock. This closes the otherwise unsafe
+    // claim -> intent gap: a stale-claim scan cannot release a reservation
+    // while an intent is being inserted for it.
+    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      `kalshi-scalper-contrarian-cap:${input.executionMode}`,
+    ]);
+    const result = await c.query(`INSERT INTO kalshi_scalp_contrarian_orders(id,reservation_id,execution_mode,source_mode,symbol,window_key,ticker,protected_side,opposite_side,contract_count,yes_limit_price,direct_ask,yes_ask,no_ask,client_order_id,status,evidence)
+      SELECT $1,r.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'submitting',$16
+      FROM kalshi_scalp_contrarian_reservations r
+      WHERE r.id=$2 AND r.status='claimed' AND r.reserved_budget > 0
+        AND r.execution_mode=$3 AND r.source_mode=$4 AND r.symbol=$5
+        AND r.window_key=$6 AND r.ticker=$7
+      RETURNING *`, [crypto.randomUUID(),input.reservationId,input.executionMode,input.sourceMode,input.symbol,input.windowKey,input.ticker,input.protectedSide,input.oppositeSide,input.contractCount,input.yesLimitPrice,input.directAsk,input.yesAsk ?? null,input.noAsk ?? null,input.clientOrderId,JSON.stringify(input.evidence)]);
+    if (!result.rows[0]) throw new Error("contrarian reservation is no longer claimable");
+    await c.query("COMMIT");
+    return orderRow(result.rows[0] as DbRow);
+  } catch (error) {
+    await c.query("ROLLBACK");
+    throw error;
+  } finally {
+    c.release();
+  }
+}
+
+let activeReservationOwnershipLeases = 0;
+
+function reservationOwnershipLockKey(input: {
+  executionMode: ContrarianMode;
+  symbol: string;
+  windowKey: string;
+}): string {
+  return [
+    "kalshi-scalper-contrarian-reservation-owner",
+    input.executionMode,
+    input.symbol.toUpperCase(),
+    input.windowKey,
+  ].join(":");
+}
+
+/**
+ * Hold a session-scoped ownership lease across the claim -> intent gap.
+ * Reconciliation probes the same lock, so it can distinguish a crashed owner
+ * from an active attempt even when another application worker runs the scan.
+ */
+export async function acquireContrarianReservationOwnership(
+  input: {
+    executionMode: ContrarianMode;
+    symbol: string;
+    windowKey: string;
+  },
+): Promise<ContrarianReservationOwnership | null> {
+  // The shared DB pool has five connections. Reserve at least three for claims,
+  // intent writes, reconciliation, and unrelated app work instead of allowing
+  // session leases to exhaust the pool during external revalidation.
+  if (
+    activeReservationOwnershipLeases
+    >= MAX_CONTRARIAN_RESERVATION_OWNERSHIP_LEASES
+  ) {
+    return null;
+  }
+  activeReservationOwnershipLeases += 1;
+  const c = await pool.connect().catch((error) => {
+    activeReservationOwnershipLeases -= 1;
+    throw error;
+  });
+  const lockKey = reservationOwnershipLockKey(input);
+  try {
+    const result = await c.query(
+      "SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired",
+      [lockKey],
+    );
+    if ((result.rows[0] as DbRow | undefined)?.acquired !== true) {
+      c.release();
+      activeReservationOwnershipLeases -= 1;
+      return null;
+    }
+  } catch (error) {
+    c.release();
+    activeReservationOwnershipLeases -= 1;
+    throw error;
+  }
+  let released = false;
+  return {
+    executionMode: input.executionMode,
+    symbol: input.symbol.toUpperCase(),
+    windowKey: input.windowKey,
+    release: async () => {
+      if (released) return;
+      released = true;
+      try {
+        await c.query(
+          "SELECT pg_advisory_unlock(hashtextextended($1,0))",
+          [lockKey],
+        );
+        c.release();
+      } catch (error) {
+        // A session advisory lock survives a normal pool release. Destroy the
+        // client if unlock itself fails so a pooled session cannot retain stale
+        // ownership indefinitely.
+        c.release(error instanceof Error ? error : true);
+        throw error;
+      } finally {
+        activeReservationOwnershipLeases -= 1;
+      }
+    },
+  };
 }
 
 export async function releaseContrarianReservation(
   reservationId: string,
   reason: string,
 ): Promise<ContrarianReservation | null> {
-  const result = await pool.query(
-    `UPDATE kalshi_scalp_contrarian_reservations
-     SET status='released',reserved_budget=0,reason=$2,updated_at=NOW()
-     WHERE id=$1 AND status='claimed'
-       AND NOT EXISTS (
-         SELECT 1 FROM kalshi_scalp_contrarian_orders o
-         WHERE o.reservation_id=kalshi_scalp_contrarian_reservations.id
-       )
-     RETURNING *`,
-    [reservationId,reason],
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    const reservation = await c.query(
+      `SELECT execution_mode
+         FROM kalshi_scalp_contrarian_reservations
+        WHERE id=$1`,
+      [reservationId],
+    );
+    if (!reservation.rows[0]) {
+      await c.query("COMMIT");
+      return null;
+    }
+    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      `kalshi-scalper-contrarian-cap:${String((reservation.rows[0] as DbRow).execution_mode)}`,
+    ]);
+    const result = await c.query(
+      `UPDATE kalshi_scalp_contrarian_reservations
+       SET status='released',reserved_budget=0,reason=$2,updated_at=NOW()
+       WHERE id=$1 AND status='claimed'
+         AND NOT EXISTS (
+           SELECT 1 FROM kalshi_scalp_contrarian_orders o
+           WHERE o.reservation_id=kalshi_scalp_contrarian_reservations.id
+         )
+       RETURNING *`,
+      [reservationId,reason],
+    );
+    await c.query("COMMIT");
+    return result.rows[0] ? reservationRow(result.rows[0] as DbRow) : null;
+  } catch (error) {
+    await c.query("ROLLBACK");
+    throw error;
+  } finally {
+    c.release();
+  }
+}
+
+function boundedReconciliationValue(
+  value: number | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  if (!Number.isFinite(value) || (value ?? 0) <= 0) return fallback;
+  return Math.min(maximum, Math.floor(value as number));
+}
+
+async function recordReservationReconciliationIncident(
+  client: { query: (sql: string, params?: readonly unknown[]) => Promise<{ rows: Array<DbRow> }> },
+  row: DbRow,
+  reason: string,
+  evidence: Record<string, unknown>,
+  resolved: boolean,
+): Promise<string | null> {
+  const result = await client.query(
+    `INSERT INTO kalshi_scalp_contrarian_incidents(
+       id,reservation_id,execution_mode,symbol,window_key,ticker,reason,evidence,resolved_at)
+     SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9
+      WHERE NOT EXISTS (
+        SELECT 1
+          FROM kalshi_scalp_contrarian_incidents
+         WHERE reservation_id=$2
+           AND reason=$7
+           AND resolved_at IS NULL
+      )
+     RETURNING id`,
+    [
+      crypto.randomUUID(),
+      String(row.id),
+      row.execution_mode,
+      String(row.symbol),
+      String(row.window_key),
+      String(row.ticker),
+      reason,
+      JSON.stringify(evidence),
+      resolved ? new Date() : null,
+    ],
   );
-  return result.rows[0] ? reservationRow(result.rows[0] as DbRow) : null;
+  return result.rows[0] ? String(result.rows[0].id) : null;
+}
+
+/**
+ * Reconcile reservations that were claimed but never reached the durable
+ * order-intent state. This is deliberately conservative:
+ * - the per-mode advisory lock serializes this with claim and intent writes;
+ * - row locks plus the conditional update prevent a concurrent transition from
+ *   being overwritten;
+ * - this process's active reservation IDs are never released;
+ * - only old paper orphans are released; live and ambiguous rows become
+ *   unresolved incidents for operator review.
+ */
+export async function reconcileStaleContrarianReservations(input: {
+  activeReservationIds?: readonly string[];
+  reservationIds?: readonly string[];
+  staleAfterMs?: number;
+  limit?: number;
+} = {}): Promise<ContrarianReservationReconciliationSummary> {
+  const staleAfterMs = boundedReconciliationValue(
+    input.staleAfterMs,
+    CONTRARIAN_RESERVATION_STALE_TIMEOUT_MS,
+    24 * 60 * 60_000,
+  );
+  const limit = boundedReconciliationValue(
+    input.limit,
+    CONTRARIAN_RESERVATION_RECONCILE_BATCH_SIZE,
+    CONTRARIAN_RESERVATION_RECONCILE_BATCH_SIZE,
+  );
+  const activeReservationIds = new Set(input.activeReservationIds ?? []);
+  const reservationIds = input.reservationIds == null
+    ? null
+    : [...new Set(input.reservationIds)];
+  const summary: ContrarianReservationReconciliationSummary = {
+    scanned: 0,
+    released: 0,
+    preservedActive: 0,
+    reviewRequired: 0,
+    results: [],
+  };
+
+  for (const executionMode of ["paper", "live"] as const) {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        `kalshi-scalper-contrarian-cap:${executionMode}`,
+      ]);
+      const candidates = await c.query(
+        `SELECT r.*,o.id AS order_id,o.status AS order_status,
+                GREATEST(0,EXTRACT(EPOCH FROM (NOW()-r.updated_at))*1000) AS age_ms
+           FROM kalshi_scalp_contrarian_reservations r
+           LEFT JOIN kalshi_scalp_contrarian_orders o
+             ON o.reservation_id=r.id
+          WHERE r.execution_mode=$1
+            AND r.status='claimed'
+            AND r.reserved_budget > 0
+            AND r.updated_at < NOW() - ($2::double precision * INTERVAL '1 millisecond')
+            AND ($4::text[] IS NULL OR r.id=ANY($4))
+          ORDER BY r.updated_at ASC
+          LIMIT $3
+          FOR UPDATE OF r SKIP LOCKED`,
+        [executionMode, staleAfterMs, limit, reservationIds],
+      );
+
+      for (const row of candidates.rows) {
+        const candidate = row as DbRow;
+        const reservationId = String(candidate.id);
+        const ageMs = n(candidate.age_ms, "age_ms");
+        summary.scanned += 1;
+        if (activeReservationIds.has(reservationId)) {
+          summary.preservedActive += 1;
+          summary.results.push({
+            reservationId,
+            executionMode,
+            symbol: String(candidate.symbol),
+            windowKey: String(candidate.window_key),
+            ticker: String(candidate.ticker),
+            ageMs,
+            outcome: "preserved_active",
+            reason: "active_contrarian_attempt",
+            incidentId: null,
+          });
+          continue;
+        }
+
+        const ownership = await c.query(
+          "SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired",
+          [reservationOwnershipLockKey({
+            executionMode,
+            symbol: String(candidate.symbol),
+            windowKey: String(candidate.window_key),
+          })],
+        );
+        if ((ownership.rows[0] as DbRow | undefined)?.acquired !== true) {
+          summary.preservedActive += 1;
+          summary.results.push({
+            reservationId,
+            executionMode,
+            symbol: String(candidate.symbol),
+            windowKey: String(candidate.window_key),
+            ticker: String(candidate.ticker),
+            ageMs,
+            outcome: "preserved_active",
+            reason: "concurrent_contrarian_owner",
+            incidentId: null,
+          });
+          continue;
+        }
+
+        const hasOrderIntent = candidate.order_id != null;
+        const reason = hasOrderIntent
+          ? "stale_claim_has_order_intent_review_required"
+          : executionMode === "live"
+            ? "stale_live_claim_review_required"
+            : "stale_paper_orphan_released";
+        const evidence = {
+          source: "stale_reservation_reconciliation",
+          staleAfterMs,
+          ageMs,
+          executionMode,
+          orderIntentId: hasOrderIntent ? String(candidate.order_id) : null,
+          orderIntentStatus: candidate.order_status == null
+            ? null
+            : String(candidate.order_status),
+          activeReservation: false,
+        };
+
+        if (hasOrderIntent || executionMode === "live") {
+          const incidentId = await recordReservationReconciliationIncident(
+            c,
+            candidate,
+            reason,
+            evidence,
+            false,
+          );
+          summary.reviewRequired += 1;
+          summary.results.push({
+            reservationId,
+            executionMode,
+            symbol: String(candidate.symbol),
+            windowKey: String(candidate.window_key),
+            ticker: String(candidate.ticker),
+            ageMs,
+            outcome: "review_required",
+            reason,
+            incidentId,
+          });
+          continue;
+        }
+
+        const released = await c.query(
+          `UPDATE kalshi_scalp_contrarian_reservations
+              SET status='released',
+                  reserved_budget=0,
+                  reason=$2,
+                  updated_at=NOW()
+            WHERE id=$1
+              AND status='claimed'
+              AND reserved_budget > 0
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM kalshi_scalp_contrarian_orders o
+                 WHERE o.reservation_id=kalshi_scalp_contrarian_reservations.id
+              )
+            RETURNING *`,
+          [reservationId, reason],
+        );
+        if (!released.rows[0]) {
+          const incidentId = await recordReservationReconciliationIncident(
+            c,
+            candidate,
+            "stale_claim_release_race_review_required",
+            { ...evidence, releaseRace: true },
+            false,
+          );
+          summary.reviewRequired += 1;
+          summary.results.push({
+            reservationId,
+            executionMode,
+            symbol: String(candidate.symbol),
+            windowKey: String(candidate.window_key),
+            ticker: String(candidate.ticker),
+            ageMs,
+            outcome: "review_required",
+            reason: "stale_claim_release_race_review_required",
+            incidentId,
+          });
+          continue;
+        }
+
+        const incidentId = await recordReservationReconciliationIncident(
+          c,
+          candidate,
+          reason,
+          evidence,
+          true,
+        );
+        summary.released += 1;
+        summary.results.push({
+          reservationId,
+          executionMode,
+          symbol: String(candidate.symbol),
+          windowKey: String(candidate.window_key),
+          ticker: String(candidate.ticker),
+          ageMs,
+          outcome: "released",
+          reason,
+          incidentId,
+        });
+      }
+      await c.query("COMMIT");
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
+  return summary;
 }
 
 async function finalize(orderId: string, status: ContrarianOrderStatus, input: ContrarianFinalizeInput): Promise<ContrarianOrder | null> {

@@ -19,6 +19,7 @@ import {
   type ContrarianSide,
 } from "./kalshi-scalper-contrarian.ts";
 import {
+  acquireContrarianReservationOwnership,
   claimContrarianReservation,
   finalizeContrarianFilled,
   finalizeContrarianPaper,
@@ -41,6 +42,7 @@ import {
   loadContrarianConfigRecord,
   recordContrarianObservation,
   recordContrarianGuardOutcomeStudy,
+  reconcileStaleContrarianReservations,
   releaseContrarianReservation,
   runContrarianMigrations,
   saveContrarianConfig,
@@ -50,6 +52,7 @@ import {
   type ContrarianObservation,
   type ContrarianOrder,
   type ContrarianReservation,
+  type ContrarianReservationOwnership,
   type ContrarianGuardOutcomeStudyInput,
 } from "./kalshi-scalper-contrarian-db.ts";
 import {
@@ -113,6 +116,7 @@ let breakerReasonInMemory: string | null = null;
 let breakerGeneration = 0;
 let configTail: Promise<void> = Promise.resolve();
 const attemptsInFlight = new Set<string>();
+const activeReservationByAttempt = new Map<string, string>();
 const recentObservationKeys = new Map<string, number>();
 const lastReconcileAt = new Map<string, number>();
 const lastSettlementAt = new Map<string, number>();
@@ -188,6 +192,19 @@ export async function initContrarianExperiment(): Promise<void> {
   }
   breakerLatchedInMemory = configRecord.config.circuitBreaker;
   breakerReasonInMemory = configRecord.config.circuitBreakerReason;
+  const reservationRecovery = await reconcileStaleContrarianReservations({
+    // There cannot be an active attempt before this module has initialized.
+    activeReservationIds: [],
+  });
+  if (reservationRecovery.released > 0 || reservationRecovery.reviewRequired > 0) {
+    logger.warn(
+      {
+        released: reservationRecovery.released,
+        reviewRequired: reservationRecovery.reviewRequired,
+      },
+      "[kalshi-scalper-contrarian] startup reservation reconciliation completed",
+    );
+  }
   contrarianExposureRegistry.replace(await getActiveContrarianExposures());
   const unresolved = await getUnknownContrarianOrders();
   if (unresolved.length > 0) {
@@ -560,6 +577,7 @@ export async function triggerContrarianFromNormalGuard(
   attemptsInFlight.add(key);
 
   let reservation: ContrarianReservation | null = null;
+  let reservationOwnership: ContrarianReservationOwnership | null = null;
   try {
     if (breakerBlocks(snapshot)) {
       await persistObservation({
@@ -680,6 +698,24 @@ export async function triggerContrarianFromNormalGuard(
       }
     }
 
+    // Acquire bounded, cross-worker ownership before claiming cap. If ownership
+    // is unavailable, do not create a reservation that would have to age out.
+    reservationOwnership = await acquireContrarianReservationOwnership({
+      executionMode: snapshot.config.mode,
+      symbol: trigger.symbol.toUpperCase(),
+      windowKey: trigger.windowKey,
+    });
+    if (!reservationOwnership) {
+      await persistObservation({
+        trigger,
+        snapshot,
+        eligible: false,
+        reason: "reservation_ownership_unavailable",
+        context: firstContext,
+      });
+      return;
+    }
+
     const claim = await claimContrarianReservation({
       executionMode: snapshot.config.mode,
       sourceMode: trigger.sourceMode,
@@ -708,6 +744,7 @@ export async function triggerContrarianFromNormalGuard(
       return;
     }
     reservation = claim.reservation;
+    activeReservationByAttempt.set(key, reservation.id);
     if (snapshot.config.mode === "live") {
       contrarianExposureRegistry.add(
         trigger.sourceMode,
@@ -827,6 +864,17 @@ export async function triggerContrarianFromNormalGuard(
         configVersion: snapshot.version,
       },
     });
+    // The durable intent now owns the lifecycle. Release the short-lived
+    // session lease promptly instead of holding a pool connection through the
+    // exchange request and later reconciliation.
+    const completedOwnership = reservationOwnership;
+    reservationOwnership = null;
+    await completedOwnership.release().catch((error) =>
+      logger.error(
+        { error, reservationId: order.reservationId, orderId: order.id },
+        "[kalshi-scalper-contrarian] ownership lease cleanup failed after durable intent",
+      )
+    );
 
     const postIntentReason = synchronousFinalReason(trigger, snapshot);
     if (postIntentReason) {
@@ -1017,6 +1065,13 @@ export async function triggerContrarianFromNormalGuard(
       },
     });
   } finally {
+    await reservationOwnership?.release().catch((error) =>
+      logger.error(
+        { error, reservationId: reservation?.id ?? null },
+        "[kalshi-scalper-contrarian] failed to release reservation ownership lease",
+      )
+    );
+    activeReservationByAttempt.delete(key);
     attemptsInFlight.delete(key);
   }
 }
@@ -1183,6 +1238,24 @@ async function settleGuardOutcomeStudy(
 
 export async function evaluateContrarianLifecycle(): Promise<void> {
   const now = Date.now();
+  const reservationRecovery = await reconcileStaleContrarianReservations({
+    activeReservationIds: [...activeReservationByAttempt.values()],
+  });
+  if (reservationRecovery.reviewRequired > 0) {
+    logger.error(
+      {
+        reviewRequired: reservationRecovery.reviewRequired,
+        reservations: reservationRecovery.results
+          .filter((result) => result.outcome === "review_required")
+          .map((result) => ({
+            reservationId: result.reservationId,
+            executionMode: result.executionMode,
+            reason: result.reason,
+          })),
+      },
+      "[kalshi-scalper-contrarian] stale reservations require operator review",
+    );
+  }
   await replayContrarianGuardOutcomeStudyOutbox().catch((error) =>
     logger.warn(
       { error },
