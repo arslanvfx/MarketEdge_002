@@ -45,6 +45,7 @@ export interface ScalpCalibrationShadowEvidence {
   /** A qualifying counterfactual quote, not proof of an order fill. */
   candidate: boolean;
   settledAt: string | null;
+  outcome: "win" | "loss" | null;
   hypotheticalPnl: number | null;
 }
 
@@ -69,13 +70,27 @@ export type ScalpCalibrationRecommendationStatus =
 
 export interface ScalpCalibrationTimingSummary {
   variantSeconds: number;
+  observedWindows: number;
   candidateCoverage: number;
   trainingCandidates: number;
   holdoutCandidates: number;
   trainingSettlements: number;
   holdoutSettlements: number;
+  trainingWins: number;
+  trainingLosses: number;
+  holdoutWins: number;
+  holdoutLosses: number;
+  trainingWinRate: number | null;
+  holdoutWinRate: number | null;
+  totalSettlements: number;
+  totalWins: number;
+  totalLosses: number;
+  totalWinRate: number | null;
   trainingPnl: number;
   holdoutPnl: number;
+  totalPnl: number;
+  ready: boolean;
+  profitable: boolean;
 }
 
 export interface ScalpCalibrationRecommendation {
@@ -93,6 +108,7 @@ export interface ScalpCalibrationRecommendation {
     current: ScalpCalibrationTimingSummary | null;
     proposed: ScalpCalibrationTimingSummary | null;
   };
+  timingOptions: ScalpCalibrationTimingSummary[];
   dominantBlockers: Array<{ blocker: string; count: number }>;
   confidence: "low" | "moderate" | "high";
   rationale: string[];
@@ -130,6 +146,10 @@ export interface BuildScalpCalibrationRecommendationInput {
 
 const SHADOW_DISCLAIMER =
   "Shadow evidence is hypothesis only: cached quotes do not prove an order would have filled.";
+const MIN_ATTEMPTED_WINDOWS = 12;
+const MIN_SETTLED_REAL_FILLS = 8;
+const MIN_TRAINING_SETTLEMENTS = 8;
+const MIN_HOLDOUT_SETTLEMENTS = 4;
 
 /** Exact-field equality for persisted settings before an apply or revert. */
 export function scalpCalibrationSettingsEqual(
@@ -168,16 +188,53 @@ function timingSummary(rows: ScalpCalibrationShadowEvidence[], variantSeconds: n
   const summary = (part: ScalpCalibrationShadowEvidence[]) => {
     const candidates = part.filter((row) => row.candidate);
     const settled = candidates.filter((row) => row.settledAt != null && row.hypotheticalPnl != null);
-    return { candidates: candidates.length, settlements: settled.length,
-      pnl: settled.reduce((total, row) => total + (row.hypotheticalPnl ?? 0), 0) };
+    const wins = settled.filter((row) =>
+      row.outcome === "win"
+      || (row.outcome == null && (row.hypotheticalPnl ?? 0) >= 0)
+    ).length;
+    const losses = settled.filter((row) =>
+      row.outcome === "loss"
+      || (row.outcome == null && (row.hypotheticalPnl ?? 0) < 0)
+    ).length;
+    return {
+      candidates: candidates.length,
+      settlements: settled.length,
+      wins,
+      losses,
+      winRate: settled.length > 0 ? (wins / settled.length) * 100 : null,
+      pnl: settled.reduce((total, row) => total + (row.hypotheticalPnl ?? 0), 0),
+    };
   };
   const training = summary(ordered.slice(0, split));
   const holdout = summary(ordered.slice(split));
+  const totalSettlements = training.settlements + holdout.settlements;
+  const totalWins = training.wins + holdout.wins;
+  const totalLosses = training.losses + holdout.losses;
+  const trainingPnl = training.pnl;
+  const holdoutPnl = holdout.pnl;
+  const ready = training.settlements >= MIN_TRAINING_SETTLEMENTS
+    && holdout.settlements >= MIN_HOLDOUT_SETTLEMENTS;
   return {
-    variantSeconds, candidateCoverage: training.candidates + holdout.candidates,
+    variantSeconds,
+    observedWindows: ordered.length,
+    candidateCoverage: training.candidates + holdout.candidates,
     trainingCandidates: training.candidates, holdoutCandidates: holdout.candidates,
     trainingSettlements: training.settlements, holdoutSettlements: holdout.settlements,
-    trainingPnl: training.pnl, holdoutPnl: holdout.pnl,
+    trainingWins: training.wins,
+    trainingLosses: training.losses,
+    holdoutWins: holdout.wins,
+    holdoutLosses: holdout.losses,
+    trainingWinRate: training.winRate,
+    holdoutWinRate: holdout.winRate,
+    totalSettlements,
+    totalWins,
+    totalLosses,
+    totalWinRate: totalSettlements > 0 ? (totalWins / totalSettlements) * 100 : null,
+    trainingPnl,
+    holdoutPnl,
+    totalPnl: trainingPnl + holdoutPnl,
+    ready,
+    profitable: ready && trainingPnl >= 0 && holdoutPnl >= 0,
   };
 }
 
@@ -206,22 +263,32 @@ export function buildScalpCalibrationRecommendation(
   }
   const dominantBlockers = [...blockers.entries()].map(([blocker, count]) => ({ blocker, count }))
     .sort((a, b) => b.count - a.count || a.blocker.localeCompare(b.blocker));
-  const current = timingSummary(shadows, input.currentSettings.windowSeconds);
-  const variants = [...new Set(shadows.map((row) => row.variantSeconds))]
-    .filter((seconds) => seconds >= 60 && seconds <= 180
-      && seconds > input.currentSettings.windowSeconds
-      && Math.abs(seconds - input.currentSettings.windowSeconds) <= 30)
+  const timingOptions = [...new Set([
+    input.currentSettings.windowSeconds,
+    ...shadows.map((row) => row.variantSeconds),
+  ])]
+    .filter((seconds) => seconds >= 60 && seconds <= 180)
     .sort((a, b) => a - b)
     .map((seconds) => timingSummary(shadows, seconds));
+  const current = timingOptions.find(
+    (summary) => summary.variantSeconds === input.currentSettings.windowSeconds,
+  ) ?? null;
+  const variants = timingOptions.filter(
+    (summary) => summary.variantSeconds > input.currentSettings.windowSeconds,
+  );
   const minimumReasons: string[] = [];
-  if (evidence.attemptedUniqueWindows < 12) minimumReasons.push("requires_at_least_12_attempted_unique_windows");
-  if (evidence.settledRealFills < 8) minimumReasons.push("requires_at_least_8_settled_real_fills");
-  const sufficientSplit = (summary: ScalpCalibrationTimingSummary) =>
-    summary.trainingSettlements >= 8 && summary.holdoutSettlements >= 4;
+  if (evidence.attemptedUniqueWindows < MIN_ATTEMPTED_WINDOWS) {
+    minimumReasons.push("requires_at_least_12_attempted_unique_windows");
+  }
+  if (evidence.settledRealFills < MIN_SETTLED_REAL_FILLS) {
+    minimumReasons.push("requires_at_least_8_settled_real_fills");
+  }
   const noEarlierVariantExistsWithinRange =
     input.currentSettings.windowSeconds >= 180;
-  if (!sufficientSplit(current)
-    || (!noEarlierVariantExistsWithinRange && !variants.some(sufficientSplit))) {
+  if (
+    !noEarlierVariantExistsWithinRange
+    && !variants.some((summary) => summary.ready)
+  ) {
     minimumReasons.push("requires_shadow_training_and_holdout_evidence");
   }
   const base = {
@@ -230,6 +297,7 @@ export function buildScalpCalibrationRecommendation(
     currentSettings: { ...input.currentSettings },
     proposedSettings: { ...input.currentSettings }, evidenceCutoff: input.evidenceCutoff,
     analysisStart: input.analysisStart, evidence, dominantBlockers,
+    timingOptions,
     shadowDisclaimer: SHADOW_DISCLAIMER, createdAt: input.createdAt,
     appliedAt: null, appliedBy: null, revertedAt: null, revertedBy: null,
   } satisfies Omit<ScalpCalibrationRecommendation, "status" | "confidence" | "rationale" | "chronologicalHoldout">;
@@ -238,23 +306,42 @@ export function buildScalpCalibrationRecommendation(
       chronologicalHoldout: { current, proposed: null },
       rationale: [...minimumReasons, "Band and budget are unchanged because this analysis evaluates timing only."] };
   }
-  const proposed = variants.find((candidate) => sufficientSplit(candidate)
-    && candidate.candidateCoverage > current.candidateCoverage
-    && candidate.trainingCandidates >= current.trainingCandidates
-    && candidate.holdoutCandidates >= current.holdoutCandidates
-    && candidate.trainingPnl >= 0 && candidate.holdoutPnl >= 0);
+  const readyProfitableVariants = variants.filter((candidate) =>
+    candidate.profitable
+    && candidate.candidateCoverage > 0
+    && (
+      current == null
+      || !current.ready
+      || (
+        candidate.candidateCoverage > current.candidateCoverage
+        && candidate.trainingCandidates >= current.trainingCandidates
+        && candidate.holdoutCandidates >= current.holdoutCandidates
+      )
+    )
+  );
+  // "Earlier" means more seconds remaining. Pick the earliest independently
+  // profitable timing, rather than forcing operators through 30-second steps.
+  const proposed = readyProfitableVariants
+    .sort((a, b) => b.variantSeconds - a.variantSeconds)[0] ?? null;
   if (!proposed) {
     return { ...base, status: "no_change", confidence: "moderate",
       chronologicalHoldout: { current, proposed: null },
       rationale: [
         noEarlierVariantExistsWithinRange
           ? "No earlier entry timing exists within the conservative 60–180 second calibration range."
-          : "No earlier entry timing independently improved coverage with non-negative chronological training and holdout P&L.",
+          : "No earlier timing has enough chronological evidence with non-negative training and holdout P&L.",
         "Band and budget are unchanged because this analysis evaluates timing only.",
       ] };
   }
-  return { ...base, status: "recommended", confidence: "high",
+  const highConfidence = proposed.trainingSettlements >= 16
+    && proposed.holdoutSettlements >= 8;
+  return { ...base, status: "recommended", confidence: highConfidence ? "high" : "moderate",
     proposedSettings: { ...input.currentSettings, windowSeconds: proposed.variantSeconds },
     chronologicalHoldout: { current, proposed },
-    rationale: [`Starting at ${proposed.variantSeconds}s remaining improved candidate coverage over ${current.variantSeconds}s remaining.`, "Training and holdout hypothetical P&L are non-negative.", "Band and budget are unchanged because this analysis evaluates timing only."] };
+    rationale: [
+      `The earliest independently supported timing is ${proposed.variantSeconds}s remaining.`,
+      `${proposed.totalWins} wins and ${proposed.totalLosses} losses produced ${proposed.totalPnl.toFixed(2)} hypothetical P&L across ${proposed.totalSettlements} settled shadow entries.`,
+      "Training and recent holdout P&L are both non-negative.",
+      "Band and budget are unchanged because this analysis evaluates timing only.",
+    ] };
 }

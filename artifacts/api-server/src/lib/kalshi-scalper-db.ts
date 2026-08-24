@@ -1794,7 +1794,7 @@ export async function getScalpCalibrationEvidence(
     );
     const shadow = await client.query(
       `SELECT mode, symbol, window_key, variant_seconds, first_eligible_at,
-              first_safe_entry_at, settled_at, hypothetical_pnl
+              first_safe_entry_at, settled_at, outcome, hypothetical_pnl
          FROM kalshi_scalp_shadow_entries
         WHERE mode = $1
           AND symbol = ANY($2::text[])
@@ -1839,6 +1839,9 @@ export async function getScalpCalibrationEvidence(
         settledAt: row["settled_at"] == null
           ? null
           : calibrationIso(row["settled_at"]),
+        outcome: row["outcome"] === "win" || row["outcome"] === "loss"
+          ? row["outcome"]
+          : null,
         hypotheticalPnl: row["hypothetical_pnl"] == null
           ? null
           : Number(row["hypothetical_pnl"]),

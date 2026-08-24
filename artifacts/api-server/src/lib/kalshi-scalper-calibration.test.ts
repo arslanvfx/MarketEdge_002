@@ -29,6 +29,7 @@ function input(
     mode: "paper" as const, symbol, windowKey: `s${i}`, variantSeconds: variant,
     observedAt: `2025-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
     candidate: i < 16 || (extraCandidate && i >= 16), settledAt: i < 16 ? "2025-02-01T00:00:00.000Z" : null,
+    outcome: i < 16 ? "win" as const : null,
     hypotheticalPnl: i < 16 ? 1 : null,
   }));
   return { mode: "paper", symbol, currentSettings, analysisStart: "2025-01-01T00:00:00.000Z", evidenceCutoff: "2025-03-01T00:00:00.000Z", createdAt: "2025-03-02T00:00:00.000Z",
@@ -66,6 +67,53 @@ test("recommends valid earlier timing and never changes band or budget", () => {
   assert.equal(result.status, "recommended"); assert.equal(result.proposedSettings.windowSeconds, 120);
   assert.equal(result.proposedSettings.bandMin, settings.bandMin); assert.equal(result.proposedSettings.budgetDollars, settings.budgetDollars);
   assert.equal(scalpCalibrationSettingsEqual(settings, result.currentSettings), true);
+});
+
+test("evaluates the full timing range and picks the earliest validated entry", () => {
+  const value = input("BTC", settings, 120);
+  const early = value.shadowRecords
+    .filter((row) => row.variantSeconds === 120)
+    .map((row) => ({ ...row, variantSeconds: 180 }));
+  value.shadowRecords.push(...early);
+  const result = buildScalpCalibrationRecommendation(value);
+  assert.equal(result.status, "recommended");
+  assert.equal(result.proposedSettings.windowSeconds, 180);
+  assert.deepEqual(
+    result.timingOptions.map((row) => row.variantSeconds),
+    [90, 120, 180],
+  );
+  assert.equal(result.chronologicalHoldout.proposed?.totalWins, 16);
+  assert.equal(result.chronologicalHoldout.proposed?.totalLosses, 0);
+});
+
+test("can recommend a proven earlier timing before the exact current timing has a full split", () => {
+  const value = input("BTC", settings, 180);
+  value.shadowRecords = value.shadowRecords.filter(
+    (row) => row.variantSeconds !== settings.windowSeconds,
+  );
+  const result = buildScalpCalibrationRecommendation(value);
+  assert.equal(result.status, "recommended");
+  assert.equal(result.proposedSettings.windowSeconds, 180);
+  assert.equal(result.chronologicalHoldout.current?.ready, false);
+  assert.equal(result.chronologicalHoldout.proposed?.ready, true);
+});
+
+test("exposes timing-level wins losses pnl and collection progress", () => {
+  const value = input();
+  const holdoutLoss = value.shadowRecords
+    .filter((row) => row.variantSeconds === 120 && row.settledAt != null)
+    .at(-1)!;
+  holdoutLoss.outcome = "loss";
+  holdoutLoss.hypotheticalPnl = -10;
+  const result = buildScalpCalibrationRecommendation(value);
+  const timing = result.timingOptions.find((row) => row.variantSeconds === 120)!;
+  assert.equal(timing.observedWindows, 18);
+  assert.equal(timing.totalSettlements, 16);
+  assert.equal(timing.totalWins, 15);
+  assert.equal(timing.totalLosses, 1);
+  assert.equal(timing.ready, true);
+  assert.equal(timing.profitable, false);
+  assert.ok(timing.totalWinRate != null);
 });
 test("returns no_change when earlier coverage does not improve", () => {
   const value = input(); for (const row of value.shadowRecords) if (row.variantSeconds === 120) row.candidate = row.observedAt < "2025-01-17";

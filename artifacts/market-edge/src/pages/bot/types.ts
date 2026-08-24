@@ -1043,13 +1043,27 @@ export interface ScalpCalibrationSettings {
 
 export interface ScalpCalibrationTimingSummary {
   variantSeconds: number;
+  observedWindows?: number;
   candidateCoverage: number;
   trainingCandidates: number;
   holdoutCandidates: number;
   trainingSettlements: number;
   holdoutSettlements: number;
+  trainingWins?: number;
+  trainingLosses?: number;
+  holdoutWins?: number;
+  holdoutLosses?: number;
+  trainingWinRate?: number | null;
+  holdoutWinRate?: number | null;
+  totalSettlements?: number;
+  totalWins?: number;
+  totalLosses?: number;
+  totalWinRate?: number | null;
   trainingPnl: number;
   holdoutPnl: number;
+  totalPnl?: number;
+  ready?: boolean;
+  profitable?: boolean;
 }
 
 export interface ScalpCalibrationRecommendation {
@@ -1076,6 +1090,7 @@ export interface ScalpCalibrationRecommendation {
     current: ScalpCalibrationTimingSummary | null;
     proposed: ScalpCalibrationTimingSummary | null;
   };
+  timingOptions?: ScalpCalibrationTimingSummary[];
   dominantBlockers: Array<{ blocker: string; count: number }>;
   confidence: "low" | "moderate" | "high";
   rationale: string[];

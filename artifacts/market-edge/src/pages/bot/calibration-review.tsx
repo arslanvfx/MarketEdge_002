@@ -2,7 +2,9 @@ import { useState } from "react";
 import { AlertTriangle, ChevronRight, Target } from "lucide-react";
 import { fmt$, fmtDateTime } from "./utils";
 import type {
+  ScalpCalibrationRecommendation,
   ScalpCalibrationReport,
+  ScalpCalibrationTimingSummary,
 } from "./types";
 
 interface CalibrationReviewProps {
@@ -50,10 +52,10 @@ export function ScalperCalibrationReview({
   
   const getStatusLabel = (status: string | undefined) => {
     switch (status) {
-      case "recommended": return "Recommended";
-      case "no_change": return "No Change";
+      case "recommended": return "Move Earlier";
+      case "no_change": return "Keep Timing";
       case "applied": return "Applied";
-      case "insufficient_data": return "Need Data";
+      case "insufficient_data": return "Collecting";
       case "superseded": return "Superseded";
       case "reverted": return "Reverted";
       default: return "Not Analyzed";
@@ -67,6 +69,74 @@ export function ScalperCalibrationReview({
     const minutes = Math.floor(seconds / 60);
     const remainder = seconds % 60;
     return `${minutes}:${String(remainder).padStart(2, "0")} left`;
+  };
+
+  const getTimingOptions = (
+    rec: ScalpCalibrationRecommendation,
+  ): ScalpCalibrationTimingSummary[] => {
+    if (rec.timingOptions?.length) {
+      return [...rec.timingOptions].sort(
+        (left, right) => right.variantSeconds - left.variantSeconds,
+      );
+    }
+    const legacy = [
+      rec.chronologicalHoldout.current,
+      rec.chronologicalHoldout.proposed,
+    ].filter((row): row is ScalpCalibrationTimingSummary => row != null);
+    return [...new Map(
+      legacy.map((row) => [row.variantSeconds, row]),
+    ).values()].sort((left, right) => right.variantSeconds - left.variantSeconds);
+  };
+
+  const timingSettlements = (timing: ScalpCalibrationTimingSummary) =>
+    timing.totalSettlements
+      ?? timing.trainingSettlements + timing.holdoutSettlements;
+  const timingWins = (timing: ScalpCalibrationTimingSummary) =>
+    timing.totalWins ?? null;
+  const timingLosses = (timing: ScalpCalibrationTimingSummary) =>
+    timing.totalLosses ?? null;
+  const timingPnl = (timing: ScalpCalibrationTimingSummary) =>
+    timing.totalPnl ?? timing.trainingPnl + timing.holdoutPnl;
+  const timingWinRate = (timing: ScalpCalibrationTimingSummary) =>
+    timing.totalWinRate
+      ?? (timingWins(timing) != null
+        && timingSettlements(timing) > 0
+        ? (timingWins(timing)! / timingSettlements(timing)) * 100
+        : null);
+  const timingReady = (timing: ScalpCalibrationTimingSummary) =>
+    timing.ready
+      ?? (
+        timing.trainingSettlements >= 8
+        && timing.holdoutSettlements >= 4
+      );
+  const timingProfitable = (timing: ScalpCalibrationTimingSummary) =>
+    timing.profitable
+      ?? (
+        timingReady(timing)
+        && timing.trainingPnl >= 0
+        && timing.holdoutPnl >= 0
+      );
+
+  const collectingSummary = (rec: ScalpCalibrationRecommendation) => {
+    if (rec.evidence.attemptedUniqueWindows < 12) {
+      return `${rec.evidence.attemptedUniqueWindows}/12 market windows collected`;
+    }
+    if (rec.evidence.settledRealFills < 8) {
+      return `${rec.evidence.settledRealFills}/8 real fills settled`;
+    }
+    const earlier = getTimingOptions(rec)
+      .filter((row) => row.variantSeconds > rec.currentSettings.windowSeconds)
+      .sort((left, right) => {
+        const leftProgress = Math.min(left.trainingSettlements / 8, 1)
+          + Math.min(left.holdoutSettlements / 4, 1);
+        const rightProgress = Math.min(right.trainingSettlements / 8, 1)
+          + Math.min(right.holdoutSettlements / 4, 1);
+        return rightProgress - leftProgress;
+      })[0];
+    if (!earlier) return "No earlier timing observations recorded yet";
+    return `${formatTiming(earlier.variantSeconds)}: `
+      + `${earlier.trainingSettlements}/8 training · `
+      + `${earlier.holdoutSettlements}/4 recent outcomes`;
   };
 
   return (
@@ -87,13 +157,13 @@ export function ScalperCalibrationReview({
             disabled={mutationBusy !== null || !canManage}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-md text-[10px] font-bold uppercase tracking-widest transition-colors disabled:opacity-50"
           >
-            {mutationBusy === "calibration-refresh" ? "Reviewing..." : "Refresh all 12 markets"}
+            {mutationBusy === "calibration-refresh" ? "Analyzing..." : "Analyze all 12 markets"}
           </button>
         </div>
       </div>
 
       <div className="text-[10px] text-muted-foreground mb-3 leading-relaxed max-w-3xl">
-        Evidence is isolated to the selected <strong className="text-foreground uppercase tracking-widest">{report?.mode || "paper"}</strong> ledger. Approved per-market settings are shared execution configuration, so every change requires an explicit operator review.
+        Evidence is isolated to the selected <strong className="text-foreground uppercase tracking-widest">{report?.mode || "paper"}</strong> ledger. Analysis never clears the raw history—it creates a new saved review from the latest 60 days of retained evidence. Entry timing changes remain operator-controlled.
       </div>
 
       <div className="bg-background/50 border border-border rounded-lg overflow-hidden">
@@ -131,13 +201,20 @@ export function ScalperCalibrationReview({
                     </div>
                     <div className="flex-1 min-w-0 text-xs text-muted-foreground truncate">
                       {isRecommended && rec.confidence ? (
-                        <span><strong className="text-foreground capitalize">{rec.confidence} confidence</strong>: Found better timing</span>
+                        <span>
+                          Start at <strong className="text-emerald-300">
+                            {formatTiming(rec.proposedSettings.windowSeconds)}
+                          </strong>
+                          {rec.chronologicalHoldout.proposed
+                            ? timingWins(rec.chronologicalHoldout.proposed) != null
+                              ? ` · ${timingWins(rec.chronologicalHoldout.proposed)}W–${timingLosses(rec.chronologicalHoldout.proposed)}L · ${fmt$(timingPnl(rec.chronologicalHoldout.proposed))}`
+                              : ` · ${timingSettlements(rec.chronologicalHoldout.proposed)} settled · ${fmt$(timingPnl(rec.chronologicalHoldout.proposed))}`
+                            : ""}
+                        </span>
                       ) : isNoChange ? (
-                         <span>No earlier timing passed both training and holdout checks</span>
+                         <span>No earlier timing passed both training and recent holdout checks</span>
                        ) : rec?.status === "insufficient_data" ? (
-                         <span>
-                           {rec.evidence.attemptedUniqueWindows} windows and {rec.evidence.settledRealFills} settled fills recorded
-                         </span>
+                         <span>{collectingSummary(rec)}</span>
                        ) : active ? (
                         <span>Optimized settings running</span>
                        ) : rec ? (
@@ -202,6 +279,88 @@ export function ScalperCalibrationReview({
                             )}
                           </div>
 
+                           <div className="bg-background/50 border border-border rounded-lg overflow-hidden">
+                             <div className="px-3 py-2 border-b border-border/60">
+                               <div className="text-[9px] uppercase font-bold text-muted-foreground tracking-widest">
+                                 Entry timing results
+                               </div>
+                               <div className="text-[10px] text-muted-foreground mt-1">
+                                 Earlier entries have more time left. Ready requires 8 training and 4 recent holdout settlements.
+                               </div>
+                             </div>
+                             <div className="overflow-x-auto">
+                               <div className="min-w-[650px]">
+                                 <div className="grid grid-cols-[120px_80px_80px_90px_90px_1fr] gap-2 px-3 py-2 text-[9px] uppercase tracking-widest text-muted-foreground border-b border-border/40">
+                                   <div>Entry point</div>
+                                   <div className="text-right">Settled</div>
+                                   <div className="text-right">W–L</div>
+                                   <div className="text-right">Win rate</div>
+                                   <div className="text-right">Hyp. P&amp;L</div>
+                                   <div className="text-right">Validation</div>
+                                 </div>
+                                 {getTimingOptions(rec).map((timing) => {
+                                   const isCurrent = timing.variantSeconds === rec.currentSettings.windowSeconds;
+                                   const isProposedTiming = isRecommended
+                                     && timing.variantSeconds === rec.proposedSettings.windowSeconds;
+                                   const ready = timingReady(timing);
+                                   const profitable = timingProfitable(timing);
+                                   const winRate = timingWinRate(timing);
+                                   const pnl = timingPnl(timing);
+                                   const wins = timingWins(timing);
+                                   const losses = timingLosses(timing);
+                                   return (
+                                     <div
+                                       key={timing.variantSeconds}
+                                       className={`grid grid-cols-[120px_80px_80px_90px_90px_1fr] gap-2 px-3 py-2.5 text-[10px] font-mono border-b border-border/30 last:border-0 ${
+                                         isProposedTiming ? "bg-emerald-500/10" : isCurrent ? "bg-blue-500/5" : ""
+                                       }`}
+                                     >
+                                       <div className="font-bold text-foreground">
+                                         {formatTiming(timing.variantSeconds)}
+                                         <div className="font-sans font-normal text-[8px] uppercase tracking-wider mt-0.5">
+                                           {isProposedTiming
+                                             ? <span className="text-emerald-400">Recommended</span>
+                                             : isCurrent
+                                               ? <span className="text-blue-400">Current</span>
+                                               : <span className="text-muted-foreground">{timing.observedWindows ?? 0} observed</span>}
+                                         </div>
+                                       </div>
+                                       <div className="text-right text-foreground">{timingSettlements(timing)}</div>
+                                       <div className="text-right">
+                                         {wins == null || losses == null ? (
+                                           <span className="text-muted-foreground">—</span>
+                                         ) : (
+                                           <>
+                                             <span className="text-emerald-400">{wins}</span>
+                                             <span className="text-muted-foreground">–</span>
+                                             <span className="text-red-400">{losses}</span>
+                                           </>
+                                         )}
+                                       </div>
+                                       <div className="text-right text-foreground">
+                                         {winRate == null ? "—" : `${winRate.toFixed(1)}%`}
+                                       </div>
+                                       <div className={`text-right font-bold ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                         {fmt$(pnl)}
+                                       </div>
+                                       <div className="text-right font-sans">
+                                         {ready ? (
+                                           <span className={profitable ? "text-emerald-400" : "text-red-300"}>
+                                             {profitable ? "Passed holdout" : "Failed profitability"}
+                                           </span>
+                                         ) : (
+                                           <span className="text-amber-300">
+                                             {timing.trainingSettlements}/8 train · {timing.holdoutSettlements}/4 recent
+                                           </span>
+                                         )}
+                                       </div>
+                                     </div>
+                                   );
+                                 })}
+                               </div>
+                             </div>
+                           </div>
+
                           {/* Evidence & Rationale */}
                           <div className="bg-background/40 border border-border/50 p-3 rounded-lg text-xs">
                               <div className="text-[9px] uppercase font-bold text-muted-foreground tracking-widest mb-2">Sample Evidence (Recent)</div>
@@ -232,7 +391,7 @@ export function ScalperCalibrationReview({
                           {rec.rationale && rec.rationale.length > 0 && (
                             <div className="text-muted-foreground/90 space-y-1">
                               {rec.rationale.map((line, i) => (
-                                <p key={i}>• {line}</p>
+                                <p key={i}>• {line.replaceAll("_", " ")}</p>
                               ))}
                             </div>
                           )}
