@@ -8,6 +8,12 @@ import {
   type ContrarianMode,
   type ContrarianSide,
 } from "./kalshi-scalper-contrarian.ts";
+import type {
+  ScalpGuardOutcomeStudyAggregate,
+  ScalpGuardOutcomeStudyRecord,
+  ScalpGuardOutcomeStudyRecoveryPayload,
+  ScalpGuardOutcomeStudyReport,
+} from "./kalshi-scalper-types.ts";
 
 export type ContrarianReservationStatus = "claimed" | "released" | "filled" | "unknown" | "settled";
 export type ContrarianOrderStatus = "submitting" | "zero_fill" | "filled" | "unknown" | "settled";
@@ -50,6 +56,14 @@ export interface ContrarianFinalizeInput {
   orderId: string; exchangeOrderId?: string | null; filledCount?: number; avgYesFillPrice?: number | null; budgetSpent?: number;
   evidence?: Record<string, unknown>; reason?: string;
 }
+export type ContrarianGuardOutcomeStudyInput = Omit<
+  ScalpGuardOutcomeStudyRecord,
+  | "settlementResult"
+  | "originalOutcome"
+  | "oppositeOutcome"
+  | "hypotheticalPnl"
+  | "settledAt"
+>;
 type DbRow = Record<string, unknown>;
 const n = (value: unknown, field: string): number => {
   const result = Number(value);
@@ -78,6 +92,43 @@ const orderRow = (r: DbRow): ContrarianOrder => ({
   evidence: json(r.evidence), reconciliationEvidence: r.reconciliation_evidence == null ? null : json(r.reconciliation_evidence),
   createdAt: d(r.created_at, "created_at"), updatedAt: d(r.updated_at, "updated_at"), reconciledAt: r.reconciled_at == null ? null : d(r.reconciled_at, "reconciled_at"), settledAt: r.settled_at == null ? null : d(r.settled_at, "settled_at"),
 });
+const guardOutcomeRow = (r: DbRow): ScalpGuardOutcomeStudyRecord => ({
+  mode: r.mode as ContrarianMode,
+  symbol: String(r.symbol),
+  windowKey: String(r.window_key),
+  ticker: String(r.ticker),
+  closeTime: d(r.close_time, "close_time"),
+  guardReason: String(r.guard_reason),
+  crossingType: r.crossing_type as "target_crossed" | "projected_target_crossing",
+  protectedSide: r.protected_side as ContrarianSide,
+  oppositeSide: r.opposite_side as ContrarianSide,
+  secondsRemaining: r.seconds_remaining == null
+    ? null
+    : n(r.seconds_remaining, "seconds_remaining"),
+  yesAsk: r.yes_ask == null ? null : n(r.yes_ask, "yes_ask"),
+  noAsk: r.no_ask == null ? null : n(r.no_ask, "no_ask"),
+  oppositeAsk: r.opposite_ask == null
+    ? null
+    : n(r.opposite_ask, "opposite_ask"),
+  quoteSupported: Boolean(r.quote_supported),
+  hypotheticalContracts: n(
+    r.hypothetical_contracts,
+    "hypothetical_contracts",
+  ),
+  hypotheticalBudget: n(r.hypothetical_budget, "hypothetical_budget"),
+  hypotheticalAvgYesPrice: r.hypothetical_avg_yes_price == null
+    ? null
+    : n(r.hypothetical_avg_yes_price, "hypothetical_avg_yes_price"),
+  settlementResult: r.settlement_result as ContrarianSide | null,
+  originalOutcome: r.original_outcome as "win" | "loss" | null,
+  oppositeOutcome: r.opposite_outcome as "win" | "loss" | null,
+  hypotheticalPnl: r.hypothetical_pnl == null
+    ? null
+    : n(r.hypothetical_pnl, "hypothetical_pnl"),
+  evidence: json(r.evidence),
+  observedAt: d(r.observed_at, "observed_at"),
+  settledAt: r.settled_at == null ? null : d(r.settled_at, "settled_at"),
+});
 
 export async function runContrarianMigrations(): Promise<void> {
   const c = await pool.connect();
@@ -89,6 +140,37 @@ export async function runContrarianMigrations(): Promise<void> {
       symbol TEXT NOT NULL, window_key TEXT NOT NULL, ticker TEXT NOT NULL, protected_side TEXT NOT NULL CHECK(protected_side IN ('yes','no')),
       opposite_side TEXT NOT NULL CHECK(opposite_side IN ('yes','no')), eligible BOOLEAN NOT NULL, reason TEXT NOT NULL, evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
       yes_ask NUMERIC(16,8), no_ask NUMERIC(16,8), direct_ask NUMERIC(16,8), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+    await c.query(`CREATE TABLE IF NOT EXISTS kalshi_scalp_guard_outcome_study_meta (
+      id TEXT PRIMARY KEY CHECK(id='singleton'),
+      tracking_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+    await c.query(`INSERT INTO kalshi_scalp_guard_outcome_study_meta(id)
+      VALUES('singleton') ON CONFLICT(id) DO NOTHING`);
+    await c.query(`CREATE TABLE IF NOT EXISTS kalshi_scalp_guard_outcome_studies (
+      mode TEXT NOT NULL CHECK(mode IN ('paper','live')),
+      symbol TEXT NOT NULL,
+      window_key TEXT NOT NULL,
+      ticker TEXT NOT NULL,
+      close_time TIMESTAMPTZ NOT NULL,
+      guard_reason TEXT NOT NULL,
+      crossing_type TEXT NOT NULL CHECK(crossing_type IN ('target_crossed','projected_target_crossing')),
+      protected_side TEXT NOT NULL CHECK(protected_side IN ('yes','no')),
+      opposite_side TEXT NOT NULL CHECK(opposite_side IN ('yes','no')),
+      seconds_remaining NUMERIC(12,3),
+      yes_ask NUMERIC(16,8),
+      no_ask NUMERIC(16,8),
+      opposite_ask NUMERIC(16,8),
+      quote_supported BOOLEAN NOT NULL DEFAULT FALSE,
+      hypothetical_contracts INTEGER NOT NULL DEFAULT 0 CHECK(hypothetical_contracts >= 0),
+      hypothetical_budget NUMERIC(16,8) NOT NULL DEFAULT 0,
+      hypothetical_avg_yes_price NUMERIC(16,8),
+      settlement_result TEXT CHECK(settlement_result IN ('yes','no')),
+      original_outcome TEXT CHECK(original_outcome IN ('win','loss')),
+      opposite_outcome TEXT CHECK(opposite_outcome IN ('win','loss')),
+      hypothetical_pnl NUMERIC(16,8),
+      evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+      observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      settled_at TIMESTAMPTZ,
+      PRIMARY KEY(mode,symbol,window_key))`);
     await c.query(`CREATE TABLE IF NOT EXISTS kalshi_scalp_contrarian_reservations (
       id TEXT PRIMARY KEY, execution_mode TEXT NOT NULL CHECK(execution_mode IN ('paper','live')), source_mode TEXT NOT NULL CHECK(source_mode IN ('paper','live')),
       symbol TEXT NOT NULL, window_key TEXT NOT NULL, ticker TEXT NOT NULL, reserved_budget NUMERIC(16,8) NOT NULL DEFAULT 0,
@@ -107,6 +189,11 @@ export async function runContrarianMigrations(): Promise<void> {
       id TEXT PRIMARY KEY, order_id TEXT, reservation_id TEXT, execution_mode TEXT NOT NULL CHECK(execution_mode IN ('paper','live')), symbol TEXT NOT NULL, window_key TEXT NOT NULL,
       ticker TEXT NOT NULL, reason TEXT NOT NULL, evidence JSONB NOT NULL DEFAULT '{}'::jsonb, resolved_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
     await c.query(`CREATE INDEX IF NOT EXISTS contrarian_observations_recent ON kalshi_scalp_contrarian_observations(created_at DESC)`);
+    await c.query(`CREATE INDEX IF NOT EXISTS scalp_guard_outcomes_recent
+      ON kalshi_scalp_guard_outcome_studies(mode,observed_at DESC)`);
+    await c.query(`CREATE INDEX IF NOT EXISTS scalp_guard_outcomes_unsettled
+      ON kalshi_scalp_guard_outcome_studies(close_time)
+      WHERE settlement_result IS NULL`);
     await c.query(`CREATE INDEX IF NOT EXISTS contrarian_orders_reconcile ON kalshi_scalp_contrarian_orders(execution_mode,status,created_at)`);
     await c.query(`CREATE INDEX IF NOT EXISTS contrarian_incidents_unresolved ON kalshi_scalp_contrarian_incidents(created_at DESC) WHERE resolved_at IS NULL`);
   } finally { c.release(); }
@@ -133,6 +220,124 @@ export async function recordContrarianObservation(input: Omit<ContrarianObservat
   const result = await pool.query(`INSERT INTO kalshi_scalp_contrarian_observations(id,execution_mode,source_mode,symbol,window_key,ticker,protected_side,opposite_side,eligible,reason,evidence,yes_ask,no_ask,direct_ask)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`, [crypto.randomUUID(),input.executionMode,input.sourceMode,input.symbol,input.windowKey,input.ticker,input.protectedSide,input.oppositeSide,input.eligible,input.reason,JSON.stringify(input.evidence),input.yesAsk,input.noAsk,input.directAsk]);
   const r = result.rows[0] as DbRow; return { id:String(r.id), executionMode:r.execution_mode as ContrarianMode, sourceMode:r.source_mode as ContrarianMode, symbol:String(r.symbol), windowKey:String(r.window_key), ticker:String(r.ticker), protectedSide:r.protected_side as ContrarianSide, oppositeSide:r.opposite_side as ContrarianSide, eligible:Boolean(r.eligible), reason:String(r.reason), evidence:json(r.evidence), yesAsk:r.yes_ask == null ? null : n(r.yes_ask,"yes_ask"), noAsk:r.no_ask == null ? null : n(r.no_ask,"no_ask"), directAsk:r.direct_ask == null ? null : n(r.direct_ask,"direct_ask"), createdAt:d(r.created_at,"created_at") };
+}
+
+export async function recordContrarianGuardOutcomeStudy(
+  input: ContrarianGuardOutcomeStudyInput,
+): Promise<boolean> {
+  const result = await pool.query(
+    `INSERT INTO kalshi_scalp_guard_outcome_studies(
+       mode,symbol,window_key,ticker,close_time,guard_reason,crossing_type,
+       protected_side,opposite_side,seconds_remaining,yes_ask,no_ask,
+       opposite_ask,quote_supported,hypothetical_contracts,
+       hypothetical_budget,hypothetical_avg_yes_price,evidence,observed_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+     ON CONFLICT(mode,symbol,window_key) DO NOTHING`,
+    [
+      input.mode,
+      input.symbol.toUpperCase(),
+      input.windowKey,
+      input.ticker,
+      input.closeTime,
+      input.guardReason,
+      input.crossingType,
+      input.protectedSide,
+      input.oppositeSide,
+      input.secondsRemaining,
+      input.yesAsk,
+      input.noAsk,
+      input.oppositeAsk,
+      input.quoteSupported,
+      input.hypotheticalContracts,
+      input.hypotheticalBudget,
+      input.hypotheticalAvgYesPrice,
+      JSON.stringify(input.evidence),
+      input.observedAt,
+    ],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function getPendingContrarianGuardOutcomeStudyOutbox(
+  limit = 200,
+): Promise<Array<{
+  mode: ContrarianMode;
+  symbol: string;
+  windowKey: string;
+  payload: ScalpGuardOutcomeStudyRecoveryPayload;
+}>> {
+  const result = await pool.query(
+    `SELECT r.mode,
+            r.symbol,
+            r.window_key,
+            r.skip_evidence->'guardOutcomeStudy' AS payload
+       FROM kalshi_scalp_reservations r
+       JOIN kalshi_scalp_guard_outcome_study_meta m ON m.id='singleton'
+      WHERE r.attempted_at >= m.tracking_started_at
+        AND jsonb_typeof(r.skip_evidence->'guardOutcomeStudy')='object'
+        AND NOT EXISTS (
+          SELECT 1
+            FROM kalshi_scalp_guard_outcome_studies s
+           WHERE s.mode=r.mode
+             AND s.symbol=r.symbol
+             AND s.window_key=r.window_key
+        )
+      ORDER BY r.attempted_at ASC
+      LIMIT $1`,
+    [Math.max(1, Math.min(500, Math.floor(limit)))],
+  );
+  return result.rows.map((row: DbRow) => ({
+    mode: row.mode as ContrarianMode,
+    symbol: String(row.symbol),
+    windowKey: String(row.window_key),
+    payload: json(row.payload) as unknown as ScalpGuardOutcomeStudyRecoveryPayload,
+  }));
+}
+
+export async function getUnsettledContrarianGuardOutcomeStudies(
+  limit = 200,
+): Promise<ScalpGuardOutcomeStudyRecord[]> {
+  const result = await pool.query(
+    `SELECT *
+       FROM kalshi_scalp_guard_outcome_studies
+      WHERE settlement_result IS NULL
+        AND close_time < NOW() - INTERVAL '30 seconds'
+      ORDER BY close_time ASC
+      LIMIT $1`,
+    [Math.max(1, Math.min(500, Math.floor(limit)))],
+  );
+  return result.rows.map((row: DbRow) => guardOutcomeRow(row));
+}
+
+export async function settleContrarianGuardOutcomeStudy(input: {
+  mode: ContrarianMode;
+  symbol: string;
+  windowKey: string;
+  settlementResult: ContrarianSide;
+  originalOutcome: "win" | "loss";
+  oppositeOutcome: "win" | "loss";
+  hypotheticalPnl: number | null;
+}): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE kalshi_scalp_guard_outcome_studies
+        SET settlement_result=$4,
+            original_outcome=$5,
+            opposite_outcome=$6,
+            hypothetical_pnl=$7,
+            settled_at=NOW()
+      WHERE mode=$1 AND symbol=$2 AND window_key=$3
+        AND settlement_result IS NULL`,
+    [
+      input.mode,
+      input.symbol.toUpperCase(),
+      input.windowKey,
+      input.settlementResult,
+      input.originalOutcome,
+      input.oppositeOutcome,
+      input.hypotheticalPnl,
+    ],
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function claimContrarianReservation(input: ContrarianClaimInput): Promise<ContrarianClaimResult> {
@@ -328,5 +533,169 @@ export async function getContrarianReportCounts(): Promise<{ totalOrders: number
   return {
     totalOrders: n(row.total_orders, "total_orders"),
     unresolvedLiveOrders: n(row.unresolved_live_orders, "unresolved_live_orders"),
+  };
+}
+
+function humanizeGuardOutcomeKey(value: string): string {
+  return value
+    .replace(/^freefall_/, "")
+    .replace(/^coordinated_direction_clearance_/, "projection ")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function guardOutcomeAggregateRow(row: DbRow): {
+  dimension: "total" | "mode" | "guard_reason" | "symbol" | "timing";
+  aggregate: ScalpGuardOutcomeStudyAggregate;
+} {
+  const dimension = String(row.dimension) as
+    | "total"
+    | "mode"
+    | "guard_reason"
+    | "symbol"
+    | "timing";
+  const key = String(row.group_key);
+  const settled = n(row.settled, "settled");
+  const oppositeWins = n(row.opposite_wins, "opposite_wins");
+  const pricedSettled = n(row.priced_settled, "priced_settled");
+  const label = dimension === "total"
+    ? "All tracked guards"
+    : dimension === "mode"
+      ? key === "live" ? "Live Scalper" : "Paper Scalper"
+      : dimension === "guard_reason"
+        ? humanizeGuardOutcomeKey(key)
+        : dimension === "timing"
+          ? ({
+              "0_30_seconds": "0–30 seconds left",
+              "31_60_seconds": "31–60 seconds left",
+              "61_120_seconds": "61–120 seconds left",
+              "over_120_seconds": "Over 120 seconds left",
+              unknown: "Timing unavailable",
+            }[key] ?? humanizeGuardOutcomeKey(key))
+          : key;
+  return {
+    dimension,
+    aggregate: {
+      key,
+      label,
+      observed: n(row.observed, "observed"),
+      settled,
+      originalSideLossesPrevented: n(
+        row.original_side_losses_prevented,
+        "original_side_losses_prevented",
+      ),
+      oppositeWins,
+      oppositeLosses: n(row.opposite_losses, "opposite_losses"),
+      winRate: settled > 0 ? oppositeWins / settled : null,
+      pricedSettled,
+      hypotheticalPnl: pricedSettled > 0 && row.hypothetical_pnl != null
+        ? n(row.hypothetical_pnl, "hypothetical_pnl")
+        : null,
+    },
+  };
+}
+
+export async function getContrarianGuardOutcomeStudyReport(
+  recentLimit = 50,
+): Promise<ScalpGuardOutcomeStudyReport> {
+  const [metaResult, aggregateResult, recentResult] = await Promise.all([
+    pool.query(
+      `SELECT tracking_started_at
+         FROM kalshi_scalp_guard_outcome_study_meta
+        WHERE id='singleton'`,
+    ),
+    pool.query(
+      `WITH base AS (
+         SELECT *,
+           CASE
+             WHEN seconds_remaining IS NULL THEN 'unknown'
+             WHEN seconds_remaining <= 30 THEN '0_30_seconds'
+             WHEN seconds_remaining <= 60 THEN '31_60_seconds'
+             WHEN seconds_remaining <= 120 THEN '61_120_seconds'
+             ELSE 'over_120_seconds'
+           END AS timing_bucket
+         FROM kalshi_scalp_guard_outcome_studies
+       )
+       SELECT
+         CASE
+           WHEN GROUPING(mode)=0 THEN 'mode'
+           WHEN GROUPING(guard_reason)=0 THEN 'guard_reason'
+           WHEN GROUPING(symbol)=0 THEN 'symbol'
+           WHEN GROUPING(timing_bucket)=0 THEN 'timing'
+           ELSE 'total'
+         END AS dimension,
+         COALESCE(mode,guard_reason,symbol,timing_bucket,'all') AS group_key,
+         COUNT(*)::int AS observed,
+         COUNT(*) FILTER (WHERE settlement_result IS NOT NULL)::int AS settled,
+         COUNT(*) FILTER (WHERE original_outcome='loss')::int
+           AS original_side_losses_prevented,
+         COUNT(*) FILTER (WHERE opposite_outcome='win')::int AS opposite_wins,
+         COUNT(*) FILTER (WHERE opposite_outcome='loss')::int AS opposite_losses,
+         COUNT(*) FILTER (
+           WHERE settlement_result IS NOT NULL
+             AND quote_supported
+             AND hypothetical_pnl IS NOT NULL
+         )::int AS priced_settled,
+         SUM(hypothetical_pnl) FILTER (
+           WHERE settlement_result IS NOT NULL
+             AND quote_supported
+             AND hypothetical_pnl IS NOT NULL
+         ) AS hypothetical_pnl
+       FROM base
+       GROUP BY GROUPING SETS (
+         (),
+         (mode),
+         (guard_reason),
+         (symbol),
+         (timing_bucket)
+       )
+       ORDER BY dimension, observed DESC, group_key`,
+    ),
+    pool.query(
+      `SELECT *
+         FROM kalshi_scalp_guard_outcome_studies
+        ORDER BY observed_at DESC
+        LIMIT $1`,
+      [Math.max(1, Math.min(200, Math.floor(recentLimit)))],
+    ),
+  ]);
+  const startedRow = metaResult.rows[0] as DbRow | undefined;
+  if (!startedRow) {
+    throw new Error("guard outcome study tracking metadata is missing");
+  }
+  const grouped = aggregateResult.rows.map((row: DbRow) =>
+    guardOutcomeAggregateRow(row)
+  );
+  const emptyTotal: ScalpGuardOutcomeStudyAggregate = {
+    key: "all",
+    label: "All tracked guards",
+    observed: 0,
+    settled: 0,
+    originalSideLossesPrevented: 0,
+    oppositeWins: 0,
+    oppositeLosses: 0,
+    winRate: null,
+    pricedSettled: 0,
+    hypotheticalPnl: null,
+  };
+  const byDimension = (
+    dimension: "mode" | "guard_reason" | "symbol" | "timing",
+  ) => grouped
+    .filter((row) => row.dimension === dimension)
+    .map((row) => row.aggregate);
+  return {
+    trackingStartedAt: d(
+      startedRow.tracking_started_at,
+      "tracking_started_at",
+    ).toISOString(),
+    total: grouped.find((row) => row.dimension === "total")?.aggregate
+      ?? emptyTotal,
+    byMode: byDimension("mode"),
+    byGuardReason: byDimension("guard_reason"),
+    bySymbol: byDimension("symbol"),
+    byTiming: byDimension("timing"),
+    recent: recentResult.rows.map((row: DbRow) => guardOutcomeRow(row)),
+    disclaimer:
+      "This prospective study records settled market direction after an eligible final safety-guard block. No order was submitted, so a favorable counterfactual result is not evidence that an IOC would have filled. Hypothetical P&L appears only when the blocked opportunity captured a valid authenticated opposite-side ask.",
   };
 }

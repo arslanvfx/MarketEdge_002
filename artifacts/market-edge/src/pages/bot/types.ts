@@ -1206,9 +1206,61 @@ export interface ScalperContrarianIncident {
   createdAt: string;
 }
 
+export interface ScalperGuardOutcomeStudyAggregate {
+  key: string;
+  label: string;
+  observed: number;
+  settled: number;
+  originalSideLossesPrevented: number;
+  oppositeWins: number;
+  oppositeLosses: number;
+  winRate: number | null;
+  pricedSettled: number;
+  hypotheticalPnl: number | null;
+}
+
+export interface ScalperGuardOutcomeStudyRecord {
+  mode: "paper" | "live";
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  closeTime: string;
+  guardReason: string;
+  crossingType: "target_crossed" | "projected_target_crossing";
+  protectedSide: "yes" | "no";
+  oppositeSide: "yes" | "no";
+  secondsRemaining: number | null;
+  yesAsk: number | null;
+  noAsk: number | null;
+  oppositeAsk: number | null;
+  quoteSupported: boolean;
+  hypotheticalContracts: number;
+  hypotheticalBudget: number;
+  hypotheticalAvgYesPrice: number | null;
+  settlementResult: "yes" | "no" | null;
+  originalOutcome: "win" | "loss" | null;
+  oppositeOutcome: "win" | "loss" | null;
+  hypotheticalPnl: number | null;
+  evidence: ScalperContrarianEvidence | null;
+  observedAt: string;
+  settledAt: string | null;
+}
+
+export interface ScalperGuardOutcomeStudyReport {
+  trackingStartedAt: string;
+  total: ScalperGuardOutcomeStudyAggregate;
+  byMode: ScalperGuardOutcomeStudyAggregate[];
+  byGuardReason: ScalperGuardOutcomeStudyAggregate[];
+  bySymbol: ScalperGuardOutcomeStudyAggregate[];
+  byTiming: ScalperGuardOutcomeStudyAggregate[];
+  recent: ScalperGuardOutcomeStudyRecord[];
+  disclaimer: string;
+}
+
 export interface ScalperContrarianReport {
   config: ScalperContrarianConfig;
   summary: ScalperContrarianSummary;
+  guardOutcomeStudy: ScalperGuardOutcomeStudyReport;
   recentOrders: ScalperContrarianOrder[];
   recentObservations: ScalperContrarianObservation[];
   recentIncidents: ScalperContrarianIncident[];

@@ -11,6 +11,7 @@ import {
   computeContrarianPnl,
   evaluateContrarianGuardEligibility,
   planContrarianOrder,
+  replayContrarianGuardOutcomeRows,
   validateContrarianConfig,
   type ContrarianConfig,
   type ContrarianConfigPatch,
@@ -26,24 +27,30 @@ import {
   getActiveContrarianExposures,
   getContrarianOrder,
   getContrarianOrders,
+  getContrarianGuardOutcomeStudyReport,
+  getPendingContrarianGuardOutcomeStudyOutbox,
   getContrarianReportCounts,
   getContrarianTotals,
   getRecentContrarianIncidents,
   getRecentContrarianObservations,
   getUnknownContrarianOrders,
   getUnsettledContrarianOrders,
+  getUnsettledContrarianGuardOutcomeStudies,
   hasNormalScalpExposure,
   insertContrarianOrderIntent,
   loadContrarianConfigRecord,
   recordContrarianObservation,
+  recordContrarianGuardOutcomeStudy,
   releaseContrarianReservation,
   runContrarianMigrations,
   saveContrarianConfig,
   settleContrarianOrder,
+  settleContrarianGuardOutcomeStudy,
   type ContrarianConfigRecord,
   type ContrarianObservation,
   type ContrarianOrder,
   type ContrarianReservation,
+  type ContrarianGuardOutcomeStudyInput,
 } from "./kalshi-scalper-contrarian-db.ts";
 import {
   placeScalpOrderStrict,
@@ -55,7 +62,10 @@ import {
   getBalance,
 } from "./kalshi-trader.ts";
 import type { FreefallPreSubmitDecision } from "./kalshi-scalper-policy.ts";
-import type { ScalpMode } from "./kalshi-scalper-types.ts";
+import type {
+  ScalpGuardOutcomeStudyRecoveryPayload,
+  ScalpMode,
+} from "./kalshi-scalper-types.ts";
 
 export interface ContrarianFreshGuardContext {
   ok: boolean;
@@ -105,6 +115,7 @@ let configTail: Promise<void> = Promise.resolve();
 const attemptsInFlight = new Set<string>();
 const lastReconcileAt = new Map<string, number>();
 const lastSettlementAt = new Map<string, number>();
+const lastGuardOutcomeSettlementAt = new Map<string, number>();
 const RECONCILE_INTERVAL_MS = 30_000;
 const SETTLEMENT_INTERVAL_MS = 20_000;
 
@@ -311,6 +322,103 @@ async function persistObservation(input: {
     );
     return null;
   }
+}
+
+function guardOutcomePayloadToInput(
+  payload: ScalpGuardOutcomeStudyRecoveryPayload,
+): ContrarianGuardOutcomeStudyInput | null {
+  if (
+    payload.version !== 1
+    || (payload.mode !== "paper" && payload.mode !== "live")
+    || !payload.symbol
+    || !payload.windowKey
+    || !payload.ticker
+    || (payload.protectedSide !== "yes" && payload.protectedSide !== "no")
+    || (payload.oppositeSide !== "yes" && payload.oppositeSide !== "no")
+    || payload.protectedSide === payload.oppositeSide
+    || (
+      payload.crossingType !== "target_crossed"
+      && payload.crossingType !== "projected_target_crossing"
+    )
+    || typeof payload.guardReason !== "string"
+    || typeof payload.quoteSupported !== "boolean"
+    || !Number.isInteger(payload.hypotheticalContracts)
+    || payload.hypotheticalContracts < 0
+    || !Number.isFinite(payload.hypotheticalBudget)
+    || payload.hypotheticalBudget < 0
+    || typeof payload.evidence !== "object"
+    || payload.evidence === null
+  ) {
+    return null;
+  }
+  const closeTime = new Date(payload.closeTime);
+  const observedAt = new Date(payload.observedAt);
+  if (
+    Number.isNaN(closeTime.valueOf())
+    || Number.isNaN(observedAt.valueOf())
+  ) {
+    return null;
+  }
+  const nullableFinite = (value: number | null): boolean =>
+    value === null || Number.isFinite(value);
+  if (
+    !nullableFinite(payload.secondsRemaining)
+    || !nullableFinite(payload.yesAsk)
+    || !nullableFinite(payload.noAsk)
+    || !nullableFinite(payload.oppositeAsk)
+    || !nullableFinite(payload.hypotheticalAvgYesPrice)
+  ) {
+    return null;
+  }
+  return {
+    mode: payload.mode,
+    symbol: payload.symbol.toUpperCase(),
+    windowKey: payload.windowKey,
+    ticker: payload.ticker,
+    closeTime,
+    guardReason: payload.guardReason,
+    crossingType: payload.crossingType,
+    protectedSide: payload.protectedSide,
+    oppositeSide: payload.oppositeSide,
+    secondsRemaining: payload.secondsRemaining,
+    yesAsk: payload.yesAsk,
+    noAsk: payload.noAsk,
+    oppositeAsk: payload.oppositeAsk,
+    quoteSupported: payload.quoteSupported,
+    hypotheticalContracts: payload.hypotheticalContracts,
+    hypotheticalBudget: payload.hypotheticalBudget,
+    hypotheticalAvgYesPrice: payload.hypotheticalAvgYesPrice,
+    evidence: payload.evidence,
+    observedAt,
+  };
+}
+
+async function recordGuardOutcomePayload(
+  payload: ScalpGuardOutcomeStudyRecoveryPayload,
+): Promise<boolean> {
+  const input = guardOutcomePayloadToInput(payload);
+  if (!input) throw new Error("invalid guard outcome study outbox payload");
+  return recordContrarianGuardOutcomeStudy(input);
+}
+
+export async function replayContrarianGuardOutcomeStudyOutbox(
+  dependencies: {
+    getPending?: typeof getPendingContrarianGuardOutcomeStudyOutbox;
+    record?: typeof recordGuardOutcomePayload;
+  } = {},
+): Promise<{ attempted: number; inserted: number; deduplicated: number; failed: number }> {
+  const getPending =
+    dependencies.getPending ?? getPendingContrarianGuardOutcomeStudyOutbox;
+  const record = dependencies.record ?? recordGuardOutcomePayload;
+  const pending = await getPending();
+  const result = await replayContrarianGuardOutcomeRows(pending, record);
+  if (result.failed > 0) {
+    logger.warn(
+      { failed: result.failed, attempted: result.attempted },
+      "[kalshi-scalper-contrarian] guard outcome outbox replay deferred",
+    );
+  }
+  return result;
 }
 
 function validateFreshContext(
@@ -1017,8 +1125,47 @@ async function settleFilledOrder(order: ContrarianOrder): Promise<void> {
   }
 }
 
+async function settleGuardOutcomeStudy(
+  study: Awaited<ReturnType<
+    typeof getUnsettledContrarianGuardOutcomeStudies
+  >>[number],
+): Promise<void> {
+  const result = await resolveMarketResult(study.ticker);
+  if (!result) return;
+  const originalOutcome: "win" | "loss" =
+    result === study.protectedSide ? "win" : "loss";
+  const oppositeOutcome: "win" | "loss" =
+    result === study.oppositeSide ? "win" : "loss";
+  const hypotheticalPnl =
+    study.quoteSupported
+    && study.hypotheticalContracts > 0
+    && study.hypotheticalAvgYesPrice != null
+      ? computeContrarianPnl({
+          side: study.oppositeSide,
+          count: study.hypotheticalContracts,
+          avgYesPrice: study.hypotheticalAvgYesPrice,
+          result,
+        })
+      : null;
+  await settleContrarianGuardOutcomeStudy({
+    mode: study.mode,
+    symbol: study.symbol,
+    windowKey: study.windowKey,
+    settlementResult: result,
+    originalOutcome,
+    oppositeOutcome,
+    hypotheticalPnl,
+  });
+}
+
 export async function evaluateContrarianLifecycle(): Promise<void> {
   const now = Date.now();
+  await replayContrarianGuardOutcomeStudyOutbox().catch((error) =>
+    logger.warn(
+      { error },
+      "[kalshi-scalper-contrarian] guard outcome outbox scan deferred",
+    )
+  );
   const unresolved = await getUnknownContrarianOrders();
   for (const order of unresolved) {
     if (now - (lastReconcileAt.get(order.id) ?? 0) < RECONCILE_INTERVAL_MS) {
@@ -1045,10 +1192,35 @@ export async function evaluateContrarianLifecycle(): Promise<void> {
       ),
     );
   }
+  const guardOutcomes = await getUnsettledContrarianGuardOutcomeStudies();
+  for (const study of guardOutcomes) {
+    const key = `${study.mode}:${study.symbol}:${study.windowKey}`;
+    if (
+      now - (lastGuardOutcomeSettlementAt.get(key) ?? 0)
+      < SETTLEMENT_INTERVAL_MS
+    ) {
+      continue;
+    }
+    lastGuardOutcomeSettlementAt.set(key, now);
+    await settleGuardOutcomeStudy(study).catch((error) =>
+      logger.warn(
+        { error, key },
+        "[kalshi-scalper-contrarian] guard outcome study settlement failed",
+      )
+    );
+  }
 }
 
 export async function getContrarianReport() {
-  const [recentOrders, recentObservations, recentIncidents, paper, live, counts] =
+  const [
+    recentOrders,
+    recentObservations,
+    recentIncidents,
+    paper,
+    live,
+    counts,
+    guardOutcomeStudy,
+  ] =
     await Promise.all([
       getContrarianOrders(undefined, 100),
       getRecentContrarianObservations(100),
@@ -1056,6 +1228,7 @@ export async function getContrarianReport() {
       getContrarianTotals("paper"),
       getContrarianTotals("live"),
       getContrarianReportCounts(),
+      getContrarianGuardOutcomeStudyReport(),
     ]);
   return {
     config: getContrarianConfig(),
@@ -1065,6 +1238,7 @@ export async function getContrarianReport() {
       totalOrders: counts.totalOrders,
       unresolvedLiveOrders: counts.unresolvedLiveOrders,
     },
+    guardOutcomeStudy,
     recentOrders,
     recentObservations,
     recentIncidents,

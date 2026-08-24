@@ -4,11 +4,14 @@ import { readFileSync } from "node:fs";
 import {
   ContrarianExposureRegistry,
   DEFAULT_CONTRARIAN_CONFIG,
+  buildContrarianGuardOutcomeHypothesis,
+  buildContrarianGuardOutcomeStudyPayload,
   computeContrarianFillSpend,
   computeContrarianPnl,
   evaluateContrarianGuardEligibility,
   parseContrarianConfigPatch,
   planContrarianOrder,
+  replayContrarianGuardOutcomeRows,
   validateContrarianConfig,
 } from "./kalshi-scalper-contrarian.ts";
 import type { FreefallPreSubmitDecision } from "./kalshi-scalper-policy.ts";
@@ -135,6 +138,145 @@ describe("contrarian spike experiment pure boundary", () => {
     }) + 0.2) < 1e-9);
   });
 
+  it("prices guard outcome hypotheses only from a valid recorded opposite ask", () => {
+    assert.deepEqual(buildContrarianGuardOutcomeHypothesis({
+      oppositeSide: "no",
+      yesAsk: 0.97,
+      noAsk: 0.04,
+      budgetDollars: 2,
+    }), {
+      yesAsk: 0.97,
+      noAsk: 0.04,
+      oppositeAsk: 0.04,
+      quoteSupported: true,
+      hypotheticalContracts: 50,
+      hypotheticalBudget: 2,
+      hypotheticalAvgYesPrice: 0.96,
+    });
+    assert.deepEqual(buildContrarianGuardOutcomeHypothesis({
+      oppositeSide: "no",
+      yesAsk: 0.97,
+      noAsk: null,
+      budgetDollars: 2,
+    }), {
+      yesAsk: 0.97,
+      noAsk: null,
+      oppositeAsk: null,
+      quoteSupported: false,
+      hypotheticalContracts: 0,
+      hypotheticalBudget: 0,
+      hypotheticalAvgYesPrice: null,
+    });
+  });
+
+  it("builds a JSON-safe prospective outbox payload from the strict guard allowlist", () => {
+    const payload = buildContrarianGuardOutcomeStudyPayload({
+      sourceMode: "live",
+      symbol: "btc",
+      windowKey: "2026-08-24T08:00",
+      ticker: "KXBTC15M-26AUG240415-15",
+      closeTime: "2026-08-24T08:15:00.000Z",
+      protectedSide: "yes",
+      decision: decision(),
+      yesAsk: 0.97,
+      noAsk: 0.04,
+      budgetDollars: 2,
+      observedAtMs: Date.parse("2026-08-24T08:14:58.000Z"),
+      evidence: { phase: "initial_final_guard" },
+    });
+    assert.ok(payload);
+    assert.deepEqual({
+      version: payload.version,
+      mode: payload.mode,
+      symbol: payload.symbol,
+      oppositeSide: payload.oppositeSide,
+      quoteSupported: payload.quoteSupported,
+      hypotheticalContracts: payload.hypotheticalContracts,
+      observedAt: payload.observedAt,
+      phase: payload.evidence.phase,
+    }, {
+      version: 1,
+      mode: "live",
+      symbol: "BTC",
+      oppositeSide: "no",
+      quoteSupported: true,
+      hypotheticalContracts: 50,
+      observedAt: "2026-08-24T08:14:58.000Z",
+      phase: "initial_final_guard",
+    });
+    assert.equal(
+      buildContrarianGuardOutcomeStudyPayload({
+        sourceMode: "live",
+        symbol: "BTC",
+        windowKey: "w",
+        ticker: "t",
+        closeTime: "2026-08-24T08:15:00.000Z",
+        protectedSide: "yes",
+        decision: decision({ projectedPrice: 100.01 }),
+        yesAsk: 0.97,
+        noAsk: 0.04,
+        budgetDollars: 2,
+      }),
+      null,
+    );
+  });
+
+  it("replays a durable outbox row after transient failure and treats a race as deduplicated", async () => {
+    const payload = buildContrarianGuardOutcomeStudyPayload({
+      sourceMode: "paper",
+      symbol: "ETH",
+      windowKey: "2026-08-24T08:00",
+      ticker: "KXETH15M-26AUG240415-15",
+      closeTime: "2026-08-24T08:15:00.000Z",
+      protectedSide: "yes",
+      decision: decision(),
+      yesAsk: 0.97,
+      noAsk: 0.04,
+      budgetDollars: 2,
+      observedAtMs: Date.parse("2026-08-24T08:14:58.000Z"),
+    });
+    assert.ok(payload);
+    const getPending = async () => [{
+      mode: payload.mode,
+      symbol: payload.symbol,
+      windowKey: payload.windowKey,
+      payload,
+    }];
+    const rows = await getPending();
+    const failed = await replayContrarianGuardOutcomeRows(
+      rows,
+      async () => {
+        throw new Error("temporary database outage");
+      },
+    );
+    assert.deepEqual(failed, {
+      attempted: 1,
+      inserted: 0,
+      deduplicated: 0,
+      failed: 1,
+    });
+    const recovered = await replayContrarianGuardOutcomeRows(
+      rows,
+      async () => true,
+    );
+    assert.deepEqual(recovered, {
+      attempted: 1,
+      inserted: 1,
+      deduplicated: 0,
+      failed: 0,
+    });
+    const raced = await replayContrarianGuardOutcomeRows(
+      rows,
+      async () => false,
+    );
+    assert.deepEqual(raced, {
+      attempted: 1,
+      inserted: 0,
+      deduplicated: 1,
+      failed: 0,
+    });
+  });
+
   it("keeps paper and live exposure blocking isolated", () => {
     const registry = new ContrarianExposureRegistry();
     registry.replace([{ mode: "live", symbol: "btc", windowKey: "w", status: "unknown" }]);
@@ -152,6 +294,10 @@ describe("contrarian spike durable ownership boundaries", () => {
   );
   const contrarianDbSource = readFileSync(
     new URL("./kalshi-scalper-contrarian-db.ts", import.meta.url),
+    "utf8",
+  );
+  const scalperServiceSource = readFileSync(
+    new URL("./kalshi-scalper-service.ts", import.meta.url),
     "utf8",
   );
 
@@ -184,6 +330,49 @@ describe("contrarian spike durable ownership boundaries", () => {
     assert.match(
       contrarianDbSource,
       /WHERE id=\$1\s+AND status IN \('submitting','unknown'\)\s+RETURNING \*/,
+    );
+  });
+
+  it("keeps the prospective guard study isolated and deduplicated", () => {
+    assert.match(
+      contrarianDbSource,
+      /CREATE TABLE IF NOT EXISTS kalshi_scalp_guard_outcome_studies/,
+    );
+    assert.match(
+      contrarianDbSource,
+      /PRIMARY KEY\(mode,symbol,window_key\)/,
+    );
+    assert.match(
+      contrarianDbSource,
+      /ON CONFLICT\(mode,symbol,window_key\) DO NOTHING/,
+    );
+    assert.match(
+      contrarianDbSource,
+      /r\.attempted_at >= m\.tracking_started_at/,
+    );
+    assert.match(
+      contrarianDbSource,
+      /r\.skip_evidence->'guardOutcomeStudy'/,
+    );
+    assert.match(
+      scalperServiceSource,
+      /"initial_final_guard"/,
+    );
+    assert.match(
+      scalperServiceSource,
+      /"paper_final_guard"/,
+    );
+    assert.match(
+      scalperServiceSource,
+      /"live_final_guard"/,
+    );
+    assert.match(
+      scalperServiceSource,
+      /guardOutcomeStudy,/,
+    );
+    assert.doesNotMatch(
+      scalperServiceSource,
+      /scheduleGuardOutcomeStudy|recordContrarianGuardOutcomeStudy/,
     );
   });
 });

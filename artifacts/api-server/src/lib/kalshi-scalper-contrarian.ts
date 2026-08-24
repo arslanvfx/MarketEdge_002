@@ -4,7 +4,10 @@ import type {
   FreefallPreSubmitDecision,
   FreefallGuardResult,
 } from "./kalshi-scalper-policy.ts";
-import type { ScalpMode } from "./kalshi-scalper-types.ts";
+import type {
+  ScalpGuardOutcomeStudyRecoveryPayload,
+  ScalpMode,
+} from "./kalshi-scalper-types.ts";
 
 export type ContrarianSide = "yes" | "no";
 export type ContrarianMode = ScalpMode;
@@ -230,6 +233,178 @@ export function computeContrarianPnl(input: {
   return result === "no"
     ? avgYesPrice * count
     : -(1 - avgYesPrice) * count;
+}
+
+export interface ContrarianGuardOutcomeHypothesis {
+  yesAsk: number | null;
+  noAsk: number | null;
+  oppositeAsk: number | null;
+  quoteSupported: boolean;
+  hypotheticalContracts: number;
+  hypotheticalBudget: number;
+  hypotheticalAvgYesPrice: number | null;
+}
+
+export interface ContrarianGuardOutcomeStudyTrigger {
+  sourceMode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  closeTime: string;
+  protectedSide: ContrarianSide;
+  decision: FreefallPreSubmitDecision;
+  yesAsk: number | null;
+  noAsk: number | null;
+  budgetDollars: number;
+  observedAtMs?: number;
+  evidence?: Record<string, unknown>;
+}
+
+/**
+ * Builds a quote-backed counterfactual using the normal Scalper's budget at the
+ * guard boundary. This does not claim an IOC fill; it only prices the opposite
+ * direction at the authenticated ask that was actually observed.
+ */
+export function buildContrarianGuardOutcomeHypothesis(input: {
+  oppositeSide: ContrarianSide;
+  yesAsk: number | null;
+  noAsk: number | null;
+  budgetDollars: number;
+}): ContrarianGuardOutcomeHypothesis {
+  const validAsk = (value: number | null): number | null =>
+    value != null && Number.isFinite(value) && value > 0 && value < 1
+      ? value
+      : null;
+  const yesAsk = validAsk(input.yesAsk);
+  const noAsk = validAsk(input.noAsk);
+  const oppositeAsk = input.oppositeSide === "yes" ? yesAsk : noAsk;
+  if (
+    oppositeAsk == null
+    || !Number.isFinite(input.budgetDollars)
+    || input.budgetDollars <= 0
+  ) {
+    return {
+      yesAsk,
+      noAsk,
+      oppositeAsk,
+      quoteSupported: false,
+      hypotheticalContracts: 0,
+      hypotheticalBudget: 0,
+      hypotheticalAvgYesPrice: null,
+    };
+  }
+  const hypotheticalContracts = Math.floor(
+    (input.budgetDollars + 1e-9) / oppositeAsk,
+  );
+  if (hypotheticalContracts < 1) {
+    return {
+      yesAsk,
+      noAsk,
+      oppositeAsk,
+      quoteSupported: false,
+      hypotheticalContracts: 0,
+      hypotheticalBudget: 0,
+      hypotheticalAvgYesPrice: null,
+    };
+  }
+  return {
+    yesAsk,
+    noAsk,
+    oppositeAsk,
+    quoteSupported: true,
+    hypotheticalContracts,
+    hypotheticalBudget: hypotheticalContracts * oppositeAsk,
+    hypotheticalAvgYesPrice:
+      input.oppositeSide === "yes" ? oppositeAsk : 1 - oppositeAsk,
+  };
+}
+
+export function buildContrarianGuardOutcomeStudyPayload(
+  input: ContrarianGuardOutcomeStudyTrigger,
+): ScalpGuardOutcomeStudyRecoveryPayload | null {
+  const eligibility = evaluateContrarianGuardEligibility(
+    input.decision,
+    input.protectedSide,
+  );
+  if (!eligibility.eligible) return null;
+  const closeTime = new Date(input.closeTime);
+  const observedAt = new Date(input.observedAtMs ?? Date.now());
+  if (
+    Number.isNaN(closeTime.valueOf())
+    || Number.isNaN(observedAt.valueOf())
+  ) {
+    return null;
+  }
+  const hypothesis = buildContrarianGuardOutcomeHypothesis({
+    oppositeSide: eligibility.oppositeSide,
+    yesAsk: input.yesAsk,
+    noAsk: input.noAsk,
+    budgetDollars: input.budgetDollars,
+  });
+  const secondsRemaining = Number.isFinite(eligibility.guard.secondsRemaining)
+    ? eligibility.guard.secondsRemaining
+    : Math.max(0, (closeTime.valueOf() - observedAt.valueOf()) / 1_000);
+  return {
+    version: 1,
+    mode: input.sourceMode,
+    symbol: input.symbol.toUpperCase(),
+    windowKey: input.windowKey,
+    ticker: input.ticker,
+    closeTime: closeTime.toISOString(),
+    guardReason: eligibility.guard.reason ?? eligibility.reason,
+    crossingType: eligibility.reason,
+    protectedSide: input.protectedSide,
+    oppositeSide: eligibility.oppositeSide,
+    secondsRemaining,
+    ...hypothesis,
+    evidence: {
+      guard: eligibility.guard,
+      eligibilityReason: eligibility.reason,
+      ...(input.evidence ?? {}),
+    },
+    observedAt: observedAt.toISOString(),
+  };
+}
+
+export interface ContrarianGuardOutcomeOutboxRow {
+  mode: ContrarianMode;
+  symbol: string;
+  windowKey: string;
+  payload: ScalpGuardOutcomeStudyRecoveryPayload;
+}
+
+export async function replayContrarianGuardOutcomeRows(
+  rows: ContrarianGuardOutcomeOutboxRow[],
+  record: (
+    payload: ScalpGuardOutcomeStudyRecoveryPayload,
+  ) => Promise<boolean>,
+): Promise<{
+  attempted: number;
+  inserted: number;
+  deduplicated: number;
+  failed: number;
+}> {
+  let inserted = 0;
+  let deduplicated = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const payload = row.payload;
+    if (
+      payload.mode !== row.mode
+      || payload.symbol.toUpperCase() !== row.symbol.toUpperCase()
+      || payload.windowKey !== row.windowKey
+    ) {
+      failed += 1;
+      continue;
+    }
+    try {
+      if (await record(payload)) inserted += 1;
+      else deduplicated += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  return { attempted: rows.length, inserted, deduplicated, failed };
 }
 
 export function computeContrarianFillSpend(

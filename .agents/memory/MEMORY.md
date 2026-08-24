@@ -126,3 +126,4 @@
 - [Scalper operator-owned open cap](scalper-open-cap.md) — $50 is only the invalid/missing default; every positive finite manual value must persist and be enforced exactly with no clamp
 - [Scalper calibration policy](scalper-calibration-policy.md) — recommendations are mode-isolated, holdout-validated, operator-applied, and may change only settings supported by executable evidence
 - [Contrarian durable ownership](contrarian-durable-ownership.md) — normal and Live experiment claims share a DB lock; conflict scope is mode+symbol+window, never ticker
+- [Scalper study durable outbox](scalper-study-durable-outbox.md) — observational guard studies replay from normal skip evidence; bounded fire-and-forget retries alone are not durable

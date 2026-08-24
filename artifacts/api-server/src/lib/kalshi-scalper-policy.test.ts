@@ -2885,12 +2885,18 @@ describe("execution wiring (static source assertions)", () => {
     // Strip line comments so prose (e.g. "no await occurs") is not miscounted.
     const segment = svc.slice(checkCall, place).replace(/\/\/[^\n]*/g, "");
     // The only awaited call in real code here is the abort inside the `if`
-    // failure branch; assert it is the sole await and is followed by `return`.
+    // failure branch; assert it is the sole await. The study outbox is part of
+    // that durable abort and is replayed outside the execution path.
     const awaits = segment.match(/\bawait\b/g) ?? [];
     assert.equal(awaits.length, 1, "exactly one await (the failure-branch abort) may appear before placeOrder");
-    assert.ok(
-      /await (?:runtime\.)?abortIntentAndReleaseReservation\(\{[\s\S]*?\}\);\s*return;/.test(segment),
-      "the single await must be the failure-branch abort that returns",
+    const abort = segment.indexOf(
+      "await runtime.abortIntentAndReleaseReservation({",
+    );
+    assert.ok(abort >= 0, "the single await must be the failure-branch abort");
+    assert.doesNotMatch(
+      segment.slice(abort),
+      /scheduleGuardOutcomeStudy|recordContrarianGuardOutcomeStudy/,
+      "no separate study write may run on the live execution path",
     );
   });
 

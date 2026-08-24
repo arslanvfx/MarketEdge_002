@@ -52,6 +52,7 @@ if (RUN_DB_TESTS) {
 // node:test honors `skip` on the describe options.
 describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set SCALPER_DB_TEST=1 with DATABASE_URL" : false }, () => {
   let db: typeof import("./kalshi-scalper-db.ts");
+  let contrarianDb: typeof import("./kalshi-scalper-contrarian-db.ts");
   let pool: {
     connect: () => Promise<{
       query: (
@@ -73,6 +74,9 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     const c = await pool.connect();
     try {
       await c.query(
+        `DELETE FROM kalshi_scalp_guard_outcome_studies WHERE mode = '${MODE}' AND window_key LIKE 'DBTEST-%'`,
+      );
+      await c.query(
         `DELETE FROM kalshi_scalp_orders WHERE mode = '${MODE}' AND window_key LIKE 'DBTEST-%'`,
       );
       await c.query(
@@ -88,9 +92,11 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
 
   before(async () => {
     db = await import("./kalshi-scalper-db.ts");
+    contrarianDb = await import("./kalshi-scalper-contrarian-db.ts");
     const dbmod = await import("@workspace/db");
     pool = dbmod.pool as typeof pool;
     await db.runScalpMigrations();
+    await contrarianDb.runContrarianMigrations();
   });
 
   // Isolate every test: clear any leaked paper DBTEST-* rows beforehand.
@@ -372,6 +378,109 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     assert.equal(retried.claimed, true);
     assert.equal(retried.allowed, true);
     assert.equal(retried.reservationId, first.reservationId);
+  });
+
+  it("preserves a pending guard-study outbox through re-claim and replays it exactly once", async () => {
+    const wk = `DBTEST-guard-outbox-rearm-${Date.now()}`;
+    const first = await db.claimReservationAndCap(
+      `id-${wk}`,
+      MODE,
+      "BTC",
+      wk,
+      "KXBTC15M-TEST",
+      2,
+      null,
+      OPEN_CAP,
+    );
+    assert.equal(first.allowed, true);
+    const payload = {
+      version: 1 as const,
+      mode: MODE,
+      symbol: "BTC",
+      windowKey: wk,
+      ticker: "KXBTC15M-TEST",
+      closeTime: new Date(Date.now() + 15_000).toISOString(),
+      guardReason: "freefall_consecutive_falling",
+      crossingType: "projected_target_crossing" as const,
+      protectedSide: "yes" as const,
+      oppositeSide: "no" as const,
+      secondsRemaining: 15,
+      yesAsk: 0.97,
+      noAsk: 0.04,
+      oppositeAsk: 0.04,
+      quoteSupported: true,
+      hypotheticalContracts: 50,
+      hypotheticalBudget: 2,
+      hypotheticalAvgYesPrice: 0.96,
+      evidence: { phase: "initial_final_guard" },
+      observedAt: new Date().toISOString(),
+    };
+    await db.updateReservationStatus(
+      MODE,
+      "BTC",
+      wk,
+      "skipped",
+      payload.guardReason,
+      true,
+      {
+        quotedReason: "authenticated_quote",
+        guardOutcomeStudy: payload,
+      },
+    );
+
+    // Simulate the asynchronous fast-path insert exhausting its retries: no
+    // study row exists. The supported guard retry then re-claims the same row.
+    const c = await pool.connect();
+    try {
+      await c.query(
+        `UPDATE kalshi_scalp_reservations
+            SET attempted_at = NOW() - INTERVAL '2 seconds'
+          WHERE mode = $1 AND symbol = $2 AND window_key = $3`,
+        [MODE, "BTC", wk],
+      );
+    } finally {
+      c.release();
+    }
+    const retried = await db.claimReservationAndCap(
+      `id-retry-${wk}`,
+      MODE,
+      "BTC",
+      wk,
+      "KXBTC15M-TEST",
+      2,
+      null,
+      OPEN_CAP,
+    );
+    assert.equal(retried.claimed, true);
+    assert.equal(retried.allowed, true);
+    assert.equal(retried.reservationId, first.reservationId);
+
+    const pending = await contrarianDb
+      .getPendingContrarianGuardOutcomeStudyOutbox();
+    const pendingRow = pending.find((row) => row.windowKey === wk);
+    assert.ok(pendingRow, "re-claim must not erase the pending outbox payload");
+    assert.equal(pendingRow.payload.observedAt, payload.observedAt);
+    assert.equal(pendingRow.payload.guardReason, payload.guardReason);
+
+    const inserted = await contrarianDb.recordContrarianGuardOutcomeStudy({
+      ...pendingRow.payload,
+      closeTime: new Date(pendingRow.payload.closeTime),
+      observedAt: new Date(pendingRow.payload.observedAt),
+    });
+    assert.equal(inserted, true);
+    const deduplicated = await contrarianDb.recordContrarianGuardOutcomeStudy({
+      ...pendingRow.payload,
+      closeTime: new Date(pendingRow.payload.closeTime),
+      observedAt: new Date(pendingRow.payload.observedAt),
+    });
+    assert.equal(deduplicated, false);
+    const afterReplay = await contrarianDb
+      .getPendingContrarianGuardOutcomeStudyOutbox();
+    assert.equal(
+      afterReplay.some((row) => row.windowKey === wk),
+      false,
+      "idempotent insertion must remove the row from pending replay",
+    );
   });
 
   it("persists cap denial on the existing durable row during a re-claim", async () => {

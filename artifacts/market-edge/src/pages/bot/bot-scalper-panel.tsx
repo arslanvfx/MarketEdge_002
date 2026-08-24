@@ -16,6 +16,8 @@ import type {
   ScalperContrarianOrder,
   ScalperContrarianEvidence,
   ScalperContrarianGuardEvidence,
+  ScalperGuardOutcomeStudyReport,
+  ScalperGuardOutcomeStudyAggregate,
 } from "./types";
 import {
   describeScalperAttempt,
@@ -287,6 +289,201 @@ function saveShadowViewSince(mode: "paper" | "live", value: string): void {
   } catch {
     // The reset still applies for this session when browser storage is blocked.
   }
+}
+
+function StudyAggregateTable({ title, data }: { title: string, data: ScalperGuardOutcomeStudyAggregate[] }) {
+  if (!data || data.length === 0) return null;
+  const fmtWinRate = (n: number | null) => n === null ? "—" : (n * 100).toFixed(1) + "%";
+
+  return (
+    <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900/30">
+      <div className="px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-slate-400 border-b border-slate-800 bg-slate-900/80">
+        {title}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-[9px]">
+           <thead>
+              <tr className="text-slate-500 border-b border-slate-800/50">
+                 <th className="px-3 py-1.5 font-normal">Key</th>
+                 <th className="px-3 py-1.5 font-normal text-right">Obs/Set</th>
+                 <th className="px-3 py-1.5 font-normal text-right">Prevented</th>
+                 <th className="px-3 py-1.5 font-normal text-right">W-L</th>
+                 <th className="px-3 py-1.5 font-normal text-right">Rate</th>
+                 <th className="px-3 py-1.5 font-normal text-right">P&amp;L</th>
+              </tr>
+           </thead>
+           <tbody className="divide-y divide-slate-800/30">
+             {data.map(row => (
+                <tr key={row.key} className="hover:bg-slate-800/20">
+                   <td className="px-3 py-1.5 font-medium text-slate-300 max-w-[120px] truncate" title={row.label}>{row.label}</td>
+                   <td className="px-3 py-1.5 text-right font-mono text-slate-400">{row.observed}/{row.settled}</td>
+                   <td className="px-3 py-1.5 text-right font-mono text-emerald-400/80">{row.originalSideLossesPrevented}</td>
+                   <td className="px-3 py-1.5 text-right font-mono text-slate-400">{row.oppositeWins}-{row.oppositeLosses}</td>
+                   <td className="px-3 py-1.5 text-right font-mono text-indigo-300">{row.winRate !== null ? fmtWinRate(row.winRate) : "—"}</td>
+                   <td className={`px-3 py-1.5 text-right font-mono ${row.hypotheticalPnl && row.hypotheticalPnl > 0 ? "text-emerald-400" : row.hypotheticalPnl && row.hypotheticalPnl < 0 ? "text-red-400" : "text-slate-500"}`}>
+                      {row.hypotheticalPnl != null ? (row.hypotheticalPnl > 0 ? "+" + fmt$(row.hypotheticalPnl) : fmt$(row.hypotheticalPnl)) : "—"}
+                      <span className="block text-[8px] font-sans text-slate-600">
+                        {row.pricedSettled} quoted
+                      </span>
+                   </td>
+                </tr>
+             ))}
+           </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function StudyAggregateCard({ title, agg, featured }: { title: string, agg?: ScalperGuardOutcomeStudyAggregate, featured?: boolean }) {
+  if (!agg) return <div className={`p-3 rounded-lg border border-slate-800 bg-slate-900/50 flex flex-col gap-1 opacity-50`}><div className="text-[9px] uppercase tracking-widest text-slate-500">{title}</div><div className="text-xs text-slate-600">No data</div></div>;
+
+  const fmtWinRate = (n: number | null) => n === null ? "—" : (n * 100).toFixed(1) + "%";
+
+  return (
+    <div className={`p-3 rounded-lg border ${featured ? "border-indigo-500/30 bg-indigo-500/10" : "border-slate-800 bg-slate-900/50"} flex flex-col gap-2`}>
+      <div className="text-[9px] uppercase tracking-widest text-slate-500 font-bold">{title}</div>
+      <div className="flex items-baseline gap-2">
+         <span className={`text-lg font-mono ${featured ? "text-indigo-100" : "text-slate-200"}`}>{agg.oppositeWins}W - {agg.oppositeLosses}L</span>
+         {agg.winRate !== null && <span className="text-[10px] text-indigo-300 font-bold">{fmtWinRate(agg.winRate)}</span>}
+      </div>
+      <div className="flex flex-col gap-1 text-[9px]">
+         <div className="flex justify-between text-slate-400">
+            <span>Observed / Settled:</span>
+            <span className="font-mono">{agg.observed} / {agg.settled}</span>
+         </div>
+         <div className="flex justify-between text-slate-400">
+            <span>Losses Prevented:</span>
+            <span className="font-mono text-emerald-400/80">{agg.originalSideLossesPrevented}</span>
+         </div>
+         <div className="flex justify-between text-slate-400">
+            <span>Quoted P&amp;L ({agg.pricedSettled}):</span>
+            <span className={`font-mono ${agg.hypotheticalPnl && agg.hypotheticalPnl > 0 ? "text-emerald-400" : agg.hypotheticalPnl && agg.hypotheticalPnl < 0 ? "text-red-400" : "text-slate-500"}`}>
+               {agg.hypotheticalPnl != null ? (agg.hypotheticalPnl > 0 ? "+" + fmt$(agg.hypotheticalPnl) : fmt$(agg.hypotheticalPnl)) : "—"}
+            </span>
+         </div>
+      </div>
+    </div>
+  );
+}
+
+function ContrarianGuardOutcomeStudy({
+  data
+}: {
+  data: ScalperGuardOutcomeStudyReport;
+}) {
+  if (!data) return null;
+
+  return (
+    <div className="border-t border-indigo-500/20 bg-slate-900/30 flex flex-col">
+      <div className="px-4 py-3 border-b border-slate-800/60 flex items-center justify-between">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-widest text-indigo-300">
+            Prospective Safety-Guard Outcome Study
+          </div>
+          <div className="text-[9px] text-slate-500 tracking-wide mt-0.5">
+            Tracking since {fmtDateTime(data.trackingStartedAt)}
+          </div>
+        </div>
+      </div>
+
+      <div className="p-4 flex flex-col gap-4">
+        <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-md text-amber-200/80 text-[10px] leading-relaxed">
+           <strong className="text-amber-400 mr-2 uppercase tracking-wider">Notice</strong>
+           {data.disclaimer} Settled direction is <strong>not</strong> IOC fill evidence. P&amp;L only exists for quote-supported rows.
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+           <StudyAggregateCard title="Total Outcomes" agg={data.total} featured />
+           <StudyAggregateCard title="Paper Mode" agg={data.byMode.find(m => m.key === 'paper')} />
+           <StudyAggregateCard title="Live Mode" agg={data.byMode.find(m => m.key === 'live')} />
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+           <StudyAggregateTable title="By Guard Reason" data={data.byGuardReason} />
+           <StudyAggregateTable title="By Symbol" data={data.bySymbol} />
+           <StudyAggregateTable title="By Timing" data={data.byTiming} />
+        </div>
+      </div>
+
+      <div className="border-t border-slate-800/60">
+         <div className="px-4 py-2 text-[9px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-800/60 bg-slate-900/60">
+           Recent Guard Outcomes
+         </div>
+         <div className="overflow-x-auto">
+            <table className="w-full text-left whitespace-nowrap min-w-[900px]">
+               <thead>
+                 <tr className="bg-slate-950/40 text-[9px] uppercase tracking-widest text-slate-400 border-b border-slate-800/50">
+                    <th className="px-4 py-2 font-semibold">Observed</th>
+                    <th className="px-4 py-2 font-semibold">Mode / Coin</th>
+                    <th className="px-4 py-2 font-semibold">Guard Reason</th>
+                    <th className="px-4 py-2 font-semibold">Protected &rarr; Opposite</th>
+                    <th className="px-4 py-2 font-semibold">Timing / Ask</th>
+                    <th className="px-4 py-2 font-semibold">Settlement</th>
+                    <th className="px-4 py-2 font-semibold text-right">Hypo P&amp;L</th>
+                 </tr>
+               </thead>
+               <tbody className="text-[10px]">
+                  {data.recent.map(record => (
+                    <tr key={`${record.mode}:${record.symbol}:${record.windowKey}`} className="border-b border-slate-800/30 hover:bg-slate-800/20">
+                     <td className="px-4 py-2 text-slate-400">{fmtDateTime(record.observedAt)}</td>
+                     <td className="px-4 py-2">
+                        <span className={`inline-block mr-1.5 rounded px-1 py-0.5 text-[8px] uppercase tracking-wider ${record.mode === "live" ? "bg-red-500/15 text-red-300" : "bg-indigo-500/15 text-indigo-300"}`}>{record.mode}</span>
+                        <span className="font-bold text-indigo-100">{record.symbol}</span>
+                     </td>
+                     <td className="px-4 py-2">
+                        <span className="text-slate-300 truncate max-w-[180px] block" title={record.guardReason}>{record.guardReason}</span>
+                     </td>
+                     <td className="px-4 py-2">
+                        <span className="text-red-400/80 mr-1.5 line-through uppercase">{record.protectedSide}</span>
+                        <span className="text-emerald-400/80 font-bold uppercase">&rarr; {record.oppositeSide}</span>
+                     </td>
+                     <td className="px-4 py-2 text-slate-400">
+                        {record.secondsRemaining !== null ? `${record.secondsRemaining.toFixed(1)}s` : "—"}
+                        <span className="mx-2 opacity-30">|</span>
+                        {record.quoteSupported ? (
+                           <span className="text-indigo-300">Ask: {formatContrarianCents(record.oppositeAsk)}</span>
+                        ) : (
+                           <span className="text-slate-500">Unquoted</span>
+                        )}
+                     </td>
+                     <td className="px-4 py-2">
+                        {record.settlementResult ? (
+                            <div className="space-y-0.5">
+                              <div className="uppercase font-bold text-slate-300">
+                                Market: {record.settlementResult}
+                              </div>
+                              <div className="text-[9px] text-slate-500">
+                                Original: <span className={record.originalOutcome === "loss" ? "text-emerald-400" : "text-slate-300"}>{record.originalOutcome}</span>
+                                {" · "}Opposite: <span className={record.oppositeOutcome === "win" ? "text-emerald-400" : "text-red-400"}>{record.oppositeOutcome}</span>
+                              </div>
+                           </div>
+                        ) : (
+                           <span className="text-slate-500 italic">Pending</span>
+                        )}
+                     </td>
+                     <td className="px-4 py-2 text-right font-mono text-[11px]">
+                        {record.quoteSupported && record.hypotheticalPnl !== null ? (
+                           <span className={record.hypotheticalPnl > 0 ? "text-emerald-400" : record.hypotheticalPnl < 0 ? "text-red-400" : "text-slate-500"}>
+                             {record.hypotheticalPnl > 0 ? "+" : ""}{fmt$(record.hypotheticalPnl)}
+                           </span>
+                        ) : (
+                           <span className="text-slate-600">—</span>
+                        )}
+                     </td>
+                   </tr>
+                 ))}
+                 {data.recent.length === 0 && (
+                   <tr>
+                     <td colSpan={7} className="px-4 py-6 text-center text-slate-500 italic">No recent guard outcomes recorded.</td>
+                   </tr>
+                 )}
+               </tbody>
+            </table>
+         </div>
+      </div>
+    </div>
+  );
 }
 
 export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
@@ -2822,6 +3019,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
         </div>
       </div>
 
+      <ContrarianGuardOutcomeStudy data={report.guardOutcomeStudy} />
 
       <div className="border-t border-indigo-500/20 bg-slate-900/30">
         <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-800">

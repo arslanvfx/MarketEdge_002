@@ -604,6 +604,12 @@ export interface ScalpSkipEvidence {
   regularPositionId?: string | null;
   regularPositionSide?: "yes" | "no" | null;
   layerDecision?: "same_side_layer" | "opposite_side_block" | null;
+  /**
+   * Durable outbox payload for the prospective directional guard study.
+   * It is written atomically with the normal skipped reservation and replayed
+   * asynchronously; it never participates in normal execution or cap logic.
+   */
+  guardOutcomeStudy?: ScalpGuardOutcomeStudyRecoveryPayload | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -678,6 +684,90 @@ export interface ScalpReservation {
   layeredRegularSide?: "yes" | "no";
   /** Structured skip evidence (null for non-skip rows and pre-upgrade rows). */
   skipEvidence?: ScalpSkipEvidence | null;
+}
+
+// ---------------------------------------------------------------------------
+// Directional final-guard outcome study
+// ---------------------------------------------------------------------------
+
+/**
+ * Prospective, observational record for an eligible directional final-guard
+ * block. It is deliberately separate from orders and reservations: a settled
+ * counterfactual direction is not evidence that an IOC order would have filled.
+ */
+export interface ScalpGuardOutcomeStudyRecord {
+  mode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  closeTime: Date;
+  guardReason: string;
+  crossingType: "target_crossed" | "projected_target_crossing";
+  protectedSide: "yes" | "no";
+  oppositeSide: "yes" | "no";
+  secondsRemaining: number | null;
+  yesAsk: number | null;
+  noAsk: number | null;
+  oppositeAsk: number | null;
+  quoteSupported: boolean;
+  hypotheticalContracts: number;
+  hypotheticalBudget: number;
+  hypotheticalAvgYesPrice: number | null;
+  settlementResult: "yes" | "no" | null;
+  originalOutcome: "win" | "loss" | null;
+  oppositeOutcome: "win" | "loss" | null;
+  hypotheticalPnl: number | null;
+  evidence: Record<string, unknown>;
+  observedAt: Date;
+  settledAt: Date | null;
+}
+
+/** JSON-safe outbox form stored inside a normal reservation's skip evidence. */
+export interface ScalpGuardOutcomeStudyRecoveryPayload {
+  version: 1;
+  mode: ScalpMode;
+  symbol: string;
+  windowKey: string;
+  ticker: string;
+  closeTime: string;
+  guardReason: string;
+  crossingType: "target_crossed" | "projected_target_crossing";
+  protectedSide: "yes" | "no";
+  oppositeSide: "yes" | "no";
+  secondsRemaining: number | null;
+  yesAsk: number | null;
+  noAsk: number | null;
+  oppositeAsk: number | null;
+  quoteSupported: boolean;
+  hypotheticalContracts: number;
+  hypotheticalBudget: number;
+  hypotheticalAvgYesPrice: number | null;
+  evidence: Record<string, unknown>;
+  observedAt: string;
+}
+
+export interface ScalpGuardOutcomeStudyAggregate {
+  key: string;
+  label: string;
+  observed: number;
+  settled: number;
+  originalSideLossesPrevented: number;
+  oppositeWins: number;
+  oppositeLosses: number;
+  winRate: number | null;
+  pricedSettled: number;
+  hypotheticalPnl: number | null;
+}
+
+export interface ScalpGuardOutcomeStudyReport {
+  trackingStartedAt: string;
+  total: ScalpGuardOutcomeStudyAggregate;
+  byMode: ScalpGuardOutcomeStudyAggregate[];
+  byGuardReason: ScalpGuardOutcomeStudyAggregate[];
+  bySymbol: ScalpGuardOutcomeStudyAggregate[];
+  byTiming: ScalpGuardOutcomeStudyAggregate[];
+  recent: ScalpGuardOutcomeStudyRecord[];
+  disclaimer: string;
 }
 
 /**

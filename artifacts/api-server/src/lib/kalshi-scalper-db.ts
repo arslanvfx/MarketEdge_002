@@ -686,7 +686,16 @@ export async function claimReservationAndCap(
                 `UPDATE kalshi_scalp_reservations
                  SET status = 'skipped', reason = 'outside_window_at_claim',
                      reserved_budget = 0, ticker = $1,
-                     skip_evidence = $2::jsonb, attempted_at = NOW()
+                      skip_evidence = CASE
+                        WHEN jsonb_typeof(skip_evidence->'guardOutcomeStudy')='object'
+                          THEN COALESCE($2::jsonb, '{}'::jsonb)
+                            || jsonb_build_object(
+                              'guardOutcomeStudy',
+                              skip_evidence->'guardOutcomeStudy'
+                            )
+                        ELSE $2::jsonb
+                      END,
+                      attempted_at = NOW()
                  WHERE id = $3`,
                 [ticker, JSON.stringify(evidence), reservationId],
               );
@@ -812,7 +821,16 @@ export async function claimReservationAndCap(
       await client.query(
         `UPDATE kalshi_scalp_reservations
          SET status = 'claimed', reason = NULL, reserved_budget = 0,
-             ticker = $1, skip_evidence = NULL, attempted_at = NOW()
+              ticker = $1,
+              skip_evidence = CASE
+                WHEN jsonb_typeof(skip_evidence->'guardOutcomeStudy')='object'
+                  THEN jsonb_build_object(
+                    'guardOutcomeStudy',
+                    skip_evidence->'guardOutcomeStudy'
+                  )
+                ELSE NULL
+              END,
+              attempted_at = NOW()
          WHERE id = $2`,
         [ticker, reservationId],
       );
@@ -882,7 +900,16 @@ export async function claimReservationAndCap(
       await client.query(
         `UPDATE kalshi_scalp_reservations
          SET status = 'skipped', reason = $1, reserved_budget = 0,
-             skip_evidence = $2::jsonb, attempted_at = NOW()
+              skip_evidence = CASE
+                WHEN jsonb_typeof(skip_evidence->'guardOutcomeStudy')='object'
+                  THEN COALESCE($2::jsonb, '{}'::jsonb)
+                    || jsonb_build_object(
+                      'guardOutcomeStudy',
+                      skip_evidence->'guardOutcomeStudy'
+                    )
+                ELSE $2::jsonb
+              END,
+              attempted_at = NOW()
          WHERE id = $3`,
         [blockedReason, JSON.stringify(capEvidence), reservationId],
       );
@@ -939,7 +966,15 @@ export async function updateReservationStatus(
     await client.query(
       `UPDATE kalshi_scalp_reservations
        SET status = $1, reason = $2, attempted_at = NOW(),
-           skip_evidence = $3::jsonb
+            skip_evidence = CASE
+              WHEN jsonb_typeof(skip_evidence->'guardOutcomeStudy')='object'
+                THEN COALESCE($3::jsonb, '{}'::jsonb)
+                  || jsonb_build_object(
+                    'guardOutcomeStudy',
+                    skip_evidence->'guardOutcomeStudy'
+                  )
+              ELSE $3::jsonb
+            END
            ${releaseBudget ? ", reserved_budget = 0" : ""}
        WHERE mode = $4 AND symbol = $5 AND window_key = $6`,
       [
@@ -1984,7 +2019,15 @@ export async function finalizeOrderAndReleaseReservation(params: {
     await client.query(
       `UPDATE kalshi_scalp_reservations
        SET status = $1, reason = $2, reserved_budget = 0,
-           skip_evidence = NULL, attempted_at = NOW()
+            skip_evidence = CASE
+              WHEN jsonb_typeof(skip_evidence->'guardOutcomeStudy')='object'
+                THEN jsonb_build_object(
+                  'guardOutcomeStudy',
+                  skip_evidence->'guardOutcomeStudy'
+                )
+              ELSE NULL
+            END,
+            attempted_at = NOW()
        WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
       [params.reservationStatus, params.reason ?? null, params.mode, params.symbol.toUpperCase(), params.windowKey],
     );
@@ -2041,7 +2084,16 @@ export async function abortIntentAndReleaseReservation(params: {
     await client.query(
       `UPDATE kalshi_scalp_reservations
        SET status = 'skipped', reason = $1, reserved_budget = 0,
-           skip_evidence = $2::jsonb, attempted_at = NOW()
+            skip_evidence = CASE
+              WHEN jsonb_typeof(skip_evidence->'guardOutcomeStudy')='object'
+                THEN COALESCE($2::jsonb, '{}'::jsonb)
+                  || jsonb_build_object(
+                    'guardOutcomeStudy',
+                    skip_evidence->'guardOutcomeStudy'
+                  )
+              ELSE $2::jsonb
+            END,
+            attempted_at = NOW()
        WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
       [
         params.reason,
@@ -2288,7 +2340,15 @@ export async function finalizePaperOrderAndReleaseReservation(
     const updated = await client.query(
       `UPDATE kalshi_scalp_reservations
        SET status = $1, reason = $2, reserved_budget = 0,
-           skip_evidence = NULL, attempted_at = NOW()
+            skip_evidence = CASE
+              WHEN jsonb_typeof(skip_evidence->'guardOutcomeStudy')='object'
+                THEN jsonb_build_object(
+                  'guardOutcomeStudy',
+                  skip_evidence->'guardOutcomeStudy'
+                )
+              ELSE NULL
+            END,
+            attempted_at = NOW()
        WHERE mode = $3 AND symbol = $4 AND window_key = $5`,
       [
         reservationStatus,

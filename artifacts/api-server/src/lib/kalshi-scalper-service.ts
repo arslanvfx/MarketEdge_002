@@ -107,7 +107,10 @@ import {
   setContrarianRegularExposureReader,
   evaluateContrarianLifecycle,
 } from "./kalshi-scalper-contrarian-service.ts";
-import { evaluateContrarianGuardEligibility } from "./kalshi-scalper-contrarian.ts";
+import {
+  buildContrarianGuardOutcomeStudyPayload,
+  evaluateContrarianGuardEligibility,
+} from "./kalshi-scalper-contrarian.ts";
 import {
   loadScalpConfigFromDB,
   saveScalpConfigToDB,
@@ -2060,6 +2063,28 @@ async function _executeScalpAttempt(
       parallelRefreshMs,
     };
   };
+  const _buildGuardOutcomeStudy = (
+    decision: ReturnType<typeof evaluateFreefallPreSubmitGuard>,
+    protectedSide: "yes" | "no",
+    yesAsk: number | null,
+    noAsk: number | null,
+    observedAtMs: number,
+    phase: string,
+  ): NonNullable<ScalpSkipEvidence["guardOutcomeStudy"]> | null =>
+    buildContrarianGuardOutcomeStudyPayload({
+      sourceMode: mode,
+      symbol,
+      windowKey,
+      ticker,
+      closeTime,
+      protectedSide,
+      decision,
+      yesAsk,
+      noAsk,
+      budgetDollars: reservedBudget,
+      observedAtMs,
+      evidence: { phase },
+    });
 
   // ── FINAL PRE-SUBMIT BOUNDARY ─────────────────────────────────────────────
   // Identity, authenticated quote, balance, and fresh Freefall sample are
@@ -2476,6 +2501,14 @@ async function _executeScalpAttempt(
         "[kalshi-scalper] freefall guard skip (final boundary)",
       );
       const freefallReason = freefallDecision.reason ?? "freefall_blocked_final";
+      const guardOutcomeStudy = _buildGuardOutcomeStudy(
+        freefallDecision,
+        effectiveSide,
+        quote2.yesAsk,
+        quote2.noAsk,
+        ffNowMs,
+        "initial_final_guard",
+      );
       await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", freefallReason, true, {
         ..._timingEvidence(),
         adverseMovePct: ffFinal?.adverseMovePct ?? null,
@@ -2530,11 +2563,12 @@ async function _executeScalpAttempt(
         samplesUsed: ffFinal?.samplesUsed ?? null,
         sampleCoverageMs: freefallDecision.sampleCoverageMs,
         protectedSide: effectiveSide,
+        guardOutcomeStudy,
       });
       _rememberReservationOutcome(attemptKey, "skipped", freefallReason, priorSubmittedOrders, runtime.nowMs());
       // The normal reservation is now durably released. This is deliberately
-      // fire-and-forget: an experimental failure must never affect the normal
-      // skip path or mutate its reservation.
+      // isolated: lifecycle replay, not this execution path, consumes the
+      // immutable outbox payload persisted in skip evidence.
       void triggerContrarianFromNormalGuard({
         sourceMode: mode,
         symbol,
@@ -3124,6 +3158,14 @@ async function _executeScalpAttempt(
         ? evaluatePinnedFreefallAt(finalFreefallPaperAtMs)
         : null;
     if (finalFreefallPaper && !finalFreefallPaper.allowed) {
+      const guardOutcomeStudy = _buildGuardOutcomeStudy(
+        finalFreefallPaper,
+        effectiveSide,
+        finalRequalification.quote.yesAsk,
+        finalRequalification.quote.noAsk,
+        finalFreefallPaperAtMs,
+        "paper_final_guard",
+      );
       await runtime.updateReservationStatus(
         mode,
         symbol,
@@ -3191,6 +3233,7 @@ async function _executeScalpAttempt(
           samplesUsed: finalFreefallPaper.guardResult?.samplesUsed ?? null,
           sampleCoverageMs: finalFreefallPaper.sampleCoverageMs,
           protectedSide: effectiveSide,
+          guardOutcomeStudy,
         },
       );
       return;
@@ -3263,6 +3306,20 @@ async function _executeScalpAttempt(
         { symbol, windowKey, reason: finalAbortReason },
         "[kalshi-scalper] live final validation failed after intent, before submit — aborting intent + releasing (no broker call)",
       );
+      const guardOutcomeStudy =
+        finalReasonLive === null
+        && finalLayerLive.status !== "opposite_side"
+        && finalFreefallLive
+        && !finalFreefallLive.allowed
+          ? _buildGuardOutcomeStudy(
+              finalFreefallLive,
+              effectiveSide,
+              finalRequalification.quote.yesAsk,
+              finalRequalification.quote.noAsk,
+              finalFreefallLiveAtMs,
+              "live_final_guard",
+            )
+          : null;
       await runtime.abortIntentAndReleaseReservation({
         orderId: orderRecord.id, mode, symbol, windowKey,
         reason: `aborted_before_submit:${finalAbortReason}`,
@@ -3342,6 +3399,7 @@ async function _executeScalpAttempt(
           samplesUsed: finalFreefallLive?.guardResult?.samplesUsed ?? null,
           sampleCoverageMs: finalFreefallLive?.sampleCoverageMs ?? null,
           protectedSide: effectiveSide,
+          guardOutcomeStudy,
         },
       });
       return;
