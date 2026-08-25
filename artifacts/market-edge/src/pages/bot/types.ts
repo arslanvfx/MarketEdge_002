@@ -579,6 +579,10 @@ export interface ScalperConfig {
   freefallConsecutiveSeconds: number;
   favorableTrendConfirmationEnabled: boolean;
   coordinatedDirectionClearanceEnabled: boolean;
+  adverseExcursionGuardEnabled: boolean;
+  adverseExcursionLookbackSeconds: number;
+  adverseExcursionThresholdPct: number;
+  adverseExcursionRecoverySeconds: number;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled: boolean;
@@ -616,6 +620,12 @@ export interface ScalpSkipEvidence {
   targetPrice?: number | null;
   underlyingPrice?: number | null;
   adverseMovePct?: number | null;
+  adverseExcursionBlocked?: boolean | null;
+  adverseExcursionPct?: number | null;
+  adverseExcursionLookbackSeconds?: number | null;
+  adverseExcursionRecoverySeconds?: number | null;
+  adverseExcursionRecoverySamples?: number | null;
+  adverseExcursionTriggeredAt?: string | null;
   freefallThresholdPct?: number | null;
   freefallConsecutiveSeconds?: number | null;
   consecutiveWrongWayMoves?: number | null;

@@ -4,11 +4,14 @@ import { readFileSync } from "node:fs";
 import {
   ContrarianExposureRegistry,
   ContrarianMonitorAttemptScheduler,
+  CONTRARIAN_COMMODITY_ADVERSE_EXCURSION_THRESHOLD_PCT,
+  CONTRARIAN_CRYPTO_ADVERSE_EXCURSION_THRESHOLD_PCT,
   DEFAULT_CONTRARIAN_CONFIG,
   buildContrarianGuardOutcomeHypothesis,
   buildContrarianGuardOutcomeStudyPayload,
   computeContrarianFillSpend,
   computeContrarianPnl,
+  contrarianAdverseExcursionThresholdPct,
   evaluateContrarianGuardEligibility,
   isPinnedContrarianIdentityCurrent,
   parseContrarianConfigPatch,
@@ -17,7 +20,10 @@ import {
   replayContrarianGuardOutcomeRows,
   validateContrarianConfig,
 } from "./kalshi-scalper-contrarian.ts";
-import type { FreefallPreSubmitDecision } from "./kalshi-scalper-policy.ts";
+import {
+  evaluateFreefallPreSubmitGuard,
+  type FreefallPreSubmitDecision,
+} from "./kalshi-scalper-policy.ts";
 
 const RUN_CONTRARIAN_DB_TESTS =
   Boolean(process.env["DATABASE_URL"])
@@ -70,6 +76,131 @@ describe("contrarian spike experiment pure boundary", () => {
     assert.equal(evaluateContrarianGuardEligibility(decision({ projectedPrice: 100.01 }), "yes").eligible, false);
     assert.equal(evaluateContrarianGuardEligibility(decision({ directionalBlocked: false, rapidMoveBlocked: true }), "yes").eligible, false);
     assert.equal(evaluateContrarianGuardEligibility({ ...decision(), allowed: true }, "yes").eligible, false);
+  });
+
+  it("classifies an independent latched excursion without waiting for the legacy final guard", () => {
+    const result = evaluateContrarianGuardEligibility(decision({
+      reason: "adverse_excursion_peak_fall_yes",
+      directionalBlocked: false,
+      adverseExcursionBlocked: true,
+      adverseExcursionPct: 0.24,
+      adverseExcursionLookbackSeconds: 20,
+      adverseExcursionRecoverySeconds: 3,
+      adverseExcursionRecoverySamples: 1,
+      latestPrice: 99.9,
+      targetPrice: 100,
+      projectedPrice: 99.8,
+      consecutiveWrongWayMoves: 4,
+      wrongWayResetCount: 1,
+    }), "yes");
+    assert.equal(result.eligible, true);
+    if (result.eligible) assert.equal(result.oppositeSide, "no");
+  });
+
+  it("uses the exact WTI commodity threshold and reaches a strict cheap-opposite attempt after one rebound", () => {
+    assert.equal(
+      contrarianAdverseExcursionThresholdPct("WTI"),
+      CONTRARIAN_COMMODITY_ADVERSE_EXCURSION_THRESHOLD_PCT,
+    );
+    assert.equal(
+      contrarianAdverseExcursionThresholdPct("gold"),
+      CONTRARIAN_COMMODITY_ADVERSE_EXCURSION_THRESHOLD_PCT,
+    );
+    assert.equal(
+      contrarianAdverseExcursionThresholdPct("SILVER"),
+      CONTRARIAN_COMMODITY_ADVERSE_EXCURSION_THRESHOLD_PCT,
+    );
+    assert.equal(
+      contrarianAdverseExcursionThresholdPct("BTC"),
+      CONTRARIAN_CRYPTO_ADVERSE_EXCURSION_THRESHOLD_PCT,
+    );
+
+    const nowMs = 100_000;
+    const prices = [
+      82.18126,
+      82.175,
+      82.165,
+      82.15197,
+      82.153,
+    ];
+    const decision = evaluateFreefallPreSubmitGuard({
+      directionEnabled: false,
+      hasProduct: true,
+      freshSampleSucceeded: true,
+      samples: prices.map((price, index) => ({
+        price,
+        at: nowMs - (prices.length - 1 - index) * 5_000,
+        oraclePublishedAtMs:
+          nowMs - (prices.length - 1 - index) * 5_000 - 1_000,
+        oracleAgeMs: 1_000,
+      })),
+      side: "yes",
+      nowMs,
+      eligibilityStartMs: 0,
+      consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false,
+      targetPrice: 82.154,
+      secondsRemaining: 20,
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+      adverseExcursionEnabled: true,
+      adverseExcursionLookbackSeconds: 20,
+      adverseExcursionThresholdPct:
+        contrarianAdverseExcursionThresholdPct("WTI"),
+      adverseExcursionRecoverySeconds: 3,
+      requireDistinctOraclePublishTimes: true,
+      authoritativeCommodityCadence: true,
+    });
+    assert.equal(decision.reason, "adverse_excursion_peak_fall_yes");
+    assert.equal(decision.guardResult?.consecutiveWrongWayMoves, 0);
+    const eligibility = evaluateContrarianGuardEligibility(decision, "yes");
+    if (!eligibility.eligible) throw new Error(eligibility.reason);
+    assert.equal(eligibility.eligible, true);
+    const attempt = planContrarianOrder({
+      budgetDollars: 0.25,
+      maxDirectContractCost: 0.03,
+      minDirectContractCost: 0.01,
+      directAsk: 0.02,
+      oppositeSide: eligibility.oppositeSide,
+    });
+    assert.equal(attempt.ok, true);
+  });
+
+  it("does not lower the crypto threshold or admit a too-small commodity move", () => {
+    assert.equal(contrarianAdverseExcursionThresholdPct("ETH"), 0.1);
+    const nowMs = 100_000;
+    const prices = [
+      ...Array.from({ length: 19 }, () => 82.18126),
+      82.17,
+      82.165,
+    ];
+    const tooSmall = evaluateFreefallPreSubmitGuard({
+      directionEnabled: false,
+      hasProduct: true,
+      freshSampleSucceeded: true,
+      samples: prices.map((price, index) => ({
+        price,
+        at: nowMs - (prices.length - 1 - index) * 1_000,
+      })),
+      side: "yes",
+      nowMs,
+      eligibilityStartMs: 0,
+      consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false,
+      targetPrice: 82.16,
+      secondsRemaining: 20,
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+      adverseExcursionEnabled: true,
+      adverseExcursionLookbackSeconds: 20,
+      adverseExcursionThresholdPct:
+        contrarianAdverseExcursionThresholdPct("WTI"),
+      adverseExcursionRecoverySeconds: 3,
+    });
+    assert.equal(tooSmall.allowed, true);
+    assert.equal(evaluateContrarianGuardEligibility(tooSmall, "yes").eligible, false);
   });
 
   it("rejects strict-window, weak, stale, generic, and unreachable evidence", () => {
@@ -603,6 +734,23 @@ describe("contrarian spike durable ownership boundaries", () => {
       contrarianServiceSource,
       /parseContrarianExchangeIndex\(finalContext\.exchangeIndex\) == null[\s\S]*identity_exchange_index_invalid_after_refresh/,
     );
+  });
+
+  it("keeps Contrarian commodity evidence on its own direct authoritative lane", () => {
+    const monitor = scalperServiceSource.slice(
+      scalperServiceSource.indexOf("function _monitorStrictContrarianMarkets"),
+      scalperServiceSource.indexOf("interface Candidate"),
+    );
+    assert.match(scalperServiceSource, /const _contrarianAuthoritativeSamples/);
+    assert.match(scalperServiceSource, /function _collectContrarianAuthoritativeSample/);
+    assert.match(monitor, /_contrarianAuthoritativeSamples\.get\(symbol\)/);
+    assert.match(monitor, /_collectContrarianAuthoritativeSample\(symbol, coin\.product\)/);
+    assert.doesNotMatch(monitor, /_priceSamples\.get\(symbol\)/);
+    assert.match(
+      scalperServiceSource,
+      /getTickerFreshEvidence\(product\)[\s\S]*oraclePublishedAtMs/,
+    );
+    assert.match(monitor, /requireDistinctOraclePublishTimes: coin\.product\.startsWith\("PYTH:"\)/);
   });
 });
 

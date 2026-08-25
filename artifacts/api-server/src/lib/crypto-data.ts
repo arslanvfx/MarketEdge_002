@@ -210,12 +210,29 @@ async function getPythFeedId(symbol: string): Promise<string> {
  *  means the market is closed or the feed is degraded — callers must treat
  *  the price as unavailable (fail closed), never as a live tick. */
 const PYTH_SPOT_MAX_AGE_S = 60;
+/** Execution/one-second guard reads must be much fresher than general UI data. */
+export const PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S = 5;
+export interface FreshTickerEvidence {
+  price: number;
+  /** Pyth oracle publish time; null for Coinbase products. */
+  publishedAtMs: number | null;
+}
 
 /**
  * Fresh Pyth spot price. Throws when the feed is stale (> PYTH_SPOT_MAX_AGE_S)
  * or unavailable so callers fail closed exactly like a Coinbase fetch error.
  */
-async function fetchPythSpot(product: string): Promise<number> {
+async function fetchPythSpot(
+  product: string,
+  maxAgeSeconds = PYTH_SPOT_MAX_AGE_S,
+): Promise<number> {
+  return (await fetchPythSpotEvidence(product, maxAgeSeconds)).price;
+}
+
+async function fetchPythSpotEvidence(
+  product: string,
+  maxAgeSeconds = PYTH_SPOT_MAX_AGE_S,
+): Promise<FreshTickerEvidence> {
   const sym = pythSymbol(product);
   const id = await getPythFeedId(sym);
   const body = await fetchJson<{
@@ -224,12 +241,12 @@ async function fetchPythSpot(product: string): Promise<number> {
   const p = body.parsed?.[0]?.price;
   if (!p) throw new Error(`Pyth spot unavailable for ${sym}`);
   const ageS = Date.now() / 1000 - p.publish_time;
-  if (ageS > PYTH_SPOT_MAX_AGE_S) {
+  if (ageS > maxAgeSeconds) {
     throw new Error(`Pyth spot stale for ${sym} (${Math.round(ageS)}s old — market closed?)`);
   }
   const price = Number(p.price) * Math.pow(10, p.expo);
   if (!Number.isFinite(price) || price <= 0) throw new Error(`Pyth spot invalid for ${sym}`);
-  return price;
+  return { price, publishedAtMs: p.publish_time * 1_000 };
 }
 
 /** Pyth Benchmarks TradingView-shim OHLC history → Candle[] (v always 0). */
@@ -286,21 +303,29 @@ export async function getTicker(product: string): Promise<number> {
  * benefit from it within their TTL window.
  */
 export async function getTickerFresh(product: string): Promise<number> {
+  return (await getTickerFreshEvidence(product)).price;
+}
+
+/** Fresh price with source publish metadata for execution-critical consumers. */
+export async function getTickerFreshEvidence(product: string): Promise<FreshTickerEvidence> {
   if (isPythProduct(product)) {
     // fetchPythSpot enforces the publish-age ceiling and throws when the feed
     // is stale/closed — the conviction tick feed treats a throw as a failed
     // tick (nothing pushed), so the direction guard fails closed rather than
     // operating on frozen prices.
-    const price = await fetchPythSpot(product);
-    tickerCache.set(product, { at: Date.now(), value: price });
-    return price;
+    const evidence = await fetchPythSpotEvidence(
+      product,
+      PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S,
+    );
+    tickerCache.set(product, { at: Date.now(), value: evidence.price });
+    return evidence;
   }
   const raw = await fetchJson<Record<string, string>>(
     `${COINBASE}/products/${product}/ticker`,
   );
   const price = parseFloat(raw.price ?? "0");
   if (price > 0) tickerCache.set(product, { at: Date.now(), value: price });
-  return price;
+  return { price, publishedAtMs: null };
 }
 
 export async function getCandles(product: string): Promise<Candle[]> {

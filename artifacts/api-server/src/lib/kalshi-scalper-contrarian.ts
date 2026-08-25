@@ -18,6 +18,17 @@ export function parseContrarianExchangeIndex(value: unknown): number | null {
 }
 export type ContrarianMode = ScalpMode;
 
+export const CONTRARIAN_COMMODITY_ADVERSE_EXCURSION_THRESHOLD_PCT = 0.03;
+export const CONTRARIAN_CRYPTO_ADVERSE_EXCURSION_THRESHOLD_PCT = 0.1;
+const CONTRARIAN_COMMODITY_SYMBOLS = new Set(["WTI", "GOLD", "SILVER"]);
+
+/** Pure side-market threshold selection for the independent monitor. */
+export function contrarianAdverseExcursionThresholdPct(symbol: string): number {
+  return CONTRARIAN_COMMODITY_SYMBOLS.has(symbol.trim().toUpperCase())
+    ? CONTRARIAN_COMMODITY_ADVERSE_EXCURSION_THRESHOLD_PCT
+    : CONTRARIAN_CRYPTO_ADVERSE_EXCURSION_THRESHOLD_PCT;
+}
+
 /** Persisted, deliberately narrow admission policy for reversal executions. */
 export interface StrictContrarianEligibilityProfile {
   finalWindowSeconds: number;
@@ -148,12 +159,6 @@ export function evaluateContrarianGuardEligibility(
   ) {
     return { eligible: false, reason: "outside_strict_final_window", evidence };
   }
-  if (
-    !Number.isInteger(guard.consecutiveWrongWayMoves)
-    || guard.consecutiveWrongWayMoves < profile.minRepeatedAdverseMoves
-  ) {
-    return { eligible: false, reason: "insufficient_repeated_adverse_movement", evidence };
-  }
   const projectedTooCloseReason = protectedSide === "yes"
     ? "coordinated_direction_clearance_projected_too_close_yes"
     : "coordinated_direction_clearance_projected_too_close_no";
@@ -169,10 +174,27 @@ export function evaluateContrarianGuardEligibility(
     guard.wrongTargetSide && guard.reason === wrongTargetReason;
   const exactConsecutiveBlock =
     guard.directionalBlocked && guard.reason === consecutiveReason;
+  const exactExcursionBlock =
+    guard.adverseExcursionBlocked === true
+    && guard.reason === (protectedSide === "yes"
+      ? "adverse_excursion_peak_fall_yes"
+      : "adverse_excursion_trough_rise_no");
+  // A verified excursion latch is itself repeated side-specific movement
+  // evidence and deliberately survives a rebound that resets the legacy
+  // trailing streak. Other guard classes retain the strict current-streak gate.
+  if (
+    !exactExcursionBlock
+    && (
+      !Number.isInteger(guard.consecutiveWrongWayMoves)
+      || guard.consecutiveWrongWayMoves < profile.minRepeatedAdverseMoves
+    )
+  ) {
+    return { eligible: false, reason: "insufficient_repeated_adverse_movement", evidence };
+  }
   const exactCoordinatedProjectionBlock =
     guard.coordinatedDirectionClearanceReason === projectedTooCloseReason
     && guard.reason === projectedTooCloseReason;
-  if (!exactWrongTargetBlock && !exactConsecutiveBlock && !exactCoordinatedProjectionBlock) {
+  if (!exactWrongTargetBlock && !exactConsecutiveBlock && !exactExcursionBlock && !exactCoordinatedProjectionBlock) {
     return { eligible: false, reason: "generic_or_wrong_direction_guard_block", evidence };
   }
   if (guard.targetPrice == null || guard.latestPrice == null) {

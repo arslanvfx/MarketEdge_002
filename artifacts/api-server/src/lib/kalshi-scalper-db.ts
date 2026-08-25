@@ -527,6 +527,18 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
       typeof raw["coordinatedDirectionClearanceEnabled"] === "boolean"
         ? raw["coordinatedDirectionClearanceEnabled"]
         : defaults.coordinatedDirectionClearanceEnabled,
+    adverseExcursionGuardEnabled: typeof raw["adverseExcursionGuardEnabled"] === "boolean"
+      ? raw["adverseExcursionGuardEnabled"]
+      : defaults.adverseExcursionGuardEnabled,
+    adverseExcursionLookbackSeconds: typeof raw["adverseExcursionLookbackSeconds"] === "number"
+      ? raw["adverseExcursionLookbackSeconds"]
+      : defaults.adverseExcursionLookbackSeconds,
+    adverseExcursionThresholdPct: typeof raw["adverseExcursionThresholdPct"] === "number"
+      ? raw["adverseExcursionThresholdPct"]
+      : defaults.adverseExcursionThresholdPct,
+    adverseExcursionRecoverySeconds: typeof raw["adverseExcursionRecoverySeconds"] === "number"
+      ? raw["adverseExcursionRecoverySeconds"]
+      : defaults.adverseExcursionRecoverySeconds,
     freefallLookbackSeconds: typeof raw["freefallLookbackSeconds"] === "number" ? raw["freefallLookbackSeconds"] : defaults.freefallLookbackSeconds,
     freefallThresholdPct: typeof raw["freefallThresholdPct"] === "number" ? raw["freefallThresholdPct"] : defaults.freefallThresholdPct,
     rapidMoveGuardEnabled: typeof raw["rapidMoveGuardEnabled"] === "boolean" ? raw["rapidMoveGuardEnabled"] : defaults.rapidMoveGuardEnabled,

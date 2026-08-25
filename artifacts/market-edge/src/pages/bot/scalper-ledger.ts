@@ -424,6 +424,20 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`Target distance ${measured} (${minimum})${prices}`);
   }
 
+  if (evidence?.adverseExcursionPct != null) {
+    const lookback = evidence.adverseExcursionLookbackSeconds == null
+      ? "configured window"
+      : `${evidence.adverseExcursionLookbackSeconds}s lookback`;
+    const recovery = evidence.adverseExcursionRecoverySeconds == null
+      ? "recovery unavailable"
+      : `${evidence.adverseExcursionRecoverySamples ?? 0}/${evidence.adverseExcursionRecoverySeconds} recovery samples`;
+    details.push(
+      `Adverse excursion ${evidence.adverseExcursionPct.toFixed(3)}% · ${lookback} · ${recovery}${
+        evidence.adverseExcursionBlocked ? " · latched" : ""
+      }`,
+    );
+  }
+
   if (evidence && (
     evidence.directionalMovePct != null
     || evidence.freefallConsecutiveSeconds != null

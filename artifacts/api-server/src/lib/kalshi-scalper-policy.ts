@@ -463,6 +463,7 @@ export function evaluateScalpReservationRetry(input: {
       cooldownMs = SCALP_AUTH_RETRY_COOLDOWN_MS;
     } else if (
       reason.startsWith("freefall_")
+      || reason.startsWith("adverse_excursion_")
       || reason.startsWith("rapid_move_")
       || reason.startsWith("target_proximity_")
     ) {
@@ -529,6 +530,10 @@ export function computeContractCount(
 export interface FreefallSample {
   price: number;
   at: number; // ms timestamp
+  /** Source oracle publish time for dedicated authoritative monitor samples. */
+  oraclePublishedAtMs?: number | null;
+  /** Oracle age at collection time, not reevaluated against later guard time. */
+  oracleAgeMs?: number | null;
 }
 
 export interface FreefallGuardResult {
@@ -596,6 +601,13 @@ export interface FreefallGuardResult {
   wrongWayResetCount: number;
   /** Timestamp of the most recent reset sample, when one occurred. */
   lastWrongWayResetAt: number | null;
+  /** Independent recent-extreme latch; optional for rolling evidence compatibility. */
+  adverseExcursionBlocked?: boolean;
+  adverseExcursionPct?: number | null;
+  adverseExcursionLookbackSeconds?: number | null;
+  adverseExcursionRecoverySeconds?: number | null;
+  adverseExcursionRecoverySamples?: number | null;
+  adverseExcursionTriggeredAt?: number | null;
 }
 
 export interface FreefallPreSubmitDecision {
@@ -611,6 +623,8 @@ export interface FreefallPreSubmitDecision {
 export const FREEFALL_MAX_SAMPLE_AGE_MS = 2_000;
 export const FREEFALL_MIN_SAMPLE_INTERVAL_MS = 700;
 export const FREEFALL_MAX_SAMPLE_INTERVAL_MS = 1_800;
+export const CONTRARIAN_COMMODITY_MAX_ORACLE_PUBLISH_GAP_MS = 6_000;
+export const CONTRARIAN_COMMODITY_MIN_DISTINCT_PUBLISHES = 3;
 /**
  * A favorable endpoint move must clear ordinary quote noise. This is separate
  * from the rapid-move threshold: it proves direction rather than limiting
@@ -642,6 +656,14 @@ export interface FreefallGuardInput {
   rapidMoveEnabled: boolean;
   rapidMoveLookbackSeconds: number;
   rapidMoveThresholdPct: number;
+  adverseExcursionEnabled?: boolean;
+  adverseExcursionLookbackSeconds?: number;
+  adverseExcursionThresholdPct?: number;
+  adverseExcursionRecoverySeconds?: number;
+  /** Require distinct fresh oracle updates; used by the Contrarian commodity lane. */
+  requireDistinctOraclePublishTimes?: boolean;
+  /** Use Pyth publication cadence instead of Coinbase's one-second cadence. */
+  authoritativeCommodityCadence?: boolean;
 }
 
 type CadencedSamplesResult =
@@ -710,6 +732,45 @@ function selectCadencedSamples(
   return { ok: true, samples: selected };
 }
 
+function selectCommodityOracleSamples(
+  relevant: FreefallSample[],
+  lookbackSeconds: number,
+  nowMs: number,
+): CadencedSamplesResult {
+  const byPublishTime = new Map<number, FreefallSample>();
+  for (const sample of relevant) {
+    const publishedAt = sample.oraclePublishedAtMs;
+    if (
+      !Number.isFinite(publishedAt)
+      || !Number.isFinite(sample.oracleAgeMs)
+      || (sample.oracleAgeMs as number) < 0
+      || (sample.oracleAgeMs as number) > 5_000
+    ) return { ok: false, reason: "adverse_excursion_unavailable_oracle_stale", samplesUsed: 0 };
+    // Repeated polling receipts never become extra cadence observations.
+    byPublishTime.set(publishedAt as number, sample);
+  }
+  const samples = [...byPublishTime.values()].sort(
+    (a, b) => a.oraclePublishedAtMs! - b.oraclePublishedAtMs!,
+  );
+  if (samples.length < CONTRARIAN_COMMODITY_MIN_DISTINCT_PUBLISHES) {
+    return { ok: false, reason: "adverse_excursion_unavailable_distinct_publishes", samplesUsed: samples.length };
+  }
+  const newest = samples[samples.length - 1];
+  if (nowMs - newest.oraclePublishedAtMs! > 5_000 || newest.oraclePublishedAtMs! > nowMs + 1_000) {
+    return { ok: false, reason: "adverse_excursion_unavailable_oracle_stale", samplesUsed: samples.length };
+  }
+  for (let index = 1; index < samples.length; index += 1) {
+    const gap = samples[index].oraclePublishedAtMs! - samples[index - 1].oraclePublishedAtMs!;
+    if (gap <= 0 || gap > CONTRARIAN_COMMODITY_MAX_ORACLE_PUBLISH_GAP_MS) {
+      return { ok: false, reason: "adverse_excursion_unavailable_oracle_gap", samplesUsed: samples.length };
+    }
+  }
+  if (newest.at - samples[0].at < lookbackSeconds * 1_000) {
+    return { ok: false, reason: "adverse_excursion_unavailable_warming", samplesUsed: samples.length };
+  }
+  return { ok: true, samples };
+}
+
 /**
  * Freefall Guard — checks real-time underlying direction once per second.
  * Scalper-owned samples only; never shares with regular bot.
@@ -733,6 +794,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   const longestRequiredMoves = Math.max(
     input.directionEnabled ? requiredMoves : 0,
     input.rapidMoveEnabled ? rapidRequiredMoves : 0,
+    input.adverseExcursionEnabled
+      ? Math.max(1, Math.floor(input.adverseExcursionLookbackSeconds ?? 0))
+      : 0,
   );
   const requiredSamples = longestRequiredMoves > 0
     ? longestRequiredMoves + 1
@@ -769,7 +833,8 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     targetSideViolationAt: null,
     latestPrice: null,
     targetPrice:
-      input.directionEnabled && Number.isFinite(input.targetPrice)
+      (input.directionEnabled || input.adverseExcursionEnabled)
+      && Number.isFinite(input.targetPrice)
         ? input.targetPrice
         : null,
     directionalBlocked: false,
@@ -785,7 +850,7 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     return unavailable("freefall_unavailable_timing", 0);
   }
   if (
-    input.directionEnabled
+    (input.directionEnabled || input.adverseExcursionEnabled)
     && (!Number.isFinite(input.targetPrice) || input.targetPrice <= 0)
   ) {
     return unavailable("freefall_unavailable_target", 0);
@@ -810,10 +875,26 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   ) {
     return unavailable("rapid_move_unavailable_config", 0);
   }
+  if (
+    input.adverseExcursionEnabled
+    && (
+      !Number.isInteger(input.adverseExcursionLookbackSeconds)
+      || (input.adverseExcursionLookbackSeconds ?? 0) < 5
+      || !Number.isFinite(input.adverseExcursionThresholdPct)
+      || (input.adverseExcursionThresholdPct ?? 0) <= 0
+      || !Number.isInteger(input.adverseExcursionRecoverySeconds)
+      || (input.adverseExcursionRecoverySeconds ?? 0) < 1
+    )
+  ) {
+    return unavailable("adverse_excursion_unavailable_config", 0);
+  }
 
   const maxObservationSeconds = Math.max(
     input.directionEnabled ? requiredMoves : 0,
     input.rapidMoveEnabled ? Math.floor(input.rapidMoveLookbackSeconds) : 0,
+    input.adverseExcursionEnabled
+      ? Math.floor(input.adverseExcursionLookbackSeconds ?? 0)
+      : 0,
   );
   const cutoff = Math.max(
     input.eligibilityStartMs,
@@ -859,6 +940,76 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   }
 
   const directionSamples = directional?.ok ? directional.samples : [newest];
+  const excursionSelection = input.adverseExcursionEnabled
+    ? input.authoritativeCommodityCadence
+      ? selectCommodityOracleSamples(
+        relevant,
+        Math.max(1, Math.floor(input.adverseExcursionLookbackSeconds ?? 0)),
+        input.nowMs,
+      )
+      : selectCadencedSamples(
+        relevant,
+        Math.max(1, Math.floor(input.adverseExcursionLookbackSeconds ?? 0)),
+      )
+    : null;
+  if (excursionSelection && !excursionSelection.ok) {
+    return unavailable(
+      excursionSelection.reason.replace("freefall_", "adverse_excursion_"),
+      excursionSelection.samplesUsed,
+    );
+  }
+  const excursionSamples = excursionSelection?.ok ? excursionSelection.samples : [];
+  if (
+    input.requireDistinctOraclePublishTimes
+    && input.adverseExcursionEnabled
+    && !input.authoritativeCommodityCadence
+  ) {
+    const publishTimes = new Set<number>();
+    for (const sample of excursionSamples) {
+      const publishedAtMs = sample.oraclePublishedAtMs;
+      if (
+        !Number.isFinite(publishedAtMs)
+        || !Number.isFinite(sample.oracleAgeMs)
+        || (sample.oracleAgeMs as number) < 0
+        || (sample.oracleAgeMs as number) > 5_000
+      ) {
+        return unavailable("adverse_excursion_unavailable_oracle_stale", excursionSamples.length);
+      }
+      if (publishTimes.has(publishedAtMs as number)) {
+        return unavailable("adverse_excursion_unavailable_repeated_oracle_publish", excursionSamples.length);
+      }
+      publishTimes.add(publishedAtMs as number);
+    }
+  }
+  let adverseExcursionPct: number | null = null;
+  let adverseExcursionTriggeredAt: number | null = null;
+  let adverseExcursionRecoverySamples = 0;
+  let adverseExcursionExtremePrice: number | null = null;
+  let adverseExcursionBlocked = false;
+  if (input.adverseExcursionEnabled && excursionSamples.length > 0) {
+    let extreme = excursionSamples[0].price;
+    const threshold = input.adverseExcursionThresholdPct!;
+    for (let index = 0; index < excursionSamples.length; index += 1) {
+      const sample = excursionSamples[index];
+      extreme = input.side === "yes"
+        ? Math.max(extreme, sample.price)
+        : Math.min(extreme, sample.price);
+      const excursion = input.side === "yes"
+        ? ((extreme - sample.price) / extreme) * 100
+        : ((sample.price - extreme) / extreme) * 100;
+      adverseExcursionPct = Math.max(adverseExcursionPct ?? 0, excursion);
+      if (excursion >= threshold && adverseExcursionTriggeredAt == null) {
+        adverseExcursionTriggeredAt = sample.at;
+      }
+      if (adverseExcursionTriggeredAt != null) {
+        if (excursion < threshold) adverseExcursionRecoverySamples += 1;
+        else adverseExcursionRecoverySamples = 0;
+      }
+    }
+    adverseExcursionBlocked = adverseExcursionTriggeredAt != null
+      && adverseExcursionRecoverySamples < input.adverseExcursionRecoverySeconds!;
+    adverseExcursionExtremePrice = extreme;
+  }
   const uniqueDirectionalSamples = new Set(
     directionSamples.map((sample) => sample.price),
   ).size;
@@ -866,7 +1017,12 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   const directionNewest = directionSamples[directionSamples.length - 1];
   const directionObservedSpanMs =
     directionNewest.at - directionOldest.at;
-  let observedSpanMs = directionObservedSpanMs;
+  let observedSpanMs = Math.max(
+    directionObservedSpanMs,
+    excursionSamples.length > 1
+      ? excursionSamples[excursionSamples.length - 1].at - excursionSamples[0].at
+      : 0,
+  );
   const priceChangePct = input.directionEnabled
     ? ((directionNewest.price - directionOldest.price) / directionOldest.price) * 100
     : 0;
@@ -1017,6 +1173,37 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       ? ((projectedPrice - input.targetPrice) / input.targetPrice) * 100
       : ((input.targetPrice - projectedPrice) / input.targetPrice) * 100;
   }
+  // Preserve the excursion's adverse pace across a single favorable rebound.
+  // This projection is only a diagnostic/admission input; target crossing is
+  // still independently required by the strict Contrarian classifier.
+  if (
+    adverseExcursionBlocked
+    && adverseExcursionExtremePrice != null
+    && adverseExcursionTriggeredAt != null
+    && Number.isFinite(input.secondsRemaining)
+    && (input.secondsRemaining ?? -1) >= 0
+  ) {
+    secondsRemaining = input.secondsRemaining!;
+    const elapsedSeconds = Math.max(
+      1,
+      (directionNewest.at - adverseExcursionTriggeredAt) / 1_000,
+    );
+    const adverseDelta = input.side === "yes"
+      ? Math.max(0, adverseExcursionExtremePrice - directionNewest.price)
+      : Math.max(0, directionNewest.price - adverseExcursionExtremePrice);
+    const excursionPace = adverseDelta / elapsedSeconds;
+    if (excursionPace > 0) {
+      adversePacePctPerSecond = (excursionPace / input.targetPrice) * 100;
+      projectedAdverseMovePct =
+        adversePacePctPerSecond * input.secondsRemaining!;
+      projectedPrice = input.side === "yes"
+        ? directionNewest.price - excursionPace * input.secondsRemaining!
+        : directionNewest.price + excursionPace * input.secondsRemaining!;
+      projectedDistancePct = input.side === "yes"
+        ? ((projectedPrice - input.targetPrice) / input.targetPrice) * 100
+        : ((input.targetPrice - projectedPrice) / input.targetPrice) * 100;
+    }
+  }
   if (
     coordinatedDirectionClearanceEnabled
     && favorableTrendBlocked
@@ -1061,6 +1248,7 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   const blocked =
     wrongTargetSide
     || directionalBlocked
+    || adverseExcursionBlocked
     || effectiveFavorableTrendBlocked
     || rapidMoveBlocked;
   const reason = wrongTargetSide
@@ -1071,6 +1259,10 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       ? (input.side === "yes"
         ? "freefall_consecutive_falling"
         : "freefall_consecutive_rising")
+      : adverseExcursionBlocked
+        ? (input.side === "yes"
+          ? "adverse_excursion_peak_fall_yes"
+          : "adverse_excursion_trough_rise_no")
       : effectiveFavorableTrendBlocked
         ? (
           coordinatedDirectionClearanceSafe === false
@@ -1085,6 +1277,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   if (input.rapidMoveEnabled) {
     for (const sample of rapidSamples) evaluatedSamplesByTimestamp.set(sample.at, sample);
   }
+  if (input.adverseExcursionEnabled) {
+    for (const sample of excursionSamples) evaluatedSamplesByTimestamp.set(sample.at, sample);
+  }
   const evaluatedSamples = [...evaluatedSamplesByTimestamp.values()]
     .sort((a, b) => a.at - b.at);
 
@@ -1092,12 +1287,13 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     evaluable: true,
     blocked,
     reason,
-    adverseMovePct: endpointAdverseMovePct,
+    adverseMovePct: Math.max(endpointAdverseMovePct, adverseExcursionPct ?? 0),
     endpointAdverseMovePct,
-    reversalAdverseMovePct: 0,
+    reversalAdverseMovePct: adverseExcursionPct ?? 0,
     samplesUsed: Math.max(
       input.directionEnabled ? directionSamples.length : 0,
       rapidSamplesUsed,
+      excursionSamples.length,
     ),
     requiredSamples,
     consecutiveWrongWayMoves,
@@ -1122,7 +1318,10 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     targetSideViolationPrice: targetSideViolation?.price ?? null,
     targetSideViolationAt: targetSideViolation?.at ?? null,
     latestPrice: directionNewest.price,
-    targetPrice: input.directionEnabled ? input.targetPrice : null,
+    targetPrice:
+      input.directionEnabled || input.adverseExcursionEnabled
+        ? input.targetPrice
+        : null,
     directionalBlocked,
     wrongTargetSide,
     rapidMoveBlocked,
@@ -1130,6 +1329,16 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     evaluatedSamples,
     wrongWayResetCount,
     lastWrongWayResetAt,
+    adverseExcursionBlocked,
+    adverseExcursionPct,
+    adverseExcursionLookbackSeconds: input.adverseExcursionEnabled
+      ? input.adverseExcursionLookbackSeconds ?? null
+      : null,
+    adverseExcursionRecoverySeconds: input.adverseExcursionEnabled
+      ? input.adverseExcursionRecoverySeconds ?? null
+      : null,
+    adverseExcursionRecoverySamples,
+    adverseExcursionTriggeredAt,
   };
 }
 
@@ -1159,8 +1368,18 @@ export function evaluateFreefallPreSubmitGuard(input: {
   rapidMoveEnabled: boolean;
   rapidMoveLookbackSeconds: number;
   rapidMoveThresholdPct: number;
+  adverseExcursionEnabled?: boolean;
+  adverseExcursionLookbackSeconds?: number;
+  adverseExcursionThresholdPct?: number;
+  adverseExcursionRecoverySeconds?: number;
+  requireDistinctOraclePublishTimes?: boolean;
+  authoritativeCommodityCadence?: boolean;
 }): FreefallPreSubmitDecision {
-  if (!input.directionEnabled && !input.rapidMoveEnabled) {
+  if (
+    !input.directionEnabled
+    && !input.rapidMoveEnabled
+    && !input.adverseExcursionEnabled
+  ) {
     return {
       allowed: true,
       reason: null,
@@ -1206,6 +1425,12 @@ export function evaluateFreefallPreSubmitGuard(input: {
     rapidMoveEnabled: input.rapidMoveEnabled,
     rapidMoveLookbackSeconds: input.rapidMoveLookbackSeconds,
     rapidMoveThresholdPct: input.rapidMoveThresholdPct,
+    adverseExcursionEnabled: input.adverseExcursionEnabled,
+    adverseExcursionLookbackSeconds: input.adverseExcursionLookbackSeconds,
+    adverseExcursionThresholdPct: input.adverseExcursionThresholdPct,
+    adverseExcursionRecoverySeconds: input.adverseExcursionRecoverySeconds,
+    requireDistinctOraclePublishTimes: input.requireDistinctOraclePublishTimes,
+    authoritativeCommodityCadence: input.authoritativeCommodityCadence,
   });
 
   return {
@@ -1401,6 +1626,10 @@ export interface ExecutionRiskSnapshot {
   freefallConsecutiveSeconds: number;
   favorableTrendConfirmationEnabled: boolean;
   coordinatedDirectionClearanceEnabled: boolean;
+  adverseExcursionGuardEnabled: boolean;
+  adverseExcursionLookbackSeconds: number;
+  adverseExcursionThresholdPct: number;
+  adverseExcursionRecoverySeconds: number;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled: boolean;
@@ -1423,6 +1652,10 @@ export interface RiskConfigLike {
   freefallConsecutiveSeconds?: number;
   favorableTrendConfirmationEnabled?: boolean;
   coordinatedDirectionClearanceEnabled?: boolean;
+  adverseExcursionGuardEnabled?: boolean;
+  adverseExcursionLookbackSeconds?: number;
+  adverseExcursionThresholdPct?: number;
+  adverseExcursionRecoverySeconds?: number;
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
   rapidMoveGuardEnabled?: boolean;
@@ -1470,6 +1703,14 @@ export function buildExecutionRiskSnapshot(
       config.favorableTrendConfirmationEnabled ?? true,
     coordinatedDirectionClearanceEnabled:
       config.coordinatedDirectionClearanceEnabled ?? false,
+    adverseExcursionGuardEnabled:
+      config.adverseExcursionGuardEnabled ?? false,
+    adverseExcursionLookbackSeconds:
+      config.adverseExcursionLookbackSeconds ?? 20,
+    adverseExcursionThresholdPct:
+      config.adverseExcursionThresholdPct ?? 0.1,
+    adverseExcursionRecoverySeconds:
+      config.adverseExcursionRecoverySeconds ?? 3,
     freefallLookbackSeconds: config.freefallLookbackSeconds,
     freefallThresholdPct: config.freefallThresholdPct,
     rapidMoveGuardEnabled: config.rapidMoveGuardEnabled ?? false,
@@ -1552,6 +1793,10 @@ export function compareRiskSnapshot(
   }
   if (!eqNum(currentConfig.freefallLookbackSeconds, snapshot.freefallLookbackSeconds)) changed.push("freefallLookbackSeconds");
   if (!eqNum(currentConfig.freefallThresholdPct, snapshot.freefallThresholdPct)) changed.push("freefallThresholdPct");
+  if ((currentConfig.adverseExcursionGuardEnabled ?? false) !== snapshot.adverseExcursionGuardEnabled) changed.push("adverseExcursionGuardEnabled");
+  if (!eqNum(currentConfig.adverseExcursionLookbackSeconds ?? 20, snapshot.adverseExcursionLookbackSeconds)) changed.push("adverseExcursionLookbackSeconds");
+  if (!eqNum(currentConfig.adverseExcursionThresholdPct ?? 0.1, snapshot.adverseExcursionThresholdPct)) changed.push("adverseExcursionThresholdPct");
+  if (!eqNum(currentConfig.adverseExcursionRecoverySeconds ?? 3, snapshot.adverseExcursionRecoverySeconds)) changed.push("adverseExcursionRecoverySeconds");
   if ((currentConfig.rapidMoveGuardEnabled ?? false) !== snapshot.rapidMoveGuardEnabled) changed.push("rapidMoveGuardEnabled");
   if (!eqNum(currentConfig.rapidMoveLookbackSeconds ?? 4, snapshot.rapidMoveLookbackSeconds)) changed.push("rapidMoveLookbackSeconds");
   if (!eqNum(currentConfig.rapidMoveThresholdPct ?? 0.5, snapshot.rapidMoveThresholdPct)) changed.push("rapidMoveThresholdPct");
@@ -2167,6 +2412,18 @@ export function validateScalpConfigPartial(
     const v = Number(c["freefallThresholdPct"]);
     if (!Number.isFinite(v) || v <= 0) errors.push("freefallThresholdPct must be > 0");
   }
+  if (c["adverseExcursionLookbackSeconds"] != null) {
+    const v = Number(c["adverseExcursionLookbackSeconds"]);
+    if (!Number.isInteger(v) || v < 5 || v > 60) errors.push("adverseExcursionLookbackSeconds must be an integer 5-60");
+  }
+  if (c["adverseExcursionThresholdPct"] != null) {
+    const v = Number(c["adverseExcursionThresholdPct"]);
+    if (!Number.isFinite(v) || v <= 0 || v > 10) errors.push("adverseExcursionThresholdPct must be > 0 and ≤ 10");
+  }
+  if (c["adverseExcursionRecoverySeconds"] != null) {
+    const v = Number(c["adverseExcursionRecoverySeconds"]);
+    if (!Number.isInteger(v) || v < 1 || v > 15) errors.push("adverseExcursionRecoverySeconds must be an integer 1-15");
+  }
   if (c["rapidMoveLookbackSeconds"] != null) {
     const v = Number(c["rapidMoveLookbackSeconds"]);
     if (!Number.isInteger(v) || v < 1 || v > 15) errors.push("rapidMoveLookbackSeconds must be an integer 1-15");
@@ -2363,6 +2620,10 @@ export interface ScalpConfigPatch {
   coordinatedDirectionClearanceEnabled?: boolean;
   freefallLookbackSeconds?: number;
   freefallThresholdPct?: number;
+  adverseExcursionGuardEnabled?: boolean;
+  adverseExcursionLookbackSeconds?: number;
+  adverseExcursionThresholdPct?: number;
+  adverseExcursionRecoverySeconds?: number;
   rapidMoveGuardEnabled?: boolean;
   rapidMoveLookbackSeconds?: number;
   rapidMoveThresholdPct?: number;
@@ -2394,6 +2655,10 @@ const ALLOWED_TOP_LEVEL_FIELDS = new Set<string>([
   "coordinatedDirectionClearanceEnabled",
   "freefallLookbackSeconds",
   "freefallThresholdPct",
+  "adverseExcursionGuardEnabled",
+  "adverseExcursionLookbackSeconds",
+  "adverseExcursionThresholdPct",
+  "adverseExcursionRecoverySeconds",
   "rapidMoveGuardEnabled",
   "rapidMoveLookbackSeconds",
   "rapidMoveThresholdPct",
@@ -2461,6 +2726,10 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
     if (typeof body["freefallGuardEnabled"] !== "boolean") errors.push("freefallGuardEnabled must be a boolean");
     else out.freefallGuardEnabled = body["freefallGuardEnabled"];
   }
+  if (has("adverseExcursionGuardEnabled")) {
+    if (typeof body["adverseExcursionGuardEnabled"] !== "boolean") errors.push("adverseExcursionGuardEnabled must be a boolean");
+    else out.adverseExcursionGuardEnabled = body["adverseExcursionGuardEnabled"];
+  }
   if (has("favorableTrendConfirmationEnabled")) {
     if (typeof body["favorableTrendConfirmationEnabled"] !== "boolean") {
       errors.push("favorableTrendConfirmationEnabled must be a boolean");
@@ -2497,7 +2766,7 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
 
   // ── Numeric fields (real finite numbers, in range) ──
   const numField = (
-    key: "globalBandMin" | "globalBandMax" | "finalWindowSeconds" | "budgetDollars" | "freefallConsecutiveSeconds" | "freefallLookbackSeconds" | "freefallThresholdPct" | "rapidMoveLookbackSeconds" | "rapidMoveThresholdPct" | "targetProximityThresholdPct",
+    key: "globalBandMin" | "globalBandMax" | "finalWindowSeconds" | "budgetDollars" | "freefallConsecutiveSeconds" | "freefallLookbackSeconds" | "freefallThresholdPct" | "adverseExcursionLookbackSeconds" | "adverseExcursionThresholdPct" | "adverseExcursionRecoverySeconds" | "rapidMoveLookbackSeconds" | "rapidMoveThresholdPct" | "targetProximityThresholdPct",
     ok: (v: number) => boolean,
     msg: string,
   ): void => {
@@ -2513,6 +2782,9 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   numField("freefallConsecutiveSeconds", (v) => Number.isInteger(v) && v >= 1 && v <= 15, "freefallConsecutiveSeconds must be an integer 1-15");
   numField("freefallLookbackSeconds", (v) => v >= 1 && v <= 600, "freefallLookbackSeconds must be a number 1-600");
   numField("freefallThresholdPct", (v) => v > 0, "freefallThresholdPct must be a number > 0");
+  numField("adverseExcursionLookbackSeconds", (v) => Number.isInteger(v) && v >= 5 && v <= 60, "adverseExcursionLookbackSeconds must be an integer 5-60");
+  numField("adverseExcursionThresholdPct", (v) => v > 0 && v <= 10, "adverseExcursionThresholdPct must be a number > 0 and ≤ 10");
+  numField("adverseExcursionRecoverySeconds", (v) => Number.isInteger(v) && v >= 1 && v <= 15, "adverseExcursionRecoverySeconds must be an integer 1-15");
   numField("rapidMoveLookbackSeconds", (v) => Number.isInteger(v) && v >= 1 && v <= 15, "rapidMoveLookbackSeconds must be an integer 1-15");
   numField("rapidMoveThresholdPct", (v) => v > 0 && v <= 10, "rapidMoveThresholdPct must be a number > 0 and ≤ 10");
   numField("targetProximityThresholdPct", (v) => v > 0 && v <= 10, "targetProximityThresholdPct must be a number > 0 and ≤ 10");

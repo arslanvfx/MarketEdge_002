@@ -34,6 +34,11 @@ export interface ScalpConfig {
   /** Allow a weak adverse net trend only when its projected price at close
    * remains beyond the enabled target-distance safety buffer. */
   coordinatedDirectionClearanceEnabled: boolean;
+  /** Optional peak/trough adverse-excursion latch. Off by default for compatibility. */
+  adverseExcursionGuardEnabled: boolean;
+  adverseExcursionLookbackSeconds: number;
+  adverseExcursionThresholdPct: number;
+  adverseExcursionRecoverySeconds: number;
   /** Legacy persisted fields retained for rolling compatibility; no longer drive entry. */
   freefallLookbackSeconds: number;
   freefallThresholdPct: number;
@@ -67,6 +72,10 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   freefallConsecutiveSeconds: 4,
   favorableTrendConfirmationEnabled: true,
   coordinatedDirectionClearanceEnabled: false,
+  adverseExcursionGuardEnabled: false,
+  adverseExcursionLookbackSeconds: 20,
+  adverseExcursionThresholdPct: 0.1,
+  adverseExcursionRecoverySeconds: 3,
   freefallLookbackSeconds: 30,
   freefallThresholdPct: 0.5,
   rapidMoveGuardEnabled: false,
@@ -171,6 +180,12 @@ export interface ScalpEntryGuardEvidence {
   targetSideViolationPrice?: number | null;
   targetSideViolationAt?: string | null;
   freefallConsecutiveSeconds: number | null;
+  adverseExcursionBlocked?: boolean | null;
+  adverseExcursionPct?: number | null;
+  adverseExcursionLookbackSeconds?: number | null;
+  adverseExcursionRecoverySeconds?: number | null;
+  adverseExcursionRecoverySamples?: number | null;
+  adverseExcursionTriggeredAt?: string | null;
   rapidMovePct: number | null;
   rapidMoveThresholdPct: number | null;
   rapidMoveLookbackSeconds: number | null;
@@ -573,6 +588,12 @@ export interface ScalpSkipEvidence {
   sampleCoverageMs?: number | null;
   /** Which side was being protected (yes = falling blocks YES, no = rising blocks NO). */
   protectedSide?: "yes" | "no" | null;
+  adverseExcursionBlocked?: boolean | null;
+  adverseExcursionPct?: number | null;
+  adverseExcursionLookbackSeconds?: number | null;
+  adverseExcursionRecoverySeconds?: number | null;
+  adverseExcursionRecoverySamples?: number | null;
+  adverseExcursionTriggeredAt?: string | null;
 
   // ── Authenticated quote / identity ────────────────────────────────────────
   /** Machine reason code from the orderbook/quote validation step. */

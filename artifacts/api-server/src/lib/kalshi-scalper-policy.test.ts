@@ -651,6 +651,146 @@ describe("secondsUntilEligible", () => {
   });
 });
 
+describe("adverse excursion guard", () => {
+  const evaluate = (
+    side: "yes" | "no",
+    prices: number[],
+    options: { enabled?: boolean; staleMs?: number } = {},
+  ) => {
+    const nowMs = 100_000;
+    const start = nowMs - (prices.length - 1) * 1_000 - (options.staleMs ?? 0);
+    return evaluateFreefallPreSubmitGuard({
+      directionEnabled: false,
+      hasProduct: true,
+      freshSampleSucceeded: true,
+      samples: prices.map((price, index) => ({ price, at: start + index * 1_000 })),
+      side,
+      nowMs,
+      eligibilityStartMs: 0,
+      consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false,
+      targetPrice: 99.5,
+      secondsRemaining: 10,
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+      adverseExcursionEnabled: options.enabled ?? true,
+      adverseExcursionLookbackSeconds: 5,
+      adverseExcursionThresholdPct: 0.1,
+      adverseExcursionRecoverySeconds: 3,
+    });
+  };
+
+  it("keeps the WTI peak-to-current drop latched across one rebound", () => {
+    const result = evaluate("yes", [100, 99.96, 99.86, 99.72, 99.78, 99.76]);
+    assert.equal(result.allowed, false);
+    assert.equal(result.reason, "adverse_excursion_peak_fall_yes");
+    assert.equal(result.guardResult?.adverseExcursionBlocked, true);
+    assert.ok((result.guardResult?.adverseExcursionPct ?? 0) >= 0.2);
+  });
+
+  it("mirrors trough-to-current rises for protected NO", () => {
+    const result = evaluate("no", [100, 100.02, 100.12, 100.24, 100.19, 100.22]);
+    assert.equal(result.allowed, false);
+    assert.equal(result.reason, "adverse_excursion_trough_rise_no");
+  });
+
+  it("fails closed on stale authoritative evidence", () => {
+    const result = evaluate("yes", [100, 99.9, 99.8, 99.75, 99.8, 99.78], {
+      staleMs: 2_001,
+    });
+    assert.equal(result.allowed, false);
+    assert.match(result.reason ?? "", /unavailable_stale/);
+  });
+
+  it("is exactly compatible when the optional Scalper toggle is off", () => {
+    const result = evaluate("yes", [100, 99.9, 99.8, 99.75, 99.8, 99.78], {
+      enabled: false,
+    });
+    assert.deepEqual(result, {
+      allowed: true,
+      reason: null,
+      guardResult: null,
+      sampleCoverageMs: null,
+    });
+  });
+
+  it("fails closed when repeated Pyth publish timestamps masquerade as one-second cadence", () => {
+    const nowMs = 100_000;
+    const result = evaluateFreefallPreSubmitGuard({
+      directionEnabled: false,
+      hasProduct: true,
+      freshSampleSucceeded: true,
+      samples: [100, 99.95, 99.9, 99.85, 99.8, 99.75].map((price, index) => ({
+        price,
+        at: nowMs - (5 - index) * 1_000,
+        oraclePublishedAtMs: nowMs - 1_000,
+        oracleAgeMs: 1_000,
+      })),
+      side: "yes",
+      nowMs,
+      eligibilityStartMs: 0,
+      consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false,
+      targetPrice: 99.7,
+      secondsRemaining: 10,
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+      adverseExcursionEnabled: true,
+      adverseExcursionLookbackSeconds: 5,
+      adverseExcursionThresholdPct: 0.03,
+      adverseExcursionRecoverySeconds: 3,
+      requireDistinctOraclePublishTimes: true,
+    });
+    assert.equal(result.allowed, false);
+    assert.equal(result.reason, "adverse_excursion_unavailable_repeated_oracle_publish");
+  });
+
+  it("rejects a 60-second-old Pyth value even when its local receipt timestamps look cadenced", () => {
+    const nowMs = 100_000;
+    const result = evaluateFreefallPreSubmitGuard({
+      directionEnabled: false, hasProduct: true, freshSampleSucceeded: true,
+      samples: [100, 99.95, 99.9, 99.85, 99.8, 99.75].map((price, index) => ({
+        price, at: nowMs - (5 - index) * 1_000,
+        oraclePublishedAtMs: nowMs - 60_000 + index * 1_000,
+        oracleAgeMs: 60_000,
+      })),
+      side: "yes", nowMs, eligibilityStartMs: 0, consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false, targetPrice: 99.7, secondsRemaining: 10,
+      rapidMoveEnabled: false, rapidMoveLookbackSeconds: 4, rapidMoveThresholdPct: 0.5,
+      adverseExcursionEnabled: true, adverseExcursionLookbackSeconds: 5,
+      adverseExcursionThresholdPct: 0.03, adverseExcursionRecoverySeconds: 3,
+      requireDistinctOraclePublishTimes: true,
+    });
+    assert.equal(result.allowed, false);
+    assert.equal(result.reason, "adverse_excursion_unavailable_oracle_stale");
+  });
+
+  it("requires enough distinct, gap-free Pyth publishes for commodity Contrarian cadence", () => {
+    const nowMs = 100_000;
+    const decide = (publishOffsets: number[]) => evaluateFreefallPreSubmitGuard({
+      directionEnabled: false, hasProduct: true, freshSampleSucceeded: true,
+      samples: publishOffsets.map((offset, index) => ({
+        price: 100 - index * 0.04,
+        at: nowMs - (publishOffsets.length - 1 - index) * 1_000,
+        oraclePublishedAtMs: nowMs + offset - 1_000,
+        oracleAgeMs: 1_000,
+      })),
+      side: "yes", nowMs, eligibilityStartMs: 0, consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false, targetPrice: 99.7, secondsRemaining: 10,
+      rapidMoveEnabled: false, rapidMoveLookbackSeconds: 4, rapidMoveThresholdPct: 0.5,
+      adverseExcursionEnabled: true, adverseExcursionLookbackSeconds: 20,
+      adverseExcursionThresholdPct: 0.03, adverseExcursionRecoverySeconds: 3,
+      requireDistinctOraclePublishTimes: true, authoritativeCommodityCadence: true,
+    });
+    // Repeated latest polling receipt deduplicates to one publication.
+    assert.equal(decide([-20_000, -15_000, 0, 0]).reason, "adverse_excursion_unavailable_oracle_gap");
+    assert.equal(decide([-20_000, -13_000, 0]).reason, "adverse_excursion_unavailable_oracle_gap");
+    assert.equal(decide([-20_000, 0]).reason, "adverse_excursion_unavailable_distinct_publishes");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Bounded reservation retries
 // ---------------------------------------------------------------------------

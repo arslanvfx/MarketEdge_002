@@ -22,7 +22,7 @@ import {
   reconcileScalpOrderStrict,
   type ScalpReconciliationResult,
 } from "./kalshi-scalper-exchange.ts";
-import { getTicker, getTickerFresh } from "./crypto-data.ts";
+import { getTicker, getTickerFresh, getTickerFreshEvidence } from "./crypto-data.ts";
 import type {
   ScalpAttemptLatency,
   ScalpConfig,
@@ -118,6 +118,7 @@ import {
 import {
   buildContrarianGuardOutcomeStudyPayload,
   ContrarianMonitorAttemptScheduler,
+  contrarianAdverseExcursionThresholdPct,
   evaluateContrarianGuardEligibility,
   isPinnedContrarianIdentityCurrent,
   parseContrarianExchangeIndex,
@@ -497,7 +498,12 @@ let _preflightStatus: ScalpPreflightStatusInternal = {
 
 // Per-symbol price samples for the scalper's own freefall guard (never shared)
 const _priceSamples = new Map<string, FreefallSample[]>();
+// Contrarian owns a completely separate authoritative history. It never uses
+// the cached/background lane or its in-flight coalescing queue.
+const _contrarianAuthoritativeSamples = new Map<string, FreefallSample[]>();
+const _contrarianLastSampleRequestAt = new Map<string, number>();
 const MAX_PRICE_SAMPLES = 120;
+const MAX_CONTRARIAN_AUTHORITATIVE_SAMPLES = 120;
 type PriceSamplePriority = "authoritative" | "background";
 interface PriceSampleJob {
   key: string;
@@ -1005,6 +1011,10 @@ export async function updateScalpConfig(patch: ScalpConfigPatch): Promise<ScalpC
           : current.coordinatedDirectionClearanceEnabled,
       freefallLookbackSeconds: patch.freefallLookbackSeconds !== undefined ? patch.freefallLookbackSeconds : current.freefallLookbackSeconds,
       freefallThresholdPct: patch.freefallThresholdPct !== undefined ? patch.freefallThresholdPct : current.freefallThresholdPct,
+      adverseExcursionGuardEnabled: patch.adverseExcursionGuardEnabled !== undefined ? patch.adverseExcursionGuardEnabled : current.adverseExcursionGuardEnabled,
+      adverseExcursionLookbackSeconds: patch.adverseExcursionLookbackSeconds !== undefined ? patch.adverseExcursionLookbackSeconds : current.adverseExcursionLookbackSeconds,
+      adverseExcursionThresholdPct: patch.adverseExcursionThresholdPct !== undefined ? patch.adverseExcursionThresholdPct : current.adverseExcursionThresholdPct,
+      adverseExcursionRecoverySeconds: patch.adverseExcursionRecoverySeconds !== undefined ? patch.adverseExcursionRecoverySeconds : current.adverseExcursionRecoverySeconds,
       rapidMoveGuardEnabled: patch.rapidMoveGuardEnabled !== undefined ? patch.rapidMoveGuardEnabled : current.rapidMoveGuardEnabled,
       rapidMoveLookbackSeconds: patch.rapidMoveLookbackSeconds !== undefined ? patch.rapidMoveLookbackSeconds : current.rapidMoveLookbackSeconds,
       rapidMoveThresholdPct: patch.rapidMoveThresholdPct !== undefined ? patch.rapidMoveThresholdPct : current.rapidMoveThresholdPct,
@@ -1277,6 +1287,48 @@ function _collectPriceSample(
   return promise;
 }
 
+/**
+ * Dedicated Contrarian monitor sample. Deliberately bypasses _priceSampleJobs:
+ * a background cached request can never satisfy, delay, or be upgraded into
+ * this execution-critical authoritative lane.
+ */
+async function _collectContrarianAuthoritativeSample(
+  symbol: string,
+  product: string,
+): Promise<boolean> {
+  try {
+    const fresh = await getTickerFreshEvidence(product);
+    const nowMs = Date.now();
+    if (!Number.isFinite(fresh.price) || fresh.price <= 0) return false;
+    const isCommodity = product.startsWith("PYTH:");
+    if (
+      isCommodity
+      && (
+        fresh.publishedAtMs == null
+        || nowMs - fresh.publishedAtMs > 5_000
+        || fresh.publishedAtMs > nowMs + 1_000
+      )
+    ) {
+      return false;
+    }
+    const key = symbol.toUpperCase();
+    const samples = _contrarianAuthoritativeSamples.get(key) ?? [];
+    samples.push({
+      price: fresh.price,
+      at: nowMs,
+      oraclePublishedAtMs: fresh.publishedAtMs,
+      oracleAgeMs: fresh.publishedAtMs == null ? null : nowMs - fresh.publishedAtMs,
+    });
+    if (samples.length > MAX_CONTRARIAN_AUTHORITATIVE_SAMPLES) {
+      samples.splice(0, samples.length - MAX_CONTRARIAN_AUTHORITATIVE_SAMPLES);
+    }
+    _contrarianAuthoritativeSamples.set(key, samples);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 interface ScalpPreflightTarget {
   symbol: string;
   product: string;
@@ -1521,6 +1573,8 @@ async function _doScanTick(): Promise<void> {
     // A new market window owns a new real-time direction baseline. Preflight
     // samples from the previous market must never count toward eligibility.
     _priceSamples.clear();
+    _contrarianAuthoritativeSamples.clear();
+    _contrarianLastSampleRequestAt.clear();
     _contrarianMonitorAttempts.clearExceptWindow(wk);
     _resetPreflightState();
   }
@@ -1594,18 +1648,26 @@ function _monitorStrictContrarianMarkets(windowKey: string, nowMs: number): void
     const targetPrice = cached?.value;
     if (!closeTime || !ticker || targetPrice == null || !Number.isFinite(targetPrice)) continue;
     if (!isInFinalWindow(closeTime, nowMs, 120, windowKey)) continue;
+    const independentExcursionThresholdPct =
+      contrarianAdverseExcursionThresholdPct(symbol);
+    // Start the next direct sample without sharing the background queue. The
+    // current decision uses only prior dedicated authoritative observations.
+    if ((nowMs - (_contrarianLastSampleRequestAt.get(symbol) ?? 0)) >= 1_000) {
+      _contrarianLastSampleRequestAt.set(symbol, nowMs);
+      void _collectContrarianAuthoritativeSample(symbol, coin.product);
+    }
     const makeDecision = (side: "yes" | "no", at: number, decisionTarget: number) => evaluateFreefallPreSubmitGuard({
       // Contrarian owns this monitoring lane. Normal Scalper guard toggles and
       // thresholds must not disable or reshape strict reversal detection.
-      directionEnabled: true,
+      directionEnabled: false,
       hasProduct: true,
       freshSampleSucceeded: true,
-      samples: _priceSamples.get(symbol) ?? [],
+      samples: _contrarianAuthoritativeSamples.get(symbol) ?? [],
       side,
       nowMs: at,
       eligibilityStartMs: Date.parse(closeTime) - 120_000,
       consecutiveSeconds: 4,
-      favorableTrendConfirmationEnabled: true,
+      favorableTrendConfirmationEnabled: false,
       coordinatedDirectionClearanceEnabled: false,
       targetPrice: decisionTarget,
       targetProximityGuardEnabled: false,
@@ -1614,6 +1676,14 @@ function _monitorStrictContrarianMarkets(windowKey: string, nowMs: number): void
       rapidMoveEnabled: false,
       rapidMoveLookbackSeconds: 4,
       rapidMoveThresholdPct: 0.5,
+      // Contrarian's detector is independent of the opt-in normal Scalper
+      // policy. A single rebound does not erase a recent extreme excursion.
+      adverseExcursionEnabled: true,
+      adverseExcursionLookbackSeconds: 20,
+      adverseExcursionThresholdPct: independentExcursionThresholdPct,
+      adverseExcursionRecoverySeconds: 3,
+      requireDistinctOraclePublishTimes: coin.product.startsWith("PYTH:"),
+      authoritativeCommodityCadence: coin.product.startsWith("PYTH:"),
     });
     for (const protectedSide of ["yes", "no"] as const) {
       if (!_contrarianMonitorAttempts.allow(_config.mode, symbol, windowKey, protectedSide, nowMs)) continue;
@@ -1625,7 +1695,7 @@ function _monitorStrictContrarianMarkets(windowKey: string, nowMs: number): void
           const [identity, book, sampled] = await Promise.all([
             fetchKalshiTarget(symbol, new Date(closeTime), true).catch(() => null),
             fetchOrderbookPrices(ticker).catch(() => null),
-            _collectPriceSample(symbol, coin.product, "background"),
+            _collectContrarianAuthoritativeSample(symbol, coin.product),
           ]);
           const fresh = getKalshiCachedData(symbol);
           const quote = book ? validateOrderbookQuote(book, ticker, closeTime) : null;
@@ -2288,6 +2358,7 @@ async function _executeScalpAttempt(
   const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
   const priceGuardSampleRequested =
     snapshot.freefallGuardEnabled
+    || snapshot.adverseExcursionGuardEnabled
     || snapshot.rapidMoveGuardEnabled
     || snapshot.targetProximityGuardEnabled;
   const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
@@ -2692,8 +2763,16 @@ async function _executeScalpAttempt(
     rapidMoveEnabled: snapshot.rapidMoveGuardEnabled,
     rapidMoveLookbackSeconds: snapshot.rapidMoveLookbackSeconds,
     rapidMoveThresholdPct: snapshot.rapidMoveThresholdPct,
+    adverseExcursionEnabled: snapshot.adverseExcursionGuardEnabled,
+    adverseExcursionLookbackSeconds: snapshot.adverseExcursionLookbackSeconds,
+    adverseExcursionThresholdPct: snapshot.adverseExcursionThresholdPct,
+    adverseExcursionRecoverySeconds: snapshot.adverseExcursionRecoverySeconds,
   });
-  if (snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled) {
+  if (
+    snapshot.freefallGuardEnabled
+    || snapshot.rapidMoveGuardEnabled
+    || snapshot.adverseExcursionGuardEnabled
+  ) {
     const ffNowMs = runtime.nowMs();
     guardEvaluatedAtMs = ffNowMs;
     const freefallDecision = evaluatePinnedFreefallAt(ffNowMs);
@@ -2812,6 +2891,14 @@ async function _executeScalpAttempt(
         samplesUsed: ffFinal?.samplesUsed ?? null,
         sampleCoverageMs: freefallDecision.sampleCoverageMs,
         protectedSide: effectiveSide,
+        adverseExcursionBlocked: ffFinal?.adverseExcursionBlocked ?? false,
+        adverseExcursionPct: ffFinal?.adverseExcursionPct ?? null,
+        adverseExcursionLookbackSeconds: ffFinal?.adverseExcursionLookbackSeconds ?? null,
+        adverseExcursionRecoverySeconds: ffFinal?.adverseExcursionRecoverySeconds ?? null,
+        adverseExcursionRecoverySamples: ffFinal?.adverseExcursionRecoverySamples ?? null,
+        adverseExcursionTriggeredAt: ffFinal?.adverseExcursionTriggeredAt != null
+          ? new Date(ffFinal.adverseExcursionTriggeredAt).toISOString()
+          : null,
         guardOutcomeStudy,
       });
       _rememberReservationOutcome(attemptKey, "skipped", freefallReason, priorSubmittedOrders, runtime.nowMs());

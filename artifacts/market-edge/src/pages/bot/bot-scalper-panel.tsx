@@ -1514,6 +1514,58 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
             <div className="border-t border-border/60 pt-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
+                  <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Adverse Excursion Guard (Opt In)</div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground/70">
+                    Off by default, so normal Scalper behavior is unchanged. When enabled, Above/YES tracks a recent peak-to-current fall and Below/NO tracks a trough-to-current rise. One rebound does not clear the latch; recovery must persist.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={merged.adverseExcursionGuardEnabled}
+                  data-testid="switch-scalper-adverse-excursion"
+                  onClick={() => handleConfigChange("adverseExcursionGuardEnabled", !merged.adverseExcursionGuardEnabled)}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${merged.adverseExcursionGuardEnabled ? "bg-amber-500" : "bg-muted"}`}
+                  title="Toggle adverse excursion guard"
+                >
+                  <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${merged.adverseExcursionGuardEnabled ? "translate-x-5" : "translate-x-0"}`} />
+                  <span className="sr-only">Adverse Excursion Guard</span>
+                </button>
+              </div>
+              <div className={`mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3 ${!merged.adverseExcursionGuardEnabled ? "opacity-50" : ""}`}>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-[10px] text-muted-foreground">Recent lookback</span>
+                  <input type="number" min={5} max={60} step={1}
+                    value={merged.adverseExcursionLookbackSeconds}
+                    onChange={e => handleConfigChange("adverseExcursionLookbackSeconds", parseInt(e.target.value) || 5)}
+                    disabled={!merged.adverseExcursionGuardEnabled}
+                    data-testid="input-scalper-adverse-lookback"
+                    className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm font-mono disabled:cursor-not-allowed" />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-[10px] text-muted-foreground">Excursion threshold %</span>
+                  <input type="number" min={0.01} max={10} step={0.01}
+                    value={merged.adverseExcursionThresholdPct}
+                    onChange={e => handleConfigChange("adverseExcursionThresholdPct", parseFloat(e.target.value) || 0.01)}
+                    disabled={!merged.adverseExcursionGuardEnabled}
+                    data-testid="input-scalper-adverse-threshold"
+                    className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm font-mono disabled:cursor-not-allowed" />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-[10px] text-muted-foreground">Sustained recovery seconds</span>
+                  <input type="number" min={1} max={15} step={1}
+                    value={merged.adverseExcursionRecoverySeconds}
+                    onChange={e => handleConfigChange("adverseExcursionRecoverySeconds", parseInt(e.target.value) || 1)}
+                    disabled={!merged.adverseExcursionGuardEnabled}
+                    data-testid="input-scalper-adverse-recovery"
+                    className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm font-mono disabled:cursor-not-allowed" />
+                </label>
+              </div>
+            </div>
+
+            <div className="border-t border-border/60 pt-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
                   <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Favorable-Trend Confirmation</div>
                   <p className="mt-1 text-[9px] leading-relaxed text-muted-foreground/70">
                     Requires the full sample window to finish higher for Above/YES or lower for Below/NO, while remaining on the winning side of the target. Flat or net wrong-way movement blocks entry.
@@ -2942,7 +2994,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
       <div className="px-3 sm:px-5 py-3 border-b border-indigo-500/20 bg-indigo-950/40 text-xs text-indigo-200/80 leading-relaxed flex items-start gap-3">
         <Target className="w-4 h-4 shrink-0 mt-0.5 text-indigo-400" />
         <div>
-          {report.disclaimer} Strict candidates require an authenticated opposite ask of 1–3¢ during the final 0–2 minutes, repeated target-specific adverse movement, and an actual or credibly reachable target crossing. Broad normal Scalper safety-guard blocks are not strict candidates. <strong className="text-indigo-300">{merged.mode === "live" ? "Real funds are at risk independently of normal scalper." : "Currently running in safe paper simulation."}</strong>
+          {report.disclaimer} Its independent fresh-underlying excursion monitor runs whenever Contrarian is enabled and does not wait for the normal Scalper to reject. Strict candidates still require a current authenticated opposite ask of 1–3¢, repeated target-specific adverse movement, and an actual or credibly reachable target crossing. <strong className="text-indigo-300">{merged.mode === "live" ? "LIVE places real opposite-side orders with real funds." : "PAPER only simulates opposite-side orders; switch to LIVE manually to place real orders."}</strong>
         </div>
       </div>
 
