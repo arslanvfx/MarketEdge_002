@@ -178,6 +178,12 @@ export interface ScalpEntryGuardEvidence {
   minimumPct: number | null;
   targetPrice: number | null;
   underlyingPrice: number | null;
+  /** Fee-inclusive order funding evidence captured at the final boundary. */
+  principalExposure?: number | null;
+  estimatedFee?: number | null;
+  safetyMargin?: number | null;
+  totalRequired?: number | null;
+  availableBalance?: number | null;
 }
 
 export interface ScalpOrder {
@@ -627,6 +633,14 @@ export interface ScalpSkipEvidence {
   openCommittedDollars?: number | null;
   availableBalance?: number | null;
   maxExposure?: number | null;
+  /** Worst-case principal at the submitted IOC limit. */
+  principalExposure?: number | null;
+  /** Standard-schedule worst-case taker fee, rounded upward to cents. */
+  estimatedFee?: number | null;
+  /** One-cent final live balance movement/rounding buffer. */
+  safetyMargin?: number | null;
+  /** Principal + estimated fee + safety margin required by the live gate. */
+  totalRequired?: number | null;
   regularPositionId?: string | null;
   regularPositionSide?: "yes" | "no" | null;
   layerDecision?: "same_side_layer" | "opposite_side_block" | null;

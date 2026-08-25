@@ -64,6 +64,7 @@ import {
   compareRiskSnapshot,
   decideAuthenticatedQuoteRetry,
   sizeOrderWithinReservedBudget,
+  evaluateScalpLiveBalance,
   shouldRetryConfirmedZeroFillSameLifecycle,
   evaluateScalpReservationRetry,
   describeScalpCircuitBreakerReason,
@@ -2967,8 +2968,8 @@ async function _executeScalpAttempt(
     }
   }
   // ── Size the order STRICTLY within the durable reserved budget ─────────────
-  // Contract count = floor(reservedBudget / maxWinningCost); worst-case
-  // exposure at the band-capped IOC limit is guaranteed <= reservedBudget.
+  // Principal plus the upward-rounded worst-case taker fee at the band-capped
+  // IOC limit is guaranteed to remain within reservedBudget.
   const sized = sizeOrderWithinReservedBudget(reservedBudget, winningAsk, snapshot.bandMax);
   if (!sized.ok) {
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", sized.reason ?? "sizing_failed", true, {
@@ -2976,7 +2977,25 @@ async function _executeScalpAttempt(
     });
     return;
   }
-  const { contractCount, maxWinningCost, maxExposure } = sized;
+  const {
+    contractCount,
+    maxWinningCost,
+    maxExposure,
+    principalExposure,
+    estimatedFee,
+  } = sized;
+  const balanceDecision = evaluateScalpLiveBalance(
+    balanceResult.availableBalance,
+    sized,
+  );
+  const balanceEvidence = {
+    availableBalance: balanceResult.availableBalance,
+    maxExposure,
+    principalExposure,
+    estimatedFee,
+    safetyMargin: balanceDecision.safetyMarginCents / 100,
+    totalRequired: balanceDecision.totalRequiredCents / 100,
+  };
 
   // ── FINAL live balance check against ACTUAL worst-case submit exposure ─────
   if (mode === "live") {
@@ -2987,21 +3006,25 @@ async function _executeScalpAttempt(
       );
       await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_check_failed_final", true, {
         ..._timingEvidence(),
-        availableBalance: balanceResult.availableBalance,
-        maxExposure,
+        ...balanceEvidence,
       });
       _rememberReservationOutcome(attemptKey, "skipped", "balance_check_failed_final", priorSubmittedOrders, runtime.nowMs());
       return;
     }
-    if (balanceResult.availableBalance < maxExposure) {
+    if (!balanceDecision.allowed) {
       logger.warn(
-        { symbol, available: balanceResult.availableBalance, maxExposure, contractCount, maxWinningCost },
-        "[kalshi-scalper] insufficient balance for worst-case exposure (final) — re-arming",
+        {
+          symbol,
+          availableBalanceCents: balanceDecision.availableBalanceCents,
+          totalRequiredCents: balanceDecision.totalRequiredCents,
+          contractCount,
+          maxWinningCost,
+        },
+        "[kalshi-scalper] insufficient balance for principal, fee, and safety margin (final) — re-arming",
       );
       await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance_final", true, {
         ..._timingEvidence(),
-        availableBalance: balanceResult.availableBalance,
-        maxExposure,
+        ...balanceEvidence,
       });
       _rememberReservationOutcome(attemptKey, "skipped", "insufficient_balance_final", priorSubmittedOrders, runtime.nowMs());
       return;
@@ -3306,6 +3329,11 @@ async function _executeScalpAttempt(
       && snapshot.coordinatedDirectionClearanceEnabled,
     rapidMoveGuardEnabled: snapshot.rapidMoveGuardEnabled,
     targetProximityGuardEnabled: snapshot.targetProximityGuardEnabled,
+    principalExposure,
+    estimatedFee,
+    safetyMargin: balanceDecision.safetyMarginCents / 100,
+    totalRequired: balanceDecision.totalRequiredCents / 100,
+    availableBalance: balanceResult.availableBalance,
     samples: evidenceSamples.map((sample) => ({
       at: new Date(sample.at).toISOString(),
       price: sample.price,
@@ -4269,6 +4297,8 @@ export interface ControlledFreefallServiceExerciseOptions {
   identityTarget?: number | null;
   /** Per-attempt routing identities for same-lifecycle retry proofs. */
   exchangeIndexSequence?: unknown[];
+  /** Final live balance returned by the controlled account boundary. */
+  availableBalance?: number;
 }
 
 export interface ControlledSampleSchedulerExerciseResult {
@@ -5470,7 +5500,10 @@ Promise<ControlledFreefallServiceExerciseResult> {
       }
       return succeeded;
     },
-    getBalance: async () => ({ availableBalance: 100, totalBalance: 100 }),
+    getBalance: async () => ({
+      availableBalance: options.availableBalance ?? 100,
+      totalBalance: options.availableBalance ?? 100,
+    }),
     getKalshiCachedData: () => ({
       value: 100,
       ticker,

@@ -32,6 +32,8 @@ import {
   buildExecutionRiskSnapshot,
   compareRiskSnapshot,
   maxSubmitExposure,
+  estimateScalpWorstCaseTakerFeeCents,
+  evaluateScalpLiveBalance,
   sizeOrderWithinReservedBudget,
   validateOrderbookQuote,
   requalifyAuthenticatedScalpQuote,
@@ -2222,6 +2224,32 @@ describe("maxSubmitExposure", () => {
 });
 
 describe("sizeOrderWithinReservedBudget", () => {
+  it("uses the 2026 standard taker schedule and rounds 30 @ .99 upward to 3 cents", () => {
+    assert.equal(estimateScalpWorstCaseTakerFeeCents(30, 0.99), 3);
+  });
+
+  it("reduces count until principal plus rounded fee fits the reserved budget", () => {
+    const sized = sizeOrderWithinReservedBudget(29.72, 0.99, 0.99);
+    assert.equal(sized.ok, true);
+    assert.equal(sized.contractCount, 29);
+    assert.equal(sized.principalExposureCents, 2_871);
+    assert.equal(sized.estimatedFeeCents, 3);
+    assert.equal(sized.budgetRequiredCents, 2_874);
+    assert.ok(sized.budgetRequired <= 29.72);
+  });
+
+  it("uses submitted YES-coordinate pricing for both YES and NO fee estimates", () => {
+    const yesLimit = computeLimitPrice("yes", 0.99);
+    const noYesSideLimit = computeLimitPrice("no", 0.99);
+    assert.equal(yesLimit, 0.99);
+    assert.equal(noYesSideLimit, 0.01);
+    assert.equal(
+      estimateScalpWorstCaseTakerFeeCents(30, yesLimit),
+      estimateScalpWorstCaseTakerFeeCents(30, noYesSideLimit),
+    );
+    assert.equal(estimateScalpWorstCaseTakerFeeCents(30, noYesSideLimit), 3);
+  });
+
   it("sizes against the worst acceptable band cost, not the observed quote", () => {
     // observed=0.90, cap=0.98 → floor(2/0.98)=2 → exposure=1.96 <= 2
     const r = sizeOrderWithinReservedBudget(2, 0.9, 0.98);
@@ -2290,6 +2318,25 @@ describe("sizeOrderWithinReservedBudget", () => {
     assert.ok(big.contractCount >= small.contractCount);
     // Sizing against the SMALLER (reserved) budget keeps exposure bounded.
     assert.ok(small.maxExposure <= 2);
+  });
+});
+
+describe("evaluateScalpLiveBalance", () => {
+  const sized = sizeOrderWithinReservedBudget(30, 0.99, 0.99);
+
+  it("requires principal plus fee and the one-cent safety margin", () => {
+    assert.equal(sized.contractCount, 30);
+    assert.equal(sized.principalExposureCents, 2_970);
+    assert.equal(sized.estimatedFeeCents, 3);
+    const decision = evaluateScalpLiveBalance(29.74, sized);
+    assert.equal(decision.totalRequiredCents, 2_974);
+    assert.equal(decision.safetyMarginCents, 1);
+    assert.equal(decision.allowed, true);
+  });
+
+  it("passes exact required cents and blocks one cent short", () => {
+    assert.equal(evaluateScalpLiveBalance(29.74, sized).allowed, true);
+    assert.equal(evaluateScalpLiveBalance(29.73, sized).allowed, false);
   });
 });
 
@@ -2903,14 +2950,16 @@ describe("execution wiring (static source assertions)", () => {
     );
   });
 
-  it("FINAL balance check uses worst-case maxExposure before order intent/submit", () => {
+  it("FINAL balance check uses fee-inclusive integer cents before order intent/submit", () => {
     const finalBal = idx("FINAL live balance check");
     const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
     const place = idx("await runtime.placeScalpOrderStrict(");
     assert.ok(finalBal >= 0, "final balance check block must exist");
     assert.ok(finalBal < intent, "final balance check must precede order intent");
     assert.ok(finalBal < place, "final balance check must precede submit");
-    assert.match(svc, /availableBalance < maxExposure/);
+    assert.match(svc, /evaluateScalpLiveBalance\(/);
+    assert.match(svc, /if \(!balanceDecision\.allowed\)/);
+    assert.doesNotMatch(svc, /availableBalance < maxExposure/);
   });
 
   it("requalifies the authenticated quote after other awaits and before intent without bypassing band or side", () => {

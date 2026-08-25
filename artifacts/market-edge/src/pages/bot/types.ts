@@ -671,6 +671,10 @@ export interface ScalpSkipEvidence {
   openCommittedDollars?: number | null;
   availableBalance?: number | null;
   maxExposure?: number | null;
+  principalExposure?: number | null;
+  estimatedFee?: number | null;
+  safetyMargin?: number | null;
+  totalRequired?: number | null;
   regularPositionId?: string | null;
   regularPositionSide?: "yes" | "no" | null;
   layerDecision?: "same_side_layer" | "opposite_side_block" | null;
@@ -836,6 +840,11 @@ export interface EntryGuardEvidence {
   minimumPct: number | null;
   targetPrice: number | null;
   underlyingPrice: number | null;
+  principalExposure?: number | null;
+  estimatedFee?: number | null;
+  safetyMargin?: number | null;
+  totalRequired?: number | null;
+  availableBalance?: number | null;
 }
 
 export interface ScalperAttempt {

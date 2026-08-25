@@ -147,10 +147,40 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
   ) {
     const status = attempt.reconciliationEvidence["httpStatus"];
     const code = attempt.reconciliationEvidence["exchangeCode"];
+    const normalizedCode = typeof code === "string" ? normalizeReason(code) : "";
     const details = [status, code].filter(
       (value) => typeof value === "number" || (typeof value === "string" && value.length > 0),
     ).join(" ");
-    return `Kalshi rejected order — market routing failed${details ? ` (${details})` : ""}`;
+    if (normalizedCode.includes("insufficient_balance")) {
+      return "Kalshi rejected order — insufficient available balance";
+    }
+    if (
+      normalizedCode.includes("market_not_found")
+      || normalizedCode.includes("ticker_not_found")
+    ) {
+      return `Kalshi rejected order — market unavailable or routing failed${details ? ` (${details})` : ""}`;
+    }
+    if (
+      normalizedCode.includes("auth")
+      || normalizedCode.includes("signature")
+      || (!normalizedCode && (status === 401 || status === 403))
+    ) {
+      return "Kalshi rejected order — authentication failure";
+    }
+    if (normalizedCode.includes("invalid_order") || normalizedCode.includes("invalid_parameter")) {
+      return "Kalshi rejected order — invalid order";
+    }
+    if (
+      normalizedCode.includes("liquidity")
+      || normalizedCode.includes("fok")
+      || normalizedCode.includes("ioc")
+    ) {
+      return "Kalshi rejected order — insufficient liquidity";
+    }
+    const http = typeof status === "number" || typeof status === "string"
+      ? `HTTP ${status}`
+      : "HTTP unknown";
+    return `Kalshi rejected order — ${http}${normalizedCode ? ` (${code})` : ""}`;
   }
   if (attempt.status === "zero_fill") return "IOC returned zero fills";
   if (attempt.status === "unknown") return "Order result unknown — reconciliation required";
@@ -327,6 +357,24 @@ export function describeEntryGuardEvidence(ege: EntryGuardEvidence): string[] {
     lines.push(`Target distance ${distMeasured} (${distMinimum})${priceText} — CLEAR`);
   } else {
     lines.push("Target-distance guard: disabled for this entry");
+  }
+
+  if (
+    ege.principalExposure != null
+    || ege.estimatedFee != null
+    || ege.totalRequired != null
+    || ege.availableBalance != null
+  ) {
+    const available = ege.availableBalance == null
+      ? "not fetched (Paper)"
+      : formatMoney(ege.availableBalance);
+    lines.push(
+      `Order funding: principal ${formatMoney(ege.principalExposure)} · estimated fee ${formatMoney(
+        ege.estimatedFee,
+      )} · safety margin ${formatMoney(ege.safetyMargin)} · total required ${formatMoney(
+        ege.totalRequired,
+      )} · available ${available}`,
+    );
   }
 
   return lines;
@@ -526,9 +574,17 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     details.push(`Requested ${formatMoney(evidence.requestedBudget)} · ${capDetails || "cap details unavailable"}`);
   }
 
-  if (evidence && (evidence.availableBalance != null || evidence.maxExposure != null)) {
+  if (evidence && (
+    evidence.availableBalance != null
+    || evidence.totalRequired != null
+    || evidence.maxExposure != null
+  )) {
     details.push(
-      `Available balance ${formatMoney(evidence.availableBalance)} · required exposure ${formatMoney(evidence.maxExposure)}`,
+      `Available balance ${formatMoney(evidence.availableBalance)} · principal ${formatMoney(
+        evidence.principalExposure ?? evidence.maxExposure,
+      )} · estimated fee ${formatMoney(evidence.estimatedFee)} · safety margin ${formatMoney(
+        evidence.safetyMargin,
+      )} · total required ${formatMoney(evidence.totalRequired ?? evidence.maxExposure)}`,
     );
   }
 

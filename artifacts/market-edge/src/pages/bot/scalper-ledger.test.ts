@@ -179,10 +179,75 @@ describe("describeScalperAttempt", () => {
     });
     assert.equal(
       describeScalperAttempt(rejected),
-      "Kalshi rejected order — market routing failed (404 market_not_found)",
+      "Kalshi rejected order — market unavailable or routing failed (404 market_not_found)",
     );
     assert.doesNotMatch(describeScalperAttempt(rejected), /zero fills|liquidity/i);
     assert.equal(isDefinitiveScalperRejection(rejected), true);
+  });
+
+  it("labels the production insufficient_balance rejection without mentioning routing or liquidity", () => {
+    const rejected = attempt({
+      status: "zero_fill",
+      reason: "definitive_http_rejection_400",
+      reconciliationEvidence: {
+        source: "live_definitive_http_rejection",
+        httpStatus: 400,
+        exchangeCode: "insufficient_balance",
+      },
+      retryEligible: false,
+      retryState: "terminal",
+    });
+    const description = describeScalperAttempt(rejected);
+    assert.equal(
+      description,
+      "Kalshi rejected order — insufficient available balance",
+    );
+    assert.doesNotMatch(description, /routing|liquidity|retry/i);
+  });
+
+  it("uses an HTTP/code fallback for unknown definitive rejection codes", () => {
+    const rejected = attempt({
+      status: "zero_fill",
+      reconciliationEvidence: {
+        source: "live_definitive_http_rejection",
+        httpStatus: 422,
+        exchangeCode: "new_exchange_code",
+      },
+    });
+    assert.equal(
+      describeScalperAttempt(rejected),
+      "Kalshi rejected order — HTTP 422 (new_exchange_code)",
+    );
+  });
+
+  it("does not infer routing from a code-less HTTP 404", () => {
+    const rejected = attempt({
+      status: "zero_fill",
+      reason: "definitive_http_rejection_404",
+      reconciliationEvidence: {
+        source: "live_definitive_http_rejection",
+        httpStatus: 404,
+      },
+      retryEligible: false,
+      retryState: "terminal",
+    });
+    assert.equal(describeScalperAttempt(rejected), "Kalshi rejected order — HTTP 404");
+    assert.doesNotMatch(describeScalperAttempt(rejected), /routing|market unavailable/i);
+  });
+
+  it("mentions liquidity only for a liquidity-specific exchange code", () => {
+    const rejected = attempt({
+      status: "zero_fill",
+      reconciliationEvidence: {
+        source: "live_definitive_http_rejection",
+        httpStatus: 400,
+        exchangeCode: "ioc_insufficient_liquidity",
+      },
+    });
+    assert.equal(
+      describeScalperAttempt(rejected),
+      "Kalshi rejected order — insufficient liquidity",
+    );
   });
 
   it("uses readable explanations for authenticated quote and identity skips", () => {
@@ -587,6 +652,20 @@ describe("describeEntryGuardEvidence", () => {
     assert.match(lines.join("\n"), /Target distance 0\.043% \(0\.020% minimum\)/);
     assert.match(lines.join("\n"), /\$117,500/);
     assert.match(lines.join("\n"), /CLEAR/);
+  });
+
+  it("renders fee-inclusive final funding evidence", () => {
+    const lines = describeEntryGuardEvidence(makeEntryGuardEvidence({
+      principalExposure: 29.70,
+      estimatedFee: 0.03,
+      safetyMargin: 0.01,
+      totalRequired: 29.74,
+      availableBalance: 30,
+    }));
+    assert.match(
+      lines.join("\n"),
+      /Order funding: principal \$29\.70 · estimated fee \$0\.03 · safety margin \$0\.01 · total required \$29\.74 · available \$30\.00/,
+    );
   });
 
   it("handles null values gracefully without throwing", () => {

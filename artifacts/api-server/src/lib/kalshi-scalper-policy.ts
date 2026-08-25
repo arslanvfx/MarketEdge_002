@@ -1576,10 +1576,49 @@ export function maxSubmitExposure(contractCount: number, maxWinningCost: number)
   return contractCount * maxWinningCost;
 }
 
+/** Standard 2026 Kalshi taker-fee coefficient (7%). No series-specific fee
+ * source exists in this project. Series with lower or zero fees are therefore
+ * safely over-reserved. */
+export const SCALP_STANDARD_TAKER_FEE_BASIS_POINTS = 700;
+export const SCALP_BALANCE_SAFETY_MARGIN_CENTS = 1;
+
+/**
+ * Canonical worst-case IOC taker fee, rounded upward to whole cents.
+ *
+ * The submitted price is always YES-side, including a NO buy. Integer cents
+ * and BigInt arithmetic implement ceil(0.07 * C * P * (1-P) * 100) without
+ * binary floating-point comparisons.
+ */
+export function estimateScalpWorstCaseTakerFeeCents(
+  contractCount: number,
+  yesSideLimitPrice: number,
+): number {
+  if (!Number.isSafeInteger(contractCount) || contractCount <= 0) return 0;
+  if (!Number.isFinite(yesSideLimitPrice)) return 0;
+  const yesPriceCents = Math.round(yesSideLimitPrice * 100);
+  if (yesPriceCents < 1 || yesPriceCents > 99) return 0;
+  const numerator =
+    BigInt(SCALP_STANDARD_TAKER_FEE_BASIS_POINTS)
+    * BigInt(contractCount)
+    * BigInt(yesPriceCents)
+    * BigInt(100 - yesPriceCents);
+  // coefficient basis points / 10_000, prices / 100 each, dollars -> cents:
+  // denominator = 10_000 * 100 * 100 / 100 = 1_000_000.
+  const denominator = 1_000_000n;
+  return Number((numerator + denominator - 1n) / denominator);
+}
+
 export interface SizedOrderResult {
   contractCount: number;
   /** Cent-quantized worst acceptable winning-contract cost. */
   maxWinningCost: number;
+  principalExposureCents: number;
+  estimatedFeeCents: number;
+  budgetRequiredCents: number;
+  principalExposure: number;
+  estimatedFee: number;
+  budgetRequired: number;
+  /** Backward-compatible alias for principal exposure only. */
   maxExposure: number;
   /** true when a submittable order (>=1 contract) fits within reservedBudget. */
   ok: boolean;
@@ -1589,10 +1628,9 @@ export interface SizedOrderResult {
 /**
  * Size an order strictly within the durable reserved budget.
  *
- * Contract count = floor(reservedBudget / maxWinningCost), so the worst-case
- * exposure at the band-capped IOC limit is guaranteed <= reservedBudget. Includes
- * an explicit post-condition assertion so sizing can NEVER exceed the reserved
- * amount even under odd rounding.
+ * Starts from the principal-only upper bound, then reduces count until
+ * principal plus the upward-rounded worst-case taker fee fits. The explicit
+ * integer-cent post-condition ensures sizing can never exceed the reservation.
  */
 export function sizeOrderWithinReservedBudget(
   reservedBudget: number,
@@ -1600,7 +1638,17 @@ export function sizeOrderWithinReservedBudget(
   bandMax: number,
 ): SizedOrderResult {
   const fail = (reason: string): SizedOrderResult => ({
-    contractCount: 0, maxWinningCost: 0, maxExposure: 0, ok: false, reason,
+    contractCount: 0,
+    maxWinningCost: 0,
+    principalExposureCents: 0,
+    estimatedFeeCents: 0,
+    budgetRequiredCents: 0,
+    principalExposure: 0,
+    estimatedFee: 0,
+    budgetRequired: 0,
+    maxExposure: 0,
+    ok: false,
+    reason,
   });
 
   if (!Number.isFinite(reservedBudget) || reservedBudget <= 0) return fail("reserved_budget_invalid");
@@ -1611,20 +1659,86 @@ export function sizeOrderWithinReservedBudget(
   // Size against the same cent-quantized worst-case winning cost used by the
   // actual IOC limit—not the transient quote that selected the candidate.
   const maxWinningCost = computeLimitPrice("yes", bandMax);
-
-  const contractCount = computeContractCount(reservedBudget, maxWinningCost);
+  const maxWinningCostCents = Math.round(maxWinningCost * 100);
+  const reservedBudgetCents = Math.floor(reservedBudget * 100 + 1e-9);
+  let contractCount = Math.floor(reservedBudgetCents / maxWinningCostCents);
+  let principalExposureCents = 0;
+  let estimatedFeeCents = 0;
+  let budgetRequiredCents = 0;
+  while (contractCount > 0) {
+    principalExposureCents = contractCount * maxWinningCostCents;
+    // Fee is symmetric at complementary YES prices, so using the YES-side
+    // winning cap here produces the same fee as a NO order's submitted limit.
+    estimatedFeeCents = estimateScalpWorstCaseTakerFeeCents(
+      contractCount,
+      maxWinningCost,
+    );
+    budgetRequiredCents = principalExposureCents + estimatedFeeCents;
+    if (budgetRequiredCents <= reservedBudgetCents) break;
+    contractCount -= 1;
+  }
   if (contractCount < 1) return fail("contract_count_zero");
 
-  const maxExposure = maxSubmitExposure(contractCount, maxWinningCost);
+  const principalExposure = principalExposureCents / 100;
+  const estimatedFee = estimatedFeeCents / 100;
+  const budgetRequired = budgetRequiredCents / 100;
+  const maxExposure = principalExposure;
 
   // Hard post-condition: exposure must not exceed the reserved budget. If it
   // somehow does (impossible with floor division, but assert defensively), fail
   // closed rather than risk overspending the durable reservation.
-  if (maxExposure > reservedBudget) {
+  if (budgetRequiredCents > reservedBudgetCents) {
     return fail("exposure_exceeds_reserved_budget");
   }
 
-  return { contractCount, maxWinningCost, maxExposure, ok: true, reason: null };
+  return {
+    contractCount,
+    maxWinningCost,
+    principalExposureCents,
+    estimatedFeeCents,
+    budgetRequiredCents,
+    principalExposure,
+    estimatedFee,
+    budgetRequired,
+    maxExposure,
+    ok: true,
+    reason: null,
+  };
+}
+
+export interface ScalpLiveBalanceDecision {
+  allowed: boolean;
+  availableBalanceCents: number | null;
+  principalExposureCents: number;
+  estimatedFeeCents: number;
+  safetyMarginCents: number;
+  totalRequiredCents: number;
+}
+
+/** Integer-cent final balance boundary. The extra cent is intentionally not
+ * part of order sizing: it protects the final live gate from balance movement
+ * and account rounding immediately before POST. */
+export function evaluateScalpLiveBalance(
+  availableBalance: number | null,
+  sized: Pick<SizedOrderResult, "principalExposureCents" | "estimatedFeeCents">,
+): ScalpLiveBalanceDecision {
+  const safetyMarginCents = SCALP_BALANCE_SAFETY_MARGIN_CENTS;
+  const totalRequiredCents =
+    sized.principalExposureCents + sized.estimatedFeeCents + safetyMarginCents;
+  const availableBalanceCents =
+    availableBalance != null && Number.isFinite(availableBalance) && availableBalance >= 0
+      ? Math.round(availableBalance * 100)
+      : null;
+  return {
+    allowed:
+      availableBalanceCents != null
+      && availableBalanceCents >= totalRequiredCents,
+    availableBalanceCents,
+    principalExposureCents: sized.principalExposureCents,
+    estimatedFeeCents: sized.estimatedFeeCents,
+    safetyMarginCents,
+    totalRequiredCents,
+  };
 }
 
 // ---------------------------------------------------------------------------
