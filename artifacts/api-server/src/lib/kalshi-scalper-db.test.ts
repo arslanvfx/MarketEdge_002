@@ -610,6 +610,66 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     assert.ok(claim.reservationId);
   });
 
+  it("atomically permits an immediate retry only after a durable confirmed zero fill", async () => {
+    const wk = `DBTEST-zero-immediate-${Date.now()}`;
+    const first = await db.claimReservationAndCap(
+      `reservation-${wk}`, MODE, "ETH", wk, "T", 2, null, OPEN_CAP,
+    );
+    assert.equal(first.allowed, true);
+    const orderId = `order-${wk}`;
+    await db.insertScalpOrderIntent({
+      id: orderId,
+      mode: MODE,
+      symbol: "ETH",
+      windowKey: wk,
+      ticker: "T",
+      side: "yes",
+      entryYesPrice: 0.97,
+      contractCount: 2,
+      budgetSpent: 0,
+      clientOrderId: `client-${wk}`,
+      orderId: null,
+      exchangeResponseReason: null,
+      filledCount: 0,
+      avgFillPrice: null,
+      limitPrice: 0.99,
+      winningContractCost: null,
+      status: "submitting",
+      errorMessage: null,
+      settlementResult: null,
+      outcome: null,
+      pnl: null,
+      incidentId: null,
+      reconciledAt: null,
+      reconciliationEvidence: null,
+      createdAt: new Date(),
+      settledAt: null,
+    });
+    await db.finalizeOrderAndReleaseReservation({
+      orderId,
+      mode: MODE,
+      symbol: "ETH",
+      windowKey: wk,
+      status: "zero_fill",
+      reservationStatus: "zero_fill",
+      filledCount: 0,
+      avgFillPrice: null,
+      winningContractCost: null,
+      budgetSpent: 0,
+      exchangeOrderId: "exchange-zero",
+      reason: "zero_fill",
+    });
+
+    const immediate = await db.claimReservationAndCap(
+      `next-${wk}`, MODE, "ETH", wk, "T", 2, null, OPEN_CAP,
+      undefined, undefined, true,
+    );
+    assert.equal(immediate.claimed, true);
+    assert.equal(immediate.allowed, true);
+    assert.equal(immediate.submittedOrders, 1);
+    assert.equal(immediate.reservationId, first.reservationId);
+  });
+
   it("reconciles one uncertain order atomically and releases its reservation only once", async () => {
     const wk = `DBTEST-reconcile-${Date.now()}`;
     const orderRecordId = `order-${wk}`;

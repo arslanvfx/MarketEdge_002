@@ -36,6 +36,7 @@ import {
   evaluateScalpReservationRetry,
   isInFinalWindow,
   resolveTimingPhase,
+  SCALP_MAX_SUBMISSIONS_PER_WINDOW,
   SCALP_PREFLIGHT_LEAD_SECONDS,
 } from "./kalshi-scalper-policy.ts";
 
@@ -598,6 +599,7 @@ export async function claimReservationAndCap(
   openCapDollars: number,
   closeTime?: string,
   finalWindowSeconds?: number,
+  allowImmediateConfirmedZeroFillRetry = false,
 ): Promise<ClaimAndCapResult> {
   // Runtime callers compiled against the legacy nullable contract may still
   // pass null during a rolling deployment. Normalize at the atomic boundary so
@@ -804,8 +806,13 @@ export async function claimReservationAndCap(
         elapsedMs: Number(existing["elapsed_ms"] ?? 0),
         submittedOrders,
       });
+      const immediateZeroFillRetry =
+        allowImmediateConfirmedZeroFillRetry
+        && String(existing["status"] ?? "") === "zero_fill"
+        && Number(existing["reserved_budget"] ?? 0) <= 0
+        && submittedOrders < SCALP_MAX_SUBMISSIONS_PER_WINDOW;
 
-      if (!retry.retryableNow) {
+      if (!retry.retryableNow && !immediateZeroFillRetry) {
         await client.query("COMMIT");
         return {
           claimed: false,
@@ -2051,22 +2058,40 @@ export async function persistScalpCalibrationDecision(params: {
 }
 
 export async function getUnsettledScalpShadowStudies(
-  limit = 36,
+  limit = 4,
+  cohortOffset = 0,
 ): Promise<ScalpShadowStudyRecord[]> {
   const client = await pool.connect();
   try {
-    const capped = Math.max(1, Math.min(120, Math.floor(limit)));
+    const capped = Math.max(1, Math.min(12, Math.floor(limit)));
+    const offset = Math.max(0, Math.floor(cohortOffset));
     const result = await client.query(
-      `SELECT *
-         FROM kalshi_scalp_shadow_entries
-        WHERE first_safe_entry_at IS NOT NULL
-          AND settlement_result IS NULL
-          AND first_eligible_at
-              + variant_seconds * INTERVAL '1 second'
-              < NOW() - INTERVAL '45 seconds'
-        ORDER BY first_eligible_at ASC
-        LIMIT $1`,
-      [capped],
+      `WITH eligible AS (
+         SELECT *
+           FROM kalshi_scalp_shadow_entries
+          WHERE first_safe_entry_at IS NOT NULL
+            AND settlement_result IS NULL
+            AND first_eligible_at
+                + variant_seconds * INTERVAL '1 second'
+                < NOW() - INTERVAL '45 seconds'
+       ),
+       selected_cohorts AS (
+         SELECT mode, window_key, ticker, MIN(first_eligible_at) AS eligible_at
+           FROM eligible
+          WHERE ticker <> ''
+          GROUP BY mode, window_key, ticker
+          ORDER BY eligible_at ASC, mode ASC, window_key ASC, ticker ASC
+          LIMIT $1 OFFSET $2
+       )
+       SELECT e.*
+         FROM eligible e
+         JOIN selected_cohorts c
+           ON c.mode = e.mode
+          AND c.window_key = e.window_key
+          AND c.ticker = e.ticker
+        ORDER BY c.eligible_at ASC, e.mode ASC, e.window_key ASC,
+                 e.ticker ASC, e.symbol ASC, e.variant_seconds ASC`,
+      [capped, offset],
     );
     return result.rows.map((row) =>
       mapScalpShadowRow(row as Record<string, unknown>)

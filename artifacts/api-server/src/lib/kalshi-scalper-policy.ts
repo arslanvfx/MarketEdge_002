@@ -329,6 +329,17 @@ export const SCALP_AUTHENTICATED_QUOTE_RETRY_MIN_REMAINING_MS = 2_000;
 export const SCALP_GUARD_RETRY_COOLDOWN_MS = 1_000;
 export const SCALP_BALANCE_RETRY_COOLDOWN_MS = 2_000;
 export const SCALP_MAX_SUBMISSIONS_PER_WINDOW = 3;
+
+/** Same-lifecycle resubmission is exclusively for an authoritative zero fill. */
+export function shouldRetryConfirmedZeroFillSameLifecycle(
+  outcome: PlaceOrderClassification,
+  submittedOrders: number,
+): boolean {
+  return outcome === "zero_fill"
+    && Number.isFinite(submittedOrders)
+    && submittedOrders >= 1
+    && submittedOrders < SCALP_MAX_SUBMISSIONS_PER_WINDOW;
+}
 /** Begin non-submitting warm-up three minutes before the entry window opens. */
 export const SCALP_PREFLIGHT_LEAD_SECONDS = 180;
 export const SCALP_PREFLIGHT_REFRESH_MS = 5_000;

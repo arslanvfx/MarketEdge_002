@@ -64,6 +64,7 @@ import {
   compareRiskSnapshot,
   decideAuthenticatedQuoteRetry,
   sizeOrderWithinReservedBudget,
+  shouldRetryConfirmedZeroFillSameLifecycle,
   evaluateScalpReservationRetry,
   describeScalpCircuitBreakerReason,
   preserveNewerScalpBreakerState,
@@ -228,10 +229,12 @@ const _funnelRecorder = createBoundedScalpFunnelRecorder(
 
 const _shadowWriter = createBoundedScalpShadowWriter(
   upsertScalpShadowStudy,
+  240,
 );
 const _shadowStates = new Map<string, ScalpShadowStudyRecord>();
 let _lastShadowObservationAt = 0;
 let _shadowSettlementInFlight = false;
+let _shadowSettlementCohortOffset = 0;
 let _shadowObservationQueued = false;
 
 function _shadowKey(
@@ -416,34 +419,44 @@ async function _evaluateShadowSettlements(): Promise<void> {
   if (
     _shadowSettlementInFlight
     || _attemptsInFlight.size > 0
-    || _running
   ) return;
   _shadowSettlementInFlight = true;
   try {
-    const rows = await getUnsettledScalpShadowStudies(36);
-    const first = rows.find((row) =>
-      row.ticker
-      && row.firstSafeEntryAt
-      && row.side
-      && row.winningAsk != null
-      && row.hypotheticalContracts > 0
+    let rows = await getUnsettledScalpShadowStudies(
+      4,
+      _shadowSettlementCohortOffset,
     );
-    if (!first) return;
-    const result = await fetchKalshiMarketResult(first.ticker).catch(() => null);
-    if (result?.result !== "yes" && result?.result !== "no") return;
-
+    if (rows.length === 0 && _shadowSettlementCohortOffset > 0) {
+      _shadowSettlementCohortOffset = 0;
+      rows = await getUnsettledScalpShadowStudies(4, 0);
+    }
+    const cohorts = new Map<string, ScalpShadowStudyRecord[]>();
     for (const row of rows) {
       if (
-        row.mode !== first.mode
-        || row.windowKey !== first.windowKey
-        || row.ticker !== first.ticker
+        !row.ticker
+        || !row.firstSafeEntryAt
         || !row.side
         || row.winningAsk == null
+        || row.hypotheticalContracts <= 0
       ) continue;
+      const key = `${row.mode}:${row.windowKey}:${row.ticker}`;
+      const cohort = cohorts.get(key) ?? [];
+      cohort.push(row);
+      cohorts.set(key, cohort);
+    }
+    _shadowSettlementCohortOffset += cohorts.size;
+    // Sequential provider reads bound authenticated/public provider traffic to
+    // four requests per pass. An unresolved older market never prevents later
+    // selected cohorts from being attempted.
+    for (const cohort of cohorts.values()) {
+      if (_attemptsInFlight.size > 0) break;
+      const ticker = cohort[0]!.ticker;
+      const result = await fetchKalshiMarketResult(ticker).catch(() => null);
+      if (result?.result !== "yes" && result?.result !== "no") continue;
       const settledAt = new Date().toISOString();
-      _queueShadowRecord(
-        settleScalpShadowRecord(row, result.result, settledAt),
-      );
+      for (const row of cohort) {
+        _queueShadowRecord(settleScalpShadowRecord(row, result.result, settledAt));
+      }
     }
   } catch (err) {
     logger.debug(
@@ -2135,6 +2148,7 @@ interface ScalpAttemptRuntime {
   collectPriceSample: typeof _collectPriceSample;
   getBalance: typeof getBalance;
   getKalshiCachedData: typeof getKalshiCachedData;
+  claimReservationAndCap: typeof claimReservationAndCap;
   updateReservationStatus: typeof updateReservationStatus;
   insertScalpOrderIntent: typeof insertScalpOrderIntent;
   finalizePaperOrderAndReleaseReservation: typeof finalizePaperOrderAndReleaseReservation;
@@ -3989,6 +4003,47 @@ async function _executeScalpAttempt(
       },
       "[kalshi-scalper] confirmed zero fill — bounded retry policy applied",
     );
+    const submittedOrders = priorSubmittedOrders + 1;
+    if (
+      mode === "live"
+      && shouldRetryConfirmedZeroFillSameLifecycle(
+        classification,
+        submittedOrders,
+      )
+    ) {
+      // The first IOC is durably finalized before re-claiming the same
+      // symbol/window mutex. This immediate path is permitted only for a
+      // confirmed zero fill; UNKNOWN never reaches this branch. Re-running the
+      // complete attempt obtains fresh identity, quote, balance and guard
+      // inputs, creates a new intent/client order id, and preserves the pinned
+      // band and budget.
+      const retryClaim = await runtime.claimReservationAndCap(
+        crypto.randomUUID(),
+        mode,
+        symbol,
+        windowKey,
+        ticker,
+        reservedBudget,
+        snapshot.dailyCapDollars,
+        snapshot.openCapDollars,
+        closeTime,
+        snapshot.finalWindowSeconds,
+        true,
+      );
+      if (retryClaim.claimed && retryClaim.allowed && retryClaim.reservationId) {
+        await _executeScalpAttempt(
+          retryClaim.reservationId,
+          candidate,
+          windowKey,
+          mode,
+          snapshot,
+          retryClaim.submittedOrders,
+          attemptKey,
+          runtime,
+          latency,
+        );
+      }
+    }
     return;
   }
 
@@ -4115,6 +4170,9 @@ export interface ControlledFreefallServiceExerciseResult {
   quoteFetches: number;
   submittedLimitPrices: number[];
   submittedCounts: number[];
+  clientOrderIds: string[];
+  intentIds: string[];
+  finalizedZeroFillsBeforeSubmission: number[];
 }
 
 export interface ControlledFreefallServiceExerciseOptions {
@@ -4125,6 +4183,10 @@ export interface ControlledFreefallServiceExerciseOptions {
   /** Optional test-only complete-window prices for the adverse step. */
   adversePrices?: number[];
   runSecondSubmission?: boolean;
+  /** Exercise the production immediate re-claim after a confirmed zero fill. */
+  immediateZeroFillRetry?: boolean;
+  /** Authoritative broker outcomes consumed per submission. */
+  brokerOutcomeSequence?: Array<"zero_fill" | "confirmed_fill">;
   /** Controlled clock advance while the durable live intent is being written. */
   intentWriteAdvanceMs?: number;
   /** Test-only authenticated orderbooks consumed in fetch order. */
@@ -4976,6 +5038,7 @@ const LIVE_SCALP_ATTEMPT_RUNTIME: ScalpAttemptRuntime = {
   collectPriceSample: _collectPriceSample,
   getBalance,
   getKalshiCachedData,
+  claimReservationAndCap,
   updateReservationStatus,
   insertScalpOrderIntent,
   finalizePaperOrderAndReleaseReservation,
@@ -5090,6 +5153,16 @@ async function _runControlledLayeringScenario(
       yesAsk: 0.97,
       yesBid: 0.02,
       noAsk: 0.98,
+    }),
+    claimReservationAndCap: async () => ({
+      claimed: false,
+      allowed: false,
+      reason: "controlled_no_retry",
+      reservationId: null,
+      submittedOrders: 0,
+      retryAfterMs: null,
+      dailyCommitted: 0,
+      openCommitted: 0,
     }),
     updateReservationStatus: async () => {
       standaloneReservationUpdates += 1;
@@ -5223,6 +5296,10 @@ Promise<ControlledFreefallServiceExerciseResult> {
   let underlyingSampleFetches = 0;
   const submittedLimitPrices: number[] = [];
   const submittedCounts: number[] = [];
+  const clientOrderIds: string[] = [];
+  const intentIds: string[] = [];
+  let finalizedZeroFills = 0;
+  const finalizedZeroFillsBeforeSubmission: number[] = [];
   let submittedEntryEvidence: ScalpEntryGuardEvidence | null = null;
   const submittedEntryEvidences: ScalpEntryGuardEvidence[] = [];
   const abortedBeforeSubmitReasons: string[] = [];
@@ -5331,6 +5408,35 @@ Promise<ControlledFreefallServiceExerciseResult> {
       yesBid: 0.02,
       noAsk: 0.98,
     }),
+    claimReservationAndCap: async (
+      _id,
+      _mode,
+      _symbol,
+      _windowKey,
+      _ticker,
+      _budget,
+      _dailyCap,
+      _openCap,
+      _closeTime,
+      _windowSeconds,
+      allowImmediate,
+    ) => {
+      const submittedOrders = brokerSubmissions;
+      const allowed =
+        options.immediateZeroFillRetry === true
+        && allowImmediate === true
+        && submittedOrders < SCALP_MAX_SUBMISSIONS_PER_WINDOW;
+      return {
+        claimed: allowed,
+        allowed,
+        reason: allowed ? null : "controlled_no_retry",
+        reservationId: allowed ? "controlled-reservation-retry" : null,
+        submittedOrders,
+        retryAfterMs: null,
+        dailyCommitted: 0,
+        openCommitted: 0,
+      };
+    },
     updateReservationStatus: async (_mode, _symbol, _windowKey, status, reason, _release, evidence) => {
       if (status !== "skipped") return;
       skippedAttempts.push({
@@ -5341,6 +5447,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
     },
     insertScalpOrderIntent: async (order) => {
       intentWrites += 1;
+      intentIds.push(order.id);
       submittedEntryEvidence = order.entryGuardEvidence ?? null;
       if (order.entryGuardEvidence != null) {
         submittedEntryEvidences.push(order.entryGuardEvidence);
@@ -5365,17 +5472,31 @@ Promise<ControlledFreefallServiceExerciseResult> {
     },
     placeScalpOrderStrict: async (order) => {
       brokerSubmissions += 1;
+      finalizedZeroFillsBeforeSubmission.push(finalizedZeroFills);
+      clientOrderIds.push(order.clientOrderId);
       submittedLimitPrices.push(order.limitPrice);
       submittedCounts.push(order.count);
+      const outcome =
+        options.brokerOutcomeSequence?.[brokerSubmissions - 1] ?? "zero_fill";
+      if (outcome === "confirmed_fill") {
+        return {
+          outcome,
+          reason: "controlled_fill",
+          orderId: `controlled-order-${brokerSubmissions}`,
+          filledCount: order.count,
+          avgFillPrice: side === "yes" ? 0.97 : 0.03,
+        };
+      }
       return {
         outcome: "zero_fill",
         reason: "controlled_zero_fill",
-        orderId: "controlled-order",
+        orderId: `controlled-order-${brokerSubmissions}`,
         filledCount: 0,
         avgFillPrice: null,
       };
     },
     finalizeOrderAndReleaseReservation: async (params) => {
+      if (params.status === "zero_fill") finalizedZeroFills += 1;
       if (params.entryGuardEvidence != null) {
         submittedEntryEvidence = params.entryGuardEvidence;
         if (submittedEntryEvidences.length === 0) {
@@ -5503,6 +5624,9 @@ Promise<ControlledFreefallServiceExerciseResult> {
       quoteFetches,
       submittedLimitPrices,
       submittedCounts,
+      clientOrderIds,
+      intentIds,
+      finalizedZeroFillsBeforeSubmission,
     };
   } finally {
     _config = originalConfig;

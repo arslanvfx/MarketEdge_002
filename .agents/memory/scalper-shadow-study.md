@@ -18,3 +18,11 @@ Shadow timing-card totals must come from the full selected reporting period, nev
 **How to apply:** Keep full-period aggregates independent from bounded dashboard details, capture one shared scope end for all reads, and make visual resets non-destructive view boundaries that affect both Shadow and actual comparison metrics. Timing cards must additionally aggregate only coin/window opportunities that have every displayed timing; expose the shared count, excluded incomplete opportunities, and effective coverage start. Observe the standard, global, and override timing set for every market going forward—configuration badges must never choose a card's population.
 
 **Why:** Standard timings were recorded for every market while a configured custom timing was recorded only for markets using it, so raw card totals compared different populations. Matching the common cohort restores a meaningful timing comparison without deleting or fabricating historical observations.
+
+## Settlement fairness
+
+Select unsettled work as complete `(mode, window, ticker)` cohorts, not a global row limit. Attempt several bounded cohorts per pass and continue past unresolved markets; active scanning must not indefinitely suppress the settlement worker.
+
+**Why:** A complete SILVER timing cohort remained unsettled behind older rows even though the real order had already settled. A global row cap can split cohorts or let old unresolved markets starve newer eligible results.
+
+**How to apply:** Preserve the post-close eligibility delay, settle every variant in a selected cohort together, bound exchange-result reads per pass, and rotate fairly through unresolved cohorts without competing with an in-flight live submission.

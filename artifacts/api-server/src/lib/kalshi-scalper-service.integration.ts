@@ -1,6 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { SCALP_GUARD_RETRY_COOLDOWN_MS } from "./kalshi-scalper-policy.ts";
+import {
+  SCALP_GUARD_RETRY_COOLDOWN_MS,
+  shouldRetryConfirmedZeroFillSameLifecycle,
+} from "./kalshi-scalper-policy.ts";
 import {
   runControlledFreefallServiceExercise,
   runControlledSampleSchedulerExercise,
@@ -130,6 +133,46 @@ describe("authenticated final quote retry boundary", () => {
     assert.equal(result.abortedBeforeSubmitEvidences[0]?.quoteYesAsk, 0.98);
     assert.equal(result.abortedBeforeSubmitEvidences[0]?.quoteRetryCount, 1);
     assert.equal(result.abortedBeforeSubmitEvidences[0]?.quoteAttempts?.length, 2);
+  });
+});
+
+describe("confirmed IOC zero-fill same-lifecycle retry", () => {
+  it("finalizes zero, freshly requotes, writes a new intent/id, then can fill", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      immediateZeroFillRetry: true,
+      brokerOutcomeSequence: ["zero_fill", "confirmed_fill"],
+    });
+
+    assert.equal(result.brokerSubmissions, 2);
+    assert.equal(result.intentWrites, 2);
+    assert.equal(result.quoteFetches, 4);
+    assert.deepEqual(result.finalizedZeroFillsBeforeSubmission, [0, 1]);
+    assert.equal(new Set(result.intentIds).size, 2);
+    assert.equal(new Set(result.clientOrderIds).size, 2);
+    assert.deepEqual(result.submittedLimitPrices, [0.99, 0.99]);
+    assert.deepEqual(result.submittedCounts, [2, 2]);
+  });
+
+  it("never retries an unknown/ambiguous classification", () => {
+    assert.equal(shouldRetryConfirmedZeroFillSameLifecycle("unknown", 1), false);
+    assert.equal(shouldRetryConfirmedZeroFillSameLifecycle("confirmed_fill", 1), false);
+  });
+
+  it("honors the hard three-submission cap", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      immediateZeroFillRetry: true,
+      brokerOutcomeSequence: ["zero_fill", "zero_fill", "zero_fill", "confirmed_fill"],
+    });
+
+    assert.equal(result.brokerSubmissions, 3);
+    assert.equal(result.intentWrites, 3);
+    assert.equal(result.quoteFetches, 6);
+    assert.deepEqual(result.finalizedZeroFillsBeforeSubmission, [0, 1, 2]);
+    assert.equal(new Set(result.intentIds).size, 3);
+    assert.equal(new Set(result.clientOrderIds).size, 3);
+    assert.ok(result.submittedLimitPrices.every((price) => price === 0.99));
   });
 });
 

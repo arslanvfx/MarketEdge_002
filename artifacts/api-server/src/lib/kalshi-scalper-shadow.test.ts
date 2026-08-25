@@ -346,6 +346,43 @@ describe("shadow report projection", () => {
     assert.match(panelSource, /actualOutsideShadowCoverage/);
     assert.match(panelSource, /comparisonCoverage\.sharedOpportunities/);
   });
+
+  it("selects bounded whole settlement cohorts instead of globally limiting rows", () => {
+    const dbSource = readFileSync(
+      new URL("./kalshi-scalper-db.ts", import.meta.url),
+      "utf8",
+    );
+    const start = dbSource.indexOf(
+      "export async function getUnsettledScalpShadowStudies",
+    );
+    const end = dbSource.indexOf(
+      "// Atomic finalize-and-release",
+      start,
+    );
+    const query = dbSource.slice(start, end);
+    assert.match(query, /selected_cohorts/);
+    assert.match(query, /GROUP BY mode, window_key, ticker/);
+    assert.match(query, /JOIN selected_cohorts/);
+    assert.match(query, /INTERVAL '45 seconds'/);
+    assert.match(query, /LIMIT \$1 OFFSET \$2[\s\S]*SELECT e\.\*/);
+
+    const serviceSource = readFileSync(
+      new URL("./kalshi-scalper-service.ts", import.meta.url),
+      "utf8",
+    );
+    const workerStart = serviceSource.indexOf(
+      "async function _evaluateShadowSettlements",
+    );
+    const workerEnd = serviceSource.indexOf(
+      "function _recordScalpFunnelEvent",
+      workerStart,
+    );
+    const worker = serviceSource.slice(workerStart, workerEnd);
+    assert.match(worker, /for \(const cohort of cohorts\.values\(\)\)/);
+    assert.match(worker, /_shadowSettlementCohortOffset \+= cohorts\.size/);
+    assert.match(worker, /if \(result\?\.result !== "yes"[\s\S]*continue;/);
+    assert.doesNotMatch(worker, /\|\| _running/);
+  });
 });
 
 describe("shadow settlement economics", () => {
