@@ -131,3 +131,4 @@
 - [Scalper definitive order rejections](scalper-definitive-order-rejections.md) — verified client rejections are zero fills; ambiguous HTTP or transport failures must retain exposure and block reset
 - [Contrarian Pyth excursion cadence](contrarian-pyth-excursion-cadence.md) — commodity reversal detection must use distinct fresh oracle publications on a dedicated lane; local polling cadence cannot stand in for Pyth cadence
 - [Optional Scalper guard composition](optional-scalper-guard-composition.md) — additive guards may block on positive evidence but cannot veto normal entries merely because their own history is warming or unavailable
+- [Scalper paper/live parity](scalper-paper-live-parity.md) — compare outcomes only with matching entry timing, overrides, and guard toggles; otherwise each mode evaluates different market evidence
