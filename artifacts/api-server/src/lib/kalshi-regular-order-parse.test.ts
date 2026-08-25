@@ -8,6 +8,7 @@ import {
   UncertainOrderError,
   isUncertainOrderError,
   placeOrder,
+  placeEntryOrderWithSizeFallback,
   type PlaceOrderParams,
 } from "./kalshi-trader.ts";
 
@@ -159,6 +160,8 @@ const BASE: PlaceOrderParams = {
 function withEnvAndFetch(
   fetchImpl: typeof fetch,
   run: () => Promise<void>,
+  marketResponse: Response | (() => Response | Promise<Response>) = () =>
+    jsonResponse({ market: { ticker: BASE.ticker, exchange_index: 0 } }),
 ): () => Promise<void> {
   return async () => {
     const prevKey = process.env["KALSHI_API_KEY_ID"];
@@ -169,7 +172,12 @@ function withEnvAndFetch(
     const { generateKeyPairSync } = await import("node:crypto");
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     process.env["KALSHI_PRIVATE_KEY"] = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
-    globalThis.fetch = fetchImpl;
+    globalThis.fetch = async (input, init) => {
+      if ((init?.method ?? "GET") === "GET") {
+        return typeof marketResponse === "function" ? marketResponse() : marketResponse;
+      }
+      return fetchImpl(input, init);
+    };
     try {
       await run();
     } finally {
@@ -190,6 +198,136 @@ test("placeOrder: confirmed fill returns real avgPrice (no cached fallback)", wi
     assert.equal(r.filledCount, 3);
     assert.equal(r.avgPrice, 0.42);
     assert.equal(r.status, "filled");
+  },
+));
+
+test("placeOrder routing: shard 0 and shard 2 are included in CreateOrderV2 bodies", async () => {
+  for (const exchangeIndex of [0, 2]) {
+    let postCount = 0;
+    await withEnvAndFetch(
+      async (_input, init) => {
+        postCount++;
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        assert.equal(body["exchange_index"], exchangeIndex);
+        return jsonResponse({ order_id: `order-${exchangeIndex}`, fill_count: "0" });
+      },
+      async () => {
+        await placeOrder(BASE);
+      },
+      () => jsonResponse({
+        market: {
+          ticker: BASE.ticker,
+          exchange_index: exchangeIndex === 2 ? "2" : exchangeIndex,
+        },
+      }),
+    )();
+    assert.equal(postCount, 1);
+  }
+});
+
+test("placeOrder routing: invalid market identity fails closed with zero POSTs", async () => {
+  const invalidPayloads: unknown[] = [
+    null,
+    {},
+    { market: null },
+    { market: { ticker: "OTHER", exchange_index: 2 } },
+    { market: { ticker: BASE.ticker } },
+    { market: { ticker: BASE.ticker, exchange_index: -1 } },
+    { market: { ticker: BASE.ticker, exchange_index: 1.5 } },
+    { market: { ticker: BASE.ticker, exchange_index: "invalid" } },
+    { market: { ticker: BASE.ticker, exchange_index: "1.5" } },
+  ];
+  for (const payload of invalidPayloads) {
+    let postCount = 0;
+    await withEnvAndFetch(
+      async () => {
+        postCount++;
+        return jsonResponse({ order_id: "must-not-submit", fill_count: "0" });
+      },
+      async () => {
+        await assert.rejects(placeOrder(BASE), /routing/);
+      },
+      () => jsonResponse(payload),
+    )();
+    assert.equal(postCount, 0, `must not POST for ${JSON.stringify(payload)}`);
+  }
+});
+
+test("placeOrder routing: malformed JSON and non-OK lookup fail closed with zero POSTs", async () => {
+  const responses = [
+    () => new Response("{bad json", { status: 200, headers: { "Content-Type": "application/json" } }),
+    () => new Response("not found", { status: 404 }),
+  ];
+  for (const marketResponse of responses) {
+    let postCount = 0;
+    await withEnvAndFetch(
+      async () => {
+        postCount++;
+        return jsonResponse({ order_id: "must-not-submit", fill_count: "0" });
+      },
+      async () => {
+        await assert.rejects(placeOrder(BASE), /routing lookup failed before POST/);
+      },
+      marketResponse,
+    )();
+    assert.equal(postCount, 0);
+  }
+});
+
+test("placeOrder routing: entry and sell exit both cross the fresh routing boundary", withEnvAndFetch(
+  async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    assert.equal(body["exchange_index"], 2);
+    return jsonResponse({ order_id: "entry-or-exit", fill_count: "0" });
+  },
+  async () => {
+    await placeOrder(BASE);
+    await placeOrder({ ...BASE, action: "sell" });
+  },
+  () => jsonResponse({ market: { ticker: BASE.ticker, exchange_index: 2 } }),
+));
+
+test("placeOrder routing: half-size retry resolves routing afresh before its POST", withEnvAndFetch(
+  (() => {
+    let posts = 0;
+    return async (_input, init) => {
+      posts++;
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      assert.equal(body["exchange_index"], posts === 1 ? 2 : 0);
+      if (posts === 1) {
+        return new Response(
+          JSON.stringify({ error: { code: "fill_or_kill_insufficient_resting_volume" } }),
+          { status: 409 },
+        );
+      }
+      return jsonResponse({ order_id: "retry-ok", fill_count: "0" });
+    };
+  })(),
+  async () => {
+    const result = await placeEntryOrderWithSizeFallback({ ...BASE, count: 4 });
+    assert.equal(result.attemptedCount, 2);
+  },
+  (() => {
+    let gets = 0;
+    return () => {
+      gets++;
+      assert.ok(gets <= 2, "exactly one fresh lookup per actual POST");
+      return jsonResponse({ market: { ticker: BASE.ticker, exchange_index: gets === 1 ? 2 : 0 } });
+    };
+  })(),
+));
+
+test("placeOrder: POST 404 remains a definitive rejection, not uncertain exposure", withEnvAndFetch(
+  async () => new Response(
+    JSON.stringify({ error: { code: "market_not_found" } }),
+    { status: 404 },
+  ),
+  async () => {
+    await assert.rejects(placeOrder(BASE), (err: unknown) => {
+      assert.equal(isUncertainOrderError(err), false);
+      assert.match(String((err as Error).message), /404/);
+      return true;
+    });
   },
 ));
 

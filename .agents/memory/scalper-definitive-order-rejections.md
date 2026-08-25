@@ -29,6 +29,12 @@ shard 0, fail closed before intent creation when the forced refresh or routing
 identity is missing, and include `exchange_index` in every strict Scalper and
 Contrarian V2 order request. Same-lifecycle retries must refresh and repin it.
 
+Regular orders independently follow the same routing invariant for both entry
+and position-closing submissions. Routing lookup failures happen before any
+POST and therefore prove no order was submitted; they must not be classified
+as unknown exposure. Every actual retry refreshes routing again, and regular
+and Scalper execution boundaries remain isolated.
+
 Stale pre-submit reservations may be released only when they are old, still
 `claimed`, retain budget, and have no matching order-intent row. Cleanup and
 intent creation must share the same cap advisory lock; intent creation must

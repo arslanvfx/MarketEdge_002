@@ -644,6 +644,47 @@ export function computeMarketableLimitPrice(
   return Math.min(0.99, Math.max(0.01, rounded));
 }
 
+/**
+ * Resolve CreateOrderV2's authoritative shard immediately before submission.
+ * This deliberately does not use any market cache: every actual POST attempt
+ * must be preceded by its own exact-ticker lookup against the Trade API.
+ */
+export async function resolveRegularOrderExchangeIndex(ticker: string): Promise<number> {
+  const path = `/markets/${encodeURIComponent(ticker)}`;
+  let raw: unknown;
+  try {
+    raw = await kalshiFetch<unknown>("GET", path, undefined, 8_000);
+  } catch (err) {
+    throw new Error(
+      `Kalshi regular order routing lookup failed before POST for ${ticker}: ${String((err as Error)?.message ?? err)}`,
+    );
+  }
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Kalshi regular order routing lookup returned malformed JSON for ${ticker}`);
+  }
+  const market = (raw as Record<string, unknown>)["market"];
+  if (market == null || typeof market !== "object" || Array.isArray(market)) {
+    throw new Error(`Kalshi regular order routing lookup missing market for ${ticker}`);
+  }
+  const resolvedTicker = (market as Record<string, unknown>)["ticker"];
+  if (resolvedTicker !== ticker) {
+    throw new Error(
+      `Kalshi regular order routing ticker mismatch: requested ${ticker}, received ${String(resolvedTicker)}`,
+    );
+  }
+  const rawExchangeIndex = (market as Record<string, unknown>)["exchange_index"];
+  const exchangeIndex =
+    typeof rawExchangeIndex === "number"
+      ? rawExchangeIndex
+      : typeof rawExchangeIndex === "string" && rawExchangeIndex.trim() !== ""
+        ? Number(rawExchangeIndex)
+        : NaN;
+  if (!Number.isInteger(exchangeIndex) || exchangeIndex < 0) {
+    throw new Error(`Kalshi regular order routing exchange_index invalid for ${ticker}`);
+  }
+  return exchangeIndex;
+}
+
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
   if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   const formattedCount = formatRegularFixedPointCount(params.count);
@@ -700,10 +741,14 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     );
   }
   const price = priceFrac.toFixed(2); // FixedPointDollars string — cent resolution required by Kalshi
+  // Forced-fresh and deliberately outside the POST uncertainty catch: lookup
+  // failure proves no submission occurred and must not become unknown exposure.
+  const exchangeIndex = await resolveRegularOrderExchangeIndex(params.ticker);
 
   const body: Record<string, unknown> = {
     client_order_id: clientOrderId,
     ticker: params.ticker,
+    exchange_index: exchangeIndex,
     side: bookSide, // BookSide: "bid" | "ask"
     count: formattedCount, // FixedPointCount string, exact to centi-contracts
     price, // required in v2 (YES-side)
