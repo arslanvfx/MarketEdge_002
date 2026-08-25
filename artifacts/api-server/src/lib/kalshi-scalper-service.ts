@@ -2344,17 +2344,14 @@ async function _executeScalpAttempt(
     });
 
   // ── FINAL PRE-SUBMIT BOUNDARY ─────────────────────────────────────────────
-  // Identity, authenticated quote, balance, and fresh Freefall sample are
-  // warmed concurrently. Every result remains mandatory and fail-closed.
+  // Identity, authenticated quote, routed balance, and fresh Freefall sample
+  // are warmed concurrently. Every result remains mandatory and fail-closed.
   //
-  // CONCURRENCY AUDIT: identityResult, orderbookResult, freshSampleResult, and
-  // balanceResult are fetched via a single Promise.all() below — this is already
-  // the optimal concurrent pattern. No serial latency exists in this path. The
-  // identity refresh (fetchKalshiTarget) is independent of orderbook, freefall
-  // samples, and balance; all four requests race in parallel. No further
-  // optimization is possible without relaxing authenticated quote validation
-  // (which we must not do). Evidence is recorded for the latency of the whole
-  // concurrent fetch below.
+  // The balance request is chained only to the force-refreshed identity because
+  // Kalshi scopes CreateOrderV2 cash to exchange_index. It still overlaps the
+  // authenticated quote and fresh guard sample; using the aggregate balance in
+  // parallel would be faster but can authorize an order the routed exchange
+  // rejects as insufficient_balance.
 
   if (_isCircuitBreakerBlocking()) {
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "breaker_before_submit", true, _timingEvidence());
@@ -2377,11 +2374,60 @@ async function _executeScalpAttempt(
     || snapshot.adverseExcursionGuardEnabled
     || snapshot.rapidMoveGuardEnabled
     || snapshot.targetProximityGuardEnabled;
-  const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
-    runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
-      (target) => ({ ok: true as const, target, error: null as unknown, latencyMs: runtime.nowMs() - identityRefreshStartMs }),
+  const identityPromise = runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
+      (target) => ({
+        ok: true as const,
+        target,
+        identity: runtime.getKalshiCachedData(symbol),
+        error: null as unknown,
+        latencyMs: runtime.nowMs() - identityRefreshStartMs,
+      }),
       (error) => ({ ok: false as const, error, latencyMs: runtime.nowMs() - identityRefreshStartMs }),
-    ),
+    );
+  const routedBalancePromise = mode === "live"
+    ? identityPromise.then(async (identity) => {
+        if (!identity.ok) {
+          return {
+            ok: false as const,
+            availableBalance: null,
+            exchangeIndex: null,
+            error: identity.error,
+          };
+        }
+        const routedExchangeIndex = identity.identity?.exchangeIndex;
+        if (!Number.isInteger(routedExchangeIndex) || routedExchangeIndex! < 0) {
+          return {
+            ok: false as const,
+            availableBalance: null,
+            exchangeIndex: null,
+            error: new Error("routed exchange_index unavailable for final balance check"),
+          };
+        }
+        try {
+          const balance = await runtime.getBalance(routedExchangeIndex);
+          return {
+            ok: true as const,
+            availableBalance: balance.availableBalance,
+            exchangeIndex: routedExchangeIndex!,
+            error: null,
+          };
+        } catch (error) {
+          return {
+            ok: false as const,
+            availableBalance: null,
+            exchangeIndex: routedExchangeIndex!,
+            error,
+          };
+        }
+      })
+    : Promise.resolve({
+        ok: true as const,
+        availableBalance: null,
+        exchangeIndex: null,
+        error: null,
+      });
+  const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
+    identityPromise,
     runtime.fetchOrderbookPrices(ticker).then(
       (orderbook) => ({ ok: true as const, orderbook, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
       (error) => ({ ok: false as const, orderbook: null, error, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
@@ -2391,12 +2437,7 @@ async function _executeScalpAttempt(
         ? runtime.collectPriceSample(coin.symbol, coin.product)
         : Promise.resolve(false)
       : Promise.resolve(true),
-    mode === "live"
-      ? runtime.getBalance().then(
-          (balance) => ({ ok: true as const, availableBalance: balance.availableBalance }),
-          (error) => ({ ok: false as const, availableBalance: null, error }),
-        )
-      : Promise.resolve({ ok: true as const, availableBalance: null }),
+    routedBalancePromise,
   ]);
   const concurrentFetchMs = runtime.nowMs() - concurrentFetchStartMs;
   guardReadinessStartedAtMs = runtime.nowMs();
@@ -2432,7 +2473,7 @@ async function _executeScalpAttempt(
     _rememberReservationOutcome(attemptKey, "skipped", "identity_refresh_failed", priorSubmittedOrders, runtime.nowMs());
     return;
   }
-  const refreshed = runtime.getKalshiCachedData(symbol);
+  const refreshed = identityResult.identity;
   if (!refreshed?.ticker || !refreshed.closeTime) {
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_missing_after_refresh", true, {
       ..._timingEvidence(),
@@ -2454,6 +2495,17 @@ async function _executeScalpAttempt(
   // Pin routing from this attempt's authoritative force refresh. A same-lifecycle
   // zero-fill retry re-enters this function and obtains a fresh value.
   const exchangeIndex = refreshed.exchangeIndex!;
+  if (mode === "live" && balanceResult.exchangeIndex !== exchangeIndex) {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_exchange_index_mismatch", true, {
+      ..._timingEvidence(),
+      identityFetchOk: true,
+      identityReason: "balance_exchange_index_mismatch",
+      balanceExchangeIndex: balanceResult.exchangeIndex,
+      refreshedTicker: refreshed.ticker,
+      refreshedCloseTimeIso: refreshed.closeTime,
+    });
+    return;
+  }
   if (refreshed.ticker !== ticker || refreshed.closeTime !== closeTime) {
     logger.info(
       { symbol, reservedTicker: ticker, refreshedTicker: refreshed.ticker },
@@ -3102,6 +3154,7 @@ async function _executeScalpAttempt(
   );
   const balanceEvidence = {
     availableBalance: balanceResult.availableBalance,
+    balanceExchangeIndex: balanceResult.exchangeIndex,
     maxExposure,
     principalExposure,
     estimatedFee,
@@ -3128,6 +3181,7 @@ async function _executeScalpAttempt(
         {
           symbol,
           availableBalanceCents: balanceDecision.availableBalanceCents,
+          balanceExchangeIndex: balanceResult.exchangeIndex,
           totalRequiredCents: balanceDecision.totalRequiredCents,
           contractCount,
           maxWinningCost,
@@ -4369,6 +4423,7 @@ export interface ControlledFreefallServiceExerciseResult {
   submittedLimitPrices: number[];
   submittedCounts: number[];
   submittedExchangeIndexes: number[];
+  balanceExchangeIndexes: Array<number | null>;
   clientOrderIds: string[];
   intentIds: string[];
   finalizedZeroFillsBeforeSubmission: number[];
@@ -4413,8 +4468,14 @@ export interface ControlledFreefallServiceExerciseOptions {
   identityTarget?: number | null;
   /** Per-attempt routing identities for same-lifecycle retry proofs. */
   exchangeIndexSequence?: unknown[];
+  /** Test-only cache read sequence for proving routing remains immutable. */
+  exchangeIndexReadSequence?: unknown[];
   /** Final live balance returned by the controlled account boundary. */
   availableBalance?: number;
+  /** Aggregate balance that must never authorize an exchange-routed order. */
+  aggregateAvailableBalance?: number;
+  /** Exchange-scoped balances keyed by the authoritative routing index. */
+  availableBalanceByExchange?: Record<number, number>;
 }
 
 export interface ControlledSampleSchedulerExerciseResult {
@@ -5510,10 +5571,12 @@ Promise<ControlledFreefallServiceExerciseResult> {
   let paperSubmissions = 0;
   let quoteFetches = 0;
   let identityFetches = 0;
+  let identityCacheReads = 0;
   let underlyingSampleFetches = 0;
   const submittedLimitPrices: number[] = [];
   const submittedCounts: number[] = [];
   const submittedExchangeIndexes: number[] = [];
+  const balanceExchangeIndexes: Array<number | null> = [];
   const clientOrderIds: string[] = [];
   const intentIds: string[] = [];
   let finalizedZeroFills = 0;
@@ -5620,24 +5683,39 @@ Promise<ControlledFreefallServiceExerciseResult> {
       }
       return succeeded;
     },
-    getBalance: async () => ({
-      availableBalance: options.availableBalance ?? 100,
-      totalBalance: options.availableBalance ?? 100,
-    }),
-    getKalshiCachedData: () => ({
-      value: 100,
-      ticker,
-      exchangeIndex: (
-        options.exchangeIndexSequence?.[
-          Math.max(0, identityFetches - 1)
-        ]
-        ?? (options.exchangeIndex === undefined ? 0 : options.exchangeIndex)
-      ) as number,
-      closeTime,
-      yesAsk: side === "yes" ? 0.97 : 0.03,
-      yesBid: 0.02,
-      noAsk: 0.98,
-    }),
+    getBalance: async (exchangeIndex?: number) => {
+      balanceExchangeIndexes.push(exchangeIndex ?? null);
+      const aggregate = options.aggregateAvailableBalance
+        ?? options.availableBalance
+        ?? 100;
+      const availableBalance = exchangeIndex == null
+        ? aggregate
+        : options.availableBalanceByExchange?.[exchangeIndex]
+          ?? options.availableBalance
+          ?? aggregate;
+      return {
+        availableBalance,
+        totalBalance: availableBalance,
+      };
+    },
+    getKalshiCachedData: () => {
+      const readIndex = identityCacheReads++;
+      return {
+        value: 100,
+        ticker,
+        exchangeIndex: (
+          options.exchangeIndexReadSequence?.[readIndex]
+          ?? options.exchangeIndexSequence?.[
+            Math.max(0, identityFetches - 1)
+          ]
+          ?? (options.exchangeIndex === undefined ? 0 : options.exchangeIndex)
+        ) as number,
+        closeTime,
+        yesAsk: side === "yes" ? 0.97 : 0.03,
+        yesBid: 0.02,
+        noAsk: 0.98,
+      };
+    },
     claimReservationAndCap: async (
       _id,
       _mode,
@@ -5856,6 +5934,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
       submittedLimitPrices,
       submittedCounts,
       submittedExchangeIndexes,
+      balanceExchangeIndexes,
       clientOrderIds,
       intentIds,
       finalizedZeroFillsBeforeSubmission,

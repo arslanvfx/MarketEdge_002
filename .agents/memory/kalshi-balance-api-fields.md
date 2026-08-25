@@ -1,6 +1,6 @@
 ---
-name: Kalshi balance API response fields
-description: Confirmed field mapping for GET /portfolio/balance; balance=cash, portfolio_value=positions.
+name: Kalshi routed balance semantics
+description: Field mapping and exchange-scoping rules for GET /portfolio/balance.
 ---
 
 **Endpoint:** `GET /trade-api/v2/portfolio/balance`
@@ -16,8 +16,8 @@ description: Confirmed field mapping for GET /portfolio/balance; balance=cash, p
 }
 ```
 
-**Key insight:** `balance` = cash only (NOT total portfolio). Total portfolio = `balance + portfolio_value`. The Kalshi app shows "Portfolio $446.78" = cash $379.52 + positions $65.89 ≈ $445.41.
+**Rule:** `balance` = cash only (NOT total portfolio), but an unscoped balance request aggregates all exchange indexes. Any order execution guard must query with the exact `exchange_index` that will be submitted and pin both operations to one immutable market-identity snapshot.
 
-**Why this matters:** Earlier code treated `balance` as total portfolio (showed $447 instead of $379.52 available cash). Balance guards (`minAccountBalance`, bet-size checks) must use `balance` (cash), not `balance + portfolio_value`.
+**Why:** Aggregate cash can look sufficient while the market's routed exchange lacks collateral, causing avoidable `insufficient_balance` rejections. Re-reading mutable identity state between the balance GET and order POST can also route them to different exchanges.
 
-**How to apply:** `getBalance()` in kalshi-trader.ts reads `balance` → `availableBalance`; `balance + portfolio_value` → `totalBalance`. `getCachedKalshiBalance()` returns `availableBalance`. Do not change this mapping.
+**How to apply:** Keep `balance` as available cash and `balance + portfolio_value` as total portfolio. For every exchange-routed order, pass its pinned `exchange_index` to the final balance read, cache by exchange index, and fail closed if the checked and submitted indexes differ.

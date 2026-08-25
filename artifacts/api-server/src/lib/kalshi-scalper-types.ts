@@ -199,6 +199,8 @@ export interface ScalpEntryGuardEvidence {
   safetyMargin?: number | null;
   totalRequired?: number | null;
   availableBalance?: number | null;
+  /** Exchange shard whose routed cash balance authorized this submission. */
+  balanceExchangeIndex?: number | null;
 }
 
 export interface ScalpOrder {
@@ -656,6 +658,8 @@ export interface ScalpSkipEvidence {
   dailyCommittedDollars?: number | null;
   openCommittedDollars?: number | null;
   availableBalance?: number | null;
+  /** Exchange shard used for the final routed balance check. */
+  balanceExchangeIndex?: number | null;
   maxExposure?: number | null;
   /** Worst-case principal at the submitted IOC limit. */
   principalExposure?: number | null;

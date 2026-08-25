@@ -57,6 +57,7 @@ import {
   type RiskConfigLike,
   type RiskParamsLike,
 } from "./kalshi-scalper-policy.ts";
+import { buildKalshiBalancePath } from "./kalshi-trader.ts";
 import {
   DEFAULT_SCALP_CONFIG,
   DEFAULT_SCALP_OPEN_CAP_DOLLARS,
@@ -3371,7 +3372,7 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(block, /updateReservationStatus\([\s\S]*?"skipped"[\s\S]*?\);\s*\n\s*return;/);
   });
 
-  it("quote, identity, Freefall sample, and balance are fetched concurrently", () => {
+  it("overlaps quote and Freefall readiness while checking the routed exchange balance after identity", () => {
     const executeStart = idx("async function _executeScalpAttempt");
     const finalFf = idx("FINAL FREEFALL GUARD");
     const boundary = svc.slice(executeStart, finalFf);
@@ -3379,7 +3380,21 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(boundary, /fetchKalshiTarget\(/);
     assert.match(boundary, /fetchOrderbookPrices\(/);
     assert.match(boundary, /runtime\.collectPriceSample\(/);
-    assert.match(boundary, /getBalance\(\)/);
+    assert.match(boundary, /runtime\.getBalance\(routedExchangeIndex\)/);
+    assert.match(boundary, /const routedBalancePromise = mode === "live"[\s\S]*?identityPromise\.then/);
+    assert.doesNotMatch(boundary, /runtime\.getBalance\(\)/);
+    assert.match(boundary, /const refreshed = identityResult\.identity/);
+    assert.match(boundary, /balanceResult\.exchangeIndex !== exchangeIndex/);
+  });
+
+  it("never authorizes a final live submission with the aggregate balance", () => {
+    const trader = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "kalshi-trader.ts"),
+      "utf8",
+    );
+    assert.match(trader, /buildKalshiBalancePath\(exchangeIndex\)/);
+    assert.match(trader, /portfolio\/balance\?exchange_index=/);
+    assert.match(svc, /balanceExchangeIndex:\s*balanceResult\.exchangeIndex/);
   });
 
   it("records guard readiness for blocked attempts through skip timing evidence", () => {
@@ -3464,5 +3479,19 @@ describe("execution wiring (static source assertions)", () => {
     // Breaker fields preserved from existing config, not from patch.
     assert.match(svc, /circuitBreaker: _config\.circuitBreaker/);
     assert.match(svc, /circuitBreakerReason: _config\.circuitBreakerReason/);
+  });
+});
+
+describe("exchange-scoped Kalshi balance path", () => {
+  it("keeps aggregate reads explicit and scopes routed reads by exchange_index", () => {
+    assert.equal(buildKalshiBalancePath(), "/portfolio/balance");
+    assert.equal(buildKalshiBalancePath(0), "/portfolio/balance?exchange_index=0");
+    assert.equal(buildKalshiBalancePath(2), "/portfolio/balance?exchange_index=2");
+  });
+
+  it("rejects invalid exchange indexes before any balance request", () => {
+    for (const invalid of [-1, 1.5, Number.NaN]) {
+      assert.throws(() => buildKalshiBalancePath(invalid), /non-negative integer/);
+    }
   });
 });

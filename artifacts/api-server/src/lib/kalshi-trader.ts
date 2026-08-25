@@ -244,7 +244,15 @@ export interface KalshiBalance {
   totalBalance: number;     // in dollars
 }
 
-export async function getBalance(): Promise<KalshiBalance> {
+export function buildKalshiBalancePath(exchangeIndex?: number): string {
+  if (exchangeIndex == null) return "/portfolio/balance";
+  if (!Number.isInteger(exchangeIndex) || exchangeIndex < 0) {
+    throw new Error(`Kalshi balance exchange_index must be a non-negative integer: ${String(exchangeIndex)}`);
+  }
+  return `/portfolio/balance?exchange_index=${exchangeIndex}`;
+}
+
+export async function getBalance(exchangeIndex?: number): Promise<KalshiBalance> {
   // GET /portfolio/balance — Kalshi trade-api v2.
   // Confirmed response shape (2026-07):
   //   { balance: <cents int>,          ← available CASH (what you can bet with)
@@ -253,9 +261,14 @@ export async function getBalance(): Promise<KalshiBalance> {
   //     balance_breakdown: [...],      ← per-exchange breakdown
   //     updated_ts: <unix seconds> }
   //
-  // Total portfolio = balance + portfolio_value (matches Kalshi app's Portfolio figure).
-  // We expose "available cash" as availableBalance so balance guards work correctly.
-  const raw = await kalshiFetch<Record<string, unknown>>("GET", "/portfolio/balance");
+  // Without exchange_index Kalshi returns an aggregate across every exchange.
+  // CreateOrderV2 is routed to one exact exchange_index, so execution guards
+  // MUST pass that same index or an aggregate balance can authorize an order
+  // that the routed exchange correctly rejects as insufficient_balance.
+  const raw = await kalshiFetch<Record<string, unknown>>(
+    "GET",
+    buildKalshiBalancePath(exchangeIndex),
+  );
 
   const num = (key: string): number | null => {
     const v = raw[key];
@@ -1050,29 +1063,31 @@ export function isKalshiConfigured(): boolean {
 // reasonably fresh balance without hammering the API on every tick.  10 s is
 // tight enough to catch a real drain between consecutive bets in the same window.
 
-let _balanceCache: { availableBalance: number; fetchedAt: number } | null = null;
+const _balanceCache = new Map<string, { availableBalance: number; fetchedAt: number }>();
 const BALANCE_CACHE_TTL_MS = 10_000;
 
 /** Return Kalshi available balance in dollars, cached for up to 10 seconds.
  *  On fetch failure, falls back to the stale cached value (if any) rather than
  *  aborting the trade — a transient Kalshi API timeout should not kill all bets
  *  when we already have a recent balance reading. */
-export async function getCachedKalshiBalance(): Promise<number> {
+export async function getCachedKalshiBalance(exchangeIndex?: number): Promise<number> {
   const now = Date.now();
-  if (_balanceCache && now - _balanceCache.fetchedAt < BALANCE_CACHE_TTL_MS) {
-    return _balanceCache.availableBalance;
+  const cacheKey = exchangeIndex == null ? "aggregate" : `exchange:${exchangeIndex}`;
+  const cached = _balanceCache.get(cacheKey);
+  if (cached && now - cached.fetchedAt < BALANCE_CACHE_TTL_MS) {
+    return cached.availableBalance;
   }
   try {
-    const bal = await getBalance();
-    _balanceCache = { availableBalance: bal.availableBalance, fetchedAt: now };
+    const bal = await getBalance(exchangeIndex);
+    _balanceCache.set(cacheKey, { availableBalance: bal.availableBalance, fetchedAt: now });
     return bal.availableBalance;
   } catch (err) {
-    if (_balanceCache) {
-      const staleAgeMs = now - _balanceCache.fetchedAt;
+    if (cached) {
+      const staleAgeMs = now - cached.fetchedAt;
       // Use stale cache (up to 60 s old) rather than aborting the trade
       if (staleAgeMs < 60_000) {
         logger.warn({ err }, "[kalshi] balance fetch failed — using stale cache (%ds old)", Math.round(staleAgeMs / 1000));
-        return _balanceCache.availableBalance;
+        return cached.availableBalance;
       }
     }
     throw err;
@@ -1081,8 +1096,12 @@ export async function getCachedKalshiBalance(): Promise<number> {
 
 /** Invalidate the cached balance (call after a bet is placed so the next guard
  *  sees the post-fill balance, not a stale pre-fill value). */
-export function invalidateBalanceCache(): void {
-  _balanceCache = null;
+export function invalidateBalanceCache(exchangeIndex?: number): void {
+  if (exchangeIndex == null) {
+    _balanceCache.clear();
+    return;
+  }
+  _balanceCache.delete(`exchange:${exchangeIndex}`);
 }
 
 // Buy Yes contracts at market price.

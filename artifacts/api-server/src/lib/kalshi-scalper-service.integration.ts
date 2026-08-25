@@ -39,6 +39,35 @@ describe("authenticated final quote retry boundary", () => {
     });
     assert.deepEqual(shardTwo.submittedExchangeIndexes, [2]);
     assert.deepEqual(shardZero.submittedExchangeIndexes, [0]);
+    assert.deepEqual(shardTwo.balanceExchangeIndexes, [2]);
+    assert.deepEqual(shardZero.balanceExchangeIndexes, [0]);
+  });
+
+  it("uses routed cash rather than a sufficient aggregate balance", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      exchangeIndex: 2,
+      aggregateAvailableBalance: 251.93,
+      availableBalanceByExchange: { 2: 1.99 },
+    });
+    assert.deepEqual(result.balanceExchangeIndexes, [2]);
+    assert.equal(result.intentWrites, 0);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.equal(result.skippedAttempts.at(-1)?.reason, "insufficient_balance_final");
+    assert.equal(result.skippedAttempts.at(-1)?.evidence?.balanceExchangeIndex, 2);
+    assert.equal(result.skippedAttempts.at(-1)?.evidence?.availableBalance, 1.99);
+  });
+
+  it("pins one immutable routing snapshot for balance and broker submission", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      exchangeIndexReadSequence: [2, 0, 0],
+      availableBalanceByExchange: { 2: 100, 0: 1.99 },
+    });
+    assert.deepEqual(result.balanceExchangeIndexes, [2]);
+    assert.deepEqual(result.submittedExchangeIndexes, [2]);
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 1);
   });
 
   it("blocks missing or invalid routing identity before intent and broker POST", async () => {
