@@ -2279,6 +2279,59 @@ export async function countUnresolvedLiveAttempts(): Promise<number> {
   }
 }
 
+/**
+ * Release stale reservations that provably never crossed the broker boundary.
+ *
+ * A live broker POST is permitted only after insertScalpOrderIntent succeeds.
+ * Therefore an old claimed reservation with no matching order row cannot have
+ * been submitted. The age floor excludes an attempt that may still be between
+ * reservation claim and intent persistence.
+ */
+export async function releaseStalePreSubmitLiveReservations(
+  minimumAgeMinutes = 10,
+): Promise<Array<{ symbol: string; windowKey: string; reservationId: string }>> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      ["kalshi-scalper-cap:live"],
+    );
+    const released = await client.query(
+      `UPDATE kalshi_scalp_reservations r
+          SET status = 'skipped',
+              reason = 'stale_pre_submit_reservation_no_order_intent',
+              reserved_budget = 0,
+              attempted_at = NOW()
+        WHERE r.mode = 'live'
+          AND r.status = 'claimed'
+          AND r.reserved_budget > 0
+          AND COALESCE(r.attempted_at, r.created_at)
+              < NOW() - ($1::int * INTERVAL '1 minute')
+          AND NOT EXISTS (
+            SELECT 1
+              FROM kalshi_scalp_orders o
+             WHERE o.mode = r.mode
+               AND o.symbol = r.symbol
+               AND o.window_key = r.window_key
+          )
+      RETURNING r.id, r.symbol, r.window_key`,
+      [Math.max(1, Math.floor(minimumAgeMinutes))],
+    );
+    await client.query("COMMIT");
+    return released.rows.map((row) => ({
+      reservationId: String(row["id"]),
+      symbol: String(row["symbol"]),
+      windowKey: String(row["window_key"]),
+    }));
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function getUnresolvedLiveAttempts(): Promise<UnresolvedLiveRow[]> {
   const client = await pool.connect();
   try {
@@ -2425,7 +2478,36 @@ async function _insertScalpOrder(client: ScalpDbClient, order: ScalpOrder): Prom
 export async function insertScalpOrderIntent(order: ScalpOrder): Promise<void> {
   const client = await pool.connect();
   try {
+    await client.query("BEGIN");
+    // Serialize against cap accounting and stale pre-submit recovery. If
+    // recovery wins first, the reservation is no longer claimed and this
+    // transaction must fail before an intent can exist or a broker POST can run.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [`kalshi-scalper-cap:${order.mode}`],
+    );
+    const reservation = await client.query(
+      `SELECT status, reserved_budget
+         FROM kalshi_scalp_reservations
+        WHERE mode = $1 AND symbol = $2 AND window_key = $3
+        FOR UPDATE`,
+      [order.mode, order.symbol.toUpperCase(), order.windowKey],
+    );
+    const row = reservation.rows[0];
+    if (
+      !row
+      || row["status"] !== "claimed"
+      || Number(row["reserved_budget"] ?? 0) <= 0
+    ) {
+      throw new Error(
+        "Scalper reservation is no longer active; refusing order intent",
+      );
+    }
     await _insertScalpOrder(client, order);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
   } finally {
     client.release();
   }

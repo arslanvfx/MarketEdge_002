@@ -12,3 +12,9 @@ Persisted historical error text may repair an old unresolved row only when it co
 **Why:** Kalshi can reject an invalid ticker with `404 market_not_found`, which means no order exists to find in history. Treating that proof as ambiguous creates an impossible reconciliation loop, while broadly treating HTTP failures as zero fills risks duplicate live exposure.
 
 **How to apply:** Classify the HTTP response at the Scalper-owned exchange boundary, carry definitive rejection as typed evidence, and resolve it before the generic unknown-exposure branch. Keep every non-definitive case fail-closed.
+
+Stale pre-submit reservations may be released only when they are old, still
+`claimed`, retain budget, and have no matching order-intent row. Cleanup and
+intent creation must share the same cap advisory lock; intent creation must
+lock and revalidate that the reservation remains claimed with positive budget.
+If cleanup wins, later intent creation must fail before any broker POST.

@@ -4,6 +4,7 @@ import {
   DefinitiveScalpOrderRejectionError,
   parseDefinitiveScalpOrderRejection,
 } from "./kalshi-scalper-exchange.ts";
+import fs from "node:fs";
 
 describe("definitive Scalper order rejections", () => {
   it("classifies market_not_found as authoritative no-order evidence", () => {
@@ -67,5 +68,75 @@ describe("definitive Scalper order rejections", () => {
       code: "market_not_found",
       message: persisted,
     });
+  });
+});
+
+describe("stale pre-submit reservation reset recovery", () => {
+  it("repairs only aged claimed reservations with no order intent", () => {
+    const dbSource = fs.readFileSync(
+      new URL("./kalshi-scalper-db.ts", import.meta.url),
+      "utf8",
+    );
+    const start = dbSource.indexOf(
+      "export async function releaseStalePreSubmitLiveReservations",
+    );
+    const end = dbSource.indexOf(
+      "export async function getUnresolvedLiveAttempts",
+      start,
+    );
+    const recovery = dbSource.slice(start, end);
+    assert.match(recovery, /r\.status = 'claimed'/);
+    assert.match(recovery, /r\.reserved_budget > 0/);
+    assert.match(recovery, /COALESCE\(r\.attempted_at, r\.created_at\)/);
+    assert.match(recovery, /NOT EXISTS[\s\S]*kalshi_scalp_orders/);
+    assert.match(recovery, /status = 'skipped'/);
+    assert.match(recovery, /reserved_budget = 0/);
+  });
+
+  it("serializes intent creation with recovery and rejects a released claim", () => {
+    const dbSource = fs.readFileSync(
+      new URL("./kalshi-scalper-db.ts", import.meta.url),
+      "utf8",
+    );
+    const insertStart = dbSource.indexOf(
+      "export async function insertScalpOrderIntent",
+    );
+    const insertEnd = dbSource.indexOf(
+      "export async function finalizePaperOrderAndReleaseReservation",
+      insertStart,
+    );
+    const insert = dbSource.slice(insertStart, insertEnd);
+    assert.match(insert, /kalshi-scalper-cap:\$\{order\.mode\}/);
+    assert.match(insert, /FROM kalshi_scalp_reservations/);
+    assert.match(insert, /FOR UPDATE/);
+    assert.match(insert, /row\["status"\] !== "claimed"/);
+    assert.match(insert, /Number\(row\["reserved_budget"\][\s\S]*\) <= 0/);
+    assert.ok(
+      insert.indexOf("await _insertScalpOrder") >
+        insert.indexOf('row["status"] !== "claimed"'),
+    );
+  });
+
+  it("runs orphan recovery before the unresolved reset check", () => {
+    const serviceSource = fs.readFileSync(
+      new URL("./kalshi-scalper-service.ts", import.meta.url),
+      "utf8",
+    );
+    const resetStart = serviceSource.indexOf(
+      "export async function resetCircuitBreaker",
+    );
+    const resetEnd = serviceSource.indexOf(
+      "export class ScalpReconciliationError",
+      resetStart,
+    );
+    const reset = serviceSource.slice(resetStart, resetEnd);
+    const recovery = reset.indexOf(
+      "await releaseStalePreSubmitLiveReservations()",
+    );
+    const unresolvedCheck = reset.indexOf(
+      "await countUnresolvedLiveAttempts()",
+    );
+    assert.ok(recovery >= 0);
+    assert.ok(unresolvedCheck > recovery);
   });
 });

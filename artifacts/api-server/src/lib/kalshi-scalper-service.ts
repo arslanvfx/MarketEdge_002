@@ -141,6 +141,7 @@ import {
   getTodayScalpSpend,
   getOpenScalpSpend,
   countUnresolvedLiveAttempts,
+  releaseStalePreSubmitLiveReservations,
   getUnresolvedLiveAttempts,
   getScalpOrderById,
   getSiblingScalpExchangeOrderIds,
@@ -1028,6 +1029,16 @@ export class UnresolvedAttemptsError extends Error {
 export async function resetCircuitBreaker(): Promise<ScalpConfig> {
   const resetRequestedAtVersion = _breakerVersion;
   const updated = await _enqueueScalpConfigMutation(async (current) => {
+    // A stale claimed reservation with no order-intent row never reached the
+    // broker boundary. Release that provable pre-submit orphan before deciding
+    // whether genuinely unresolved exchange exposure still blocks the reset.
+    const releasedPreSubmit = await releaseStalePreSubmitLiveReservations();
+    if (releasedPreSubmit.length > 0) {
+      logger.warn(
+        { releasedPreSubmit },
+        "[kalshi-scalper] released stale pre-submit reservations with no order intent",
+      );
+    }
     // REFUSE while any unresolved live attempt exists — an operator must
     // authoritatively reconcile (out-of-band) before resuming. Fail-closed.
     const unresolved = await countUnresolvedLiveAttempts();
