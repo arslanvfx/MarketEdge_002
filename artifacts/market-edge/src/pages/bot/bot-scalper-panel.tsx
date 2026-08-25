@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw } from "lucide-react";
+import { Zap, Pause, Play, Target, Timer, DollarSign, Activity, AlertTriangle, Shield, CheckCircle2, Settings2, RotateCcw, ChevronDown, ChevronUp } from "lucide-react";
 import { API_BASE, fmt$, fmtPct, fmtDateTime, wkToEstRange, ET_LABEL } from "./utils";
 import type {
   ScalperConfig,
@@ -491,6 +491,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const { getToken, isLoaded: authLoaded, userId } = useAuth();
   const qc = useQueryClient();
   const [configDraft, setConfigDraft] = useState<Partial<ScalperConfig>>({});
+  const [perCoinOpen, setPerCoinOpen] = useState(true);
   const [mutationBusy, setMutationBusy] = useState<MutationName | null>(null);
   const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -1690,11 +1691,16 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         />
 
         <div>
-          <div className="flex items-center gap-2 mb-3">
+          <button
+            type="button"
+            onClick={() => setPerCoinOpen(o => !o)}
+            className="flex items-center gap-2 mb-3 hover:opacity-80 transition-opacity"
+          >
             <Settings2 className="w-4 h-4 text-amber-500/70" />
             <h3 className="text-xs font-bold text-amber-500/70 tracking-widest uppercase">Per-Coin Overrides</h3>
-          </div>
-          <div className="bg-background/50 border border-border rounded-lg overflow-hidden sm:overflow-x-auto">
+            {perCoinOpen ? <ChevronUp className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />}
+          </button>
+          {perCoinOpen && <div className="bg-background/50 border border-border rounded-lg overflow-hidden sm:overflow-x-auto">
             <table className="block w-full text-sm sm:table sm:min-w-[760px]">
               <tbody className="block sm:table-row-group">
                 {PER_MARKET_SYMBOLS.map(sym => {
@@ -1869,7 +1875,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 })}
               </tbody>
             </table>
-          </div>
+          </div>}
           <div className="text-[9px] text-muted-foreground/60 mt-2 px-1">
             Pause blocks this coin from scalping. Settings override the global band, per-order budget, and how early the scalper starts. Blank = use global. Save to apply.
           </div>
@@ -2679,6 +2685,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
   const [mutationBusy, setMutationBusy] = useState<string | null>(null);
   const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
   const [experimentNotice, setExperimentNotice] = useState<Notice | null>(null);
+  const [open, setOpen] = useState(true);
 
   const { data: capability } = useQuery<ScalperCapability>({
     queryKey: ["bot-scalper-capability", userId ?? "signed-out"],
@@ -2868,13 +2875,18 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
 
       {/* Header */}
       <div className="px-3 sm:px-5 py-4 border-b border-indigo-500/30 flex flex-col items-stretch gap-4 bg-indigo-950/20 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0 flex flex-col">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="min-w-0 flex flex-col text-left hover:opacity-80 transition-opacity"
+        >
           <div className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-indigo-400" />
             <h2 className="font-bold text-lg text-indigo-100 tracking-tight">Contrarian Spike <span className="text-xs font-semibold text-indigo-400">Strict Reversal Profile</span></h2>
+            {open ? <ChevronUp className="w-4 h-4 text-indigo-300" /> : <ChevronDown className="w-4 h-4 text-indigo-300" />}
           </div>
           <span className="text-[10px] uppercase font-bold tracking-widest text-indigo-400 mt-0.5">Adverse Momentum Counter-Execution</span>
-        </div>
+        </button>
         <div className="grid w-full grid-cols-3 items-end gap-2 sm:w-auto sm:flex sm:flex-wrap sm:gap-x-4 sm:gap-y-2 sm:justify-end">
           <div className="flex flex-col gap-1">
             <span className="text-[9px] uppercase font-bold tracking-widest text-slate-500">Mode</span>
@@ -2926,6 +2938,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
         </div>
       </div>
 
+      {open && <>
       <div className="px-3 sm:px-5 py-3 border-b border-indigo-500/20 bg-indigo-950/40 text-xs text-indigo-200/80 leading-relaxed flex items-start gap-3">
         <Target className="w-4 h-4 shrink-0 mt-0.5 text-indigo-400" />
         <div>
@@ -3204,7 +3217,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
           </div>
         )}
       </div>
-
+      </>}
     </div>
   );
 }

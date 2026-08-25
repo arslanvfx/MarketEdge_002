@@ -12,6 +12,7 @@ interface LogicModePerfProps {
 }
 
 export function LogicModePerf({ logicPerfData, backtestData, btPerfTab, setBtPerfTab, activeMode }: LogicModePerfProps) {
+  const [open, setOpen] = React.useState(true);
   return (
     <>
         {/* ── Logic Mode Performance ── */}
@@ -140,8 +141,11 @@ export function LogicModePerf({ logicPerfData, backtestData, btPerfTab, setBtPer
                   ))}
                   <span className="ml-2 text-[10px] text-muted-foreground">{totalBets} settled bets</span>
                 </div>
+                <button type="button" onClick={() => setOpen(o => !o)} className="ml-2 p-1 rounded hover:bg-muted/20 transition-colors" aria-label="Toggle section">
+                  {open ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                </button>
               </div>
-              <div className="p-5">
+              {open && <div className="p-5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   {btPerfTab === "live"
                     ? modes.map(m => renderModeCard(m, false))
@@ -157,7 +161,7 @@ export function LogicModePerf({ logicPerfData, backtestData, btPerfTab, setBtPer
                     Backtest replays your settled bets through each mode's gating rules using the signals recorded at bet time. Classic always approves (baseline). ML Gate rejects when ML was available and disagreed. Consensus requires ≥2 of 3 signals to agree. Results assume the same entries — real live behavior may differ.
                   </p>
                 )}
-              </div>
+              </div>}
             </div>
           );
         })()}

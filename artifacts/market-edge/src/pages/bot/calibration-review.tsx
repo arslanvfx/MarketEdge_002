@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, ChevronRight, Target } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, ChevronUp, Target } from "lucide-react";
 import { fmt$, fmtDateTime } from "./utils";
 import type {
   ScalpCalibrationRecommendation,
@@ -30,6 +30,7 @@ export function ScalperCalibrationReview({
   onRevert,
   symbols,
 }: CalibrationReviewProps) {
+  const [open, setOpen] = useState(true);
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
 
   const getSymbolData = (sym: string) => {
@@ -142,10 +143,15 @@ export function ScalperCalibrationReview({
   return (
     <div className="mb-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-3">
-        <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left"
+        >
           <Target className="w-4 h-4 text-emerald-500/70" />
           <h3 className="text-xs font-bold text-amber-500/70 tracking-widest uppercase">All-Market Calibration Review</h3>
-        </div>
+          {open ? <ChevronUp className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />}
+        </button>
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-muted-foreground font-mono">
             {report?.generatedAt ? `Last review: ${fmtDateTime(report.generatedAt)}` : "Not reviewed yet"}
@@ -162,6 +168,7 @@ export function ScalperCalibrationReview({
         </div>
       </div>
 
+      {open && <>
       <div className="text-[10px] text-muted-foreground mb-3 leading-relaxed max-w-3xl">
         Evidence is isolated to the selected <strong className="text-foreground uppercase tracking-widest">{report?.mode || "paper"}</strong> ledger. Analysis never clears the raw history—it creates a new saved review from the latest 60 days of retained evidence. Entry timing changes remain operator-controlled.
       </div>
@@ -499,6 +506,7 @@ export function ScalperCalibrationReview({
           </div>
         )}
       </div>
+      </>}
     </div>
   );
 }

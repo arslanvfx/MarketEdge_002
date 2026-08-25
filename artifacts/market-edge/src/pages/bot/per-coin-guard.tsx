@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
 import type { CoinGuardState } from "./types";
 import { fmt$ } from "./utils";
@@ -7,17 +8,23 @@ interface PerCoinGuardProps {
 }
 
 export function PerCoinGuard({ coinGuardData }: PerCoinGuardProps) {
+  const [open, setOpen] = useState(true);
   if (!coinGuardData) return null;
   return (
           <div className="bg-card border border-border rounded-xl overflow-hidden">
-            <div className="px-5 py-3 border-b border-border flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOpen(o => !o)}
+              className="w-full px-5 py-3 border-b border-border flex items-center gap-2 hover:bg-muted/20 transition-colors text-left"
+            >
               <Shield className="w-4 h-4 text-sky-400" />
               <h2 className="font-semibold text-sm">Per-Coin Guard Status</h2>
               <span className="text-xs text-muted-foreground ml-auto">
                 Daily cap: {fmt$(coinGuardData.maxDailyLossPerCoin)} / coin
               </span>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4">
+              {open ? <ChevronUp className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />}
+            </button>
+            {open && <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4">
               {coinGuardData.coins.map((coin) => {
                 // Compute current window key with same formula as backend (YYYY-MM-DDTHH:mm UTC)
                 const currentWK = new Date(Math.floor(Date.now() / (15 * 60_000)) * (15 * 60_000))
@@ -80,7 +87,7 @@ export function PerCoinGuard({ coinGuardData }: PerCoinGuardProps) {
                   </div>
                 );
               })}
-            </div>
+            </div>}
           </div>
 
   );
