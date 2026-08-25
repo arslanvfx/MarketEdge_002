@@ -82,6 +82,8 @@ function makeSignedHeaders(method: string, path: string): Record<string, string>
 
 export interface ScalpSubmitParams {
   ticker: string;
+  /** Authoritative CreateOrderV2 market shard routing index. */
+  exchangeIndex: number;
   side: "yes" | "no";
   // Hard YES-side IOC boundary as a fraction (0.01–0.99). The caller derives it
   // from the pinned band ceiling; Kalshi may price-improve inside this limit.
@@ -184,12 +186,15 @@ export async function placeScalpOrderStrict(
     throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   }
 
-  const { ticker, side, limitPrice, count, clientOrderId } = params;
+  const { ticker, exchangeIndex, side, limitPrice, count, clientOrderId } = params;
 
   // Validate the request locally — the strict parser also enforces this, but a
   // bad count must never leave this module as a real submission.
   if (!Number.isFinite(count) || !Number.isInteger(count) || count <= 0) {
     throw new Error(`invalid scalp order count: ${String(count)}`);
+  }
+  if (!Number.isInteger(exchangeIndex) || exchangeIndex < 0) {
+    throw new Error(`invalid scalp order exchangeIndex: ${String(exchangeIndex)}`);
   }
   if (!Number.isFinite(limitPrice)) {
     throw new Error(`invalid scalp order limitPrice: ${String(limitPrice)}`);
@@ -208,6 +213,7 @@ export async function placeScalpOrderStrict(
   const body: Record<string, unknown> = {
     client_order_id: clientOrderId,
     ticker,
+    exchange_index: exchangeIndex,
     side: bookSide, // "bid" | "ask"
     action: "buy",
     count: String(count), // FixedPointCount string

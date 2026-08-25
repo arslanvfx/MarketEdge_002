@@ -12,6 +12,7 @@ import {
   evaluateContrarianGuardEligibility,
   isPinnedContrarianIdentityCurrent,
   parseContrarianConfigPatch,
+  parseContrarianExchangeIndex,
   planContrarianOrder,
   replayContrarianGuardOutcomeRows,
   validateContrarianConfig,
@@ -88,6 +89,14 @@ describe("contrarian spike experiment pure boundary", () => {
       budgetDollars: 0.25, maxDirectContractCost: 0.03, minDirectContractCost: 0.01,
       directAsk: 0.005, oppositeSide: "no",
     }).ok, false);
+  });
+
+  it("accepts strict Contrarian shard 0 and shard 2 but rejects missing or invalid routing", () => {
+    assert.equal(parseContrarianExchangeIndex(0), 0);
+    assert.equal(parseContrarianExchangeIndex(2), 2);
+    for (const value of [undefined, null, -1, 1.5, "2", NaN]) {
+      assert.equal(parseContrarianExchangeIndex(value), null);
+    }
   });
 
   it("fails closed when a forced or final cached target no longer matches the pinned identity", () => {
@@ -576,6 +585,24 @@ describe("contrarian spike durable ownership boundaries", () => {
     assert.ok(monitor < scan.indexOf("if (!_config.enabled)"));
     assert.ok(monitor < scan.indexOf("if (_isCircuitBreakerBlocking())"));
     assert.match(scalperServiceSource, /new ContrarianMonitorAttemptScheduler/);
+  });
+
+  it("carries strict monitor routing through fresh context into the broker submission", () => {
+    const monitor = scalperServiceSource.slice(
+      scalperServiceSource.indexOf("function _monitorStrictContrarianMarkets"),
+      scalperServiceSource.indexOf("interface Candidate"),
+    );
+    assert.match(monitor, /const exchangeIndex = parseContrarianExchangeIndex\(fresh\?\.exchangeIndex\)/);
+    assert.match(monitor, /exchangeIndex == null/);
+    assert.match(monitor, /exchangeIndex,\s+evidence:/);
+    assert.match(
+      contrarianServiceSource,
+      /exchangeIndex: parseContrarianExchangeIndex\(finalContext\.exchangeIndex\)!/,
+    );
+    assert.match(
+      contrarianServiceSource,
+      /parseContrarianExchangeIndex\(finalContext\.exchangeIndex\) == null[\s\S]*identity_exchange_index_invalid_after_refresh/,
+    );
   });
 });
 

@@ -6,6 +6,7 @@ import {
   describeScalperAttempt,
   describeScalperEvidence,
   getScalperGuardBlock,
+  isDefinitiveScalperRejection,
   normalizeScalpOrders,
 } from "./scalper-ledger.ts";
 import type { EntryGuardEvidence, ScalpOrder, ScalperAttempt } from "./types.ts";
@@ -162,6 +163,26 @@ describe("describeScalperAttempt", () => {
       describeScalperAttempt(attempt({ status: "zero_fill", reason: "zero_fill" })),
       "IOC returned zero fills",
     );
+  });
+
+  it("describes definitive market routing rejection and never implies IOC liquidity", () => {
+    const rejected = attempt({
+      status: "zero_fill",
+      reason: "definitive_http_rejection_404",
+      reconciliationEvidence: {
+        source: "live_definitive_http_rejection",
+        httpStatus: 404,
+        exchangeCode: "market_not_found",
+      },
+      retryEligible: false,
+      retryState: "terminal",
+    });
+    assert.equal(
+      describeScalperAttempt(rejected),
+      "Kalshi rejected order — market routing failed (404 market_not_found)",
+    );
+    assert.doesNotMatch(describeScalperAttempt(rejected), /zero fills|liquidity/i);
+    assert.equal(isDefinitiveScalperRejection(rejected), true);
   });
 
   it("uses readable explanations for authenticated quote and identity skips", () => {

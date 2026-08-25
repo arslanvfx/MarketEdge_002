@@ -856,6 +856,7 @@ export interface ScalperAttempt {
   layeredRegularSide: "yes" | "no" | null;
   skipEvidence: ScalpSkipEvidence | null;
   entryGuardEvidence: EntryGuardEvidence | null;
+  reconciliationEvidence?: Record<string, unknown> | null;
   latency?: {
     mode: "paper" | "live";
     symbol: string;

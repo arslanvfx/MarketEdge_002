@@ -119,6 +119,7 @@ import {
   ContrarianMonitorAttemptScheduler,
   evaluateContrarianGuardEligibility,
   isPinnedContrarianIdentityCurrent,
+  parseContrarianExchangeIndex,
 } from "./kalshi-scalper-contrarian.ts";
 import {
   loadScalpConfigFromDB,
@@ -1627,13 +1628,39 @@ function _monitorStrictContrarianMarkets(windowKey: string, nowMs: number): void
           ]);
           const fresh = getKalshiCachedData(symbol);
           const quote = book ? validateOrderbookQuote(book, ticker, closeTime) : null;
+          const exchangeIndex = parseContrarianExchangeIndex(fresh?.exchangeIndex);
           if (!identity || !isPinnedContrarianIdentityCurrent({
             ticker: fresh?.ticker, closeTime: fresh?.closeTime, targetPrice: fresh?.value,
             pinnedTicker: ticker, pinnedCloseTime: closeTime, pinnedTargetPrice: pinnedTarget,
-          }) || Math.abs(identity - pinnedTarget) > 1e-9 || !sampled || !quote) {
-            return { ok: false, reason: !quote ? "fresh_authenticated_quote_invalid" : "fresh_revalidation_failed", decision: null, yesAsk: null, noAsk: null, targetPrice: identity, closeTime: fresh?.closeTime ?? null, evidence: { monitoringPhase: "independent_strict_monitor", sampled } };
+          }) || Math.abs(identity - pinnedTarget) > 1e-9 || !sampled || !quote
+            || exchangeIndex == null) {
+            return {
+              ok: false,
+              reason: !quote
+                ? "fresh_authenticated_quote_invalid"
+                : exchangeIndex == null
+                  ? "identity_exchange_index_invalid_after_refresh"
+                  : "fresh_revalidation_failed",
+              decision: null,
+              yesAsk: null,
+              noAsk: null,
+              targetPrice: identity,
+              closeTime: fresh?.closeTime ?? null,
+              exchangeIndex: null,
+              evidence: { monitoringPhase: "independent_strict_monitor", sampled },
+            };
           }
-          return { ok: true, reason: null, decision: makeDecision(protectedSide, Date.now(), identity), yesAsk: quote.yesAsk, noAsk: quote.noAsk, targetPrice: identity, closeTime, evidence: { monitoringPhase: "independent_strict_monitor" } };
+          return {
+            ok: true,
+            reason: null,
+            decision: makeDecision(protectedSide, Date.now(), identity),
+            yesAsk: quote.yesAsk,
+            noAsk: quote.noAsk,
+            targetPrice: identity,
+            closeTime,
+            exchangeIndex,
+            evidence: { monitoringPhase: "independent_strict_monitor" },
+          };
         },
         finalValidationSync: () => {
           const current = getKalshiCachedData(symbol);
@@ -2295,9 +2322,17 @@ async function _executeScalpAttempt(
 
   // Re-resolve the authoritative ticker/closeTime and require an exact match
   // with the reserved candidate. Identity failure is terminal for this window.
-  if (!identityResult.ok) {
+  if (
+    !identityResult.ok
+    || identityResult.target == null
+    || !Number.isFinite(identityResult.target)
+  ) {
     logger.warn(
-      { err: identityResult.error, symbol },
+      {
+        err: identityResult.error,
+        symbol,
+        refreshedTarget: identityResult.ok ? identityResult.target : null,
+      },
       "[kalshi-scalper] identity force-refresh failed — skipping permanently",
     );
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_refresh_failed", true, {
@@ -2317,6 +2352,19 @@ async function _executeScalpAttempt(
     });
     return;
   }
+  if (!Number.isInteger(refreshed.exchangeIndex) || refreshed.exchangeIndex! < 0) {
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "identity_exchange_index_invalid_after_refresh", true, {
+      ..._timingEvidence(),
+      identityFetchOk: true,
+      identityReason: "identity_exchange_index_invalid_after_refresh",
+      refreshedTicker: refreshed.ticker,
+      refreshedCloseTimeIso: refreshed.closeTime,
+    });
+    return;
+  }
+  // Pin routing from this attempt's authoritative force refresh. A same-lifecycle
+  // zero-fill retry re-enters this function and obtains a fresh value.
+  const exchangeIndex = refreshed.exchangeIndex!;
   if (refreshed.ticker !== ticker || refreshed.closeTime !== closeTime) {
     logger.info(
       { symbol, reservedTicker: ticker, refreshedTicker: refreshed.ticker },
@@ -2811,6 +2859,7 @@ async function _executeScalpAttempt(
               noAsk: null,
               targetPrice: null,
               closeTime: cached?.closeTime ?? null,
+              exchangeIndex: null,
               evidence: baseEvidence,
             };
           }
@@ -2829,6 +2878,7 @@ async function _executeScalpAttempt(
               noAsk: null,
               targetPrice: identity.target,
               closeTime: cached?.closeTime ?? null,
+              exchangeIndex: null,
               evidence: baseEvidence,
             };
           }
@@ -2841,6 +2891,7 @@ async function _executeScalpAttempt(
               noAsk: null,
               targetPrice: identity.target,
               closeTime: cached.closeTime,
+              exchangeIndex: null,
               evidence: baseEvidence,
             };
           }
@@ -2856,6 +2907,7 @@ async function _executeScalpAttempt(
               noAsk: null,
               targetPrice: identity.target,
               closeTime: cached.closeTime,
+              exchangeIndex: null,
               evidence: baseEvidence,
             };
           }
@@ -2868,6 +2920,7 @@ async function _executeScalpAttempt(
             noAsk: quote.noAsk,
             targetPrice: identity.target,
             closeTime: cached.closeTime,
+            exchangeIndex: cached.exchangeIndex ?? null,
             evidence: {
               ...baseEvidence,
               guardReason: decision.reason,
@@ -3809,6 +3862,7 @@ async function _executeScalpAttempt(
     try {
       const result = await runtime.placeScalpOrderStrict({
         ticker,
+        exchangeIndex,
         side: effectiveSide,
         limitPrice,
         count: contractCount,
@@ -4170,6 +4224,7 @@ export interface ControlledFreefallServiceExerciseResult {
   quoteFetches: number;
   submittedLimitPrices: number[];
   submittedCounts: number[];
+  submittedExchangeIndexes: number[];
   clientOrderIds: string[];
   intentIds: string[];
   finalizedZeroFillsBeforeSubmission: number[];
@@ -4208,6 +4263,12 @@ export interface ControlledFreefallServiceExerciseOptions {
   underlyingSampleSuccessSequence?: boolean[];
   /** Simulate an underlying move while the durable intent is being written. */
   intentWriteUnderlyingPrice?: number;
+  /** Authoritative market routing identity returned after force refresh. */
+  exchangeIndex?: unknown;
+  /** Force-refresh result; null proves stale cache must not authorize submission. */
+  identityTarget?: number | null;
+  /** Per-attempt routing identities for same-lifecycle retry proofs. */
+  exchangeIndexSequence?: unknown[];
 }
 
 export interface ControlledSampleSchedulerExerciseResult {
@@ -4517,6 +4578,12 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
     dailySpend,
     recentOrders: recentOrders.map(serializeScalpOrder),
     recentAttempts: recentAttempts.map((attempt) => {
+      const latestOrder = recentOrderByAttemptKey.get(
+        _attemptKey(attempt.mode, attempt.symbol, attempt.windowKey),
+      );
+      const reconciliationEvidence = latestOrder?.reconciliationEvidence ?? null;
+      const definitiveHttpRejection =
+        reconciliationEvidence?.["source"] === "live_definitive_http_rejection";
       const retry = evaluateScalpReservationRetry({
         status: attempt.status,
         reason: attempt.reason,
@@ -4540,18 +4607,16 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
         layeredRegularPositionId: attempt.layeredRegularPositionId ?? null,
         layeredRegularSide: attempt.layeredRegularSide ?? null,
         skipEvidence: attempt.skipEvidence ?? null,
-        entryGuardEvidence:
-          recentOrderByAttemptKey.get(
-            _attemptKey(attempt.mode, attempt.symbol, attempt.windowKey),
-          )?.entryGuardEvidence ?? null,
+        entryGuardEvidence: latestOrder?.entryGuardEvidence ?? null,
+        reconciliationEvidence,
         latency: _latestAttemptLatencyByKey.get(
           _attemptKey(attempt.mode, attempt.symbol, attempt.windowKey),
         ) ?? null,
-        retryEligible: !retry.terminal,
+        retryEligible: !definitiveHttpRejection && !retry.terminal,
         retryState:
           attempt.status === "claimed"
             ? "in_flight"
-            : retry.terminal
+            : definitiveHttpRejection || retry.terminal
               ? "terminal"
               : retry.retryableNow
                 ? "ready"
@@ -5149,6 +5214,7 @@ async function _runControlledLayeringScenario(
     getKalshiCachedData: () => ({
       value: 100,
       ticker,
+      exchangeIndex: 0,
       closeTime,
       yesAsk: 0.97,
       yesBid: 0.02,
@@ -5293,9 +5359,11 @@ Promise<ControlledFreefallServiceExerciseResult> {
   let brokerSubmissions = 0;
   let paperSubmissions = 0;
   let quoteFetches = 0;
+  let identityFetches = 0;
   let underlyingSampleFetches = 0;
   const submittedLimitPrices: number[] = [];
   const submittedCounts: number[] = [];
+  const submittedExchangeIndexes: number[] = [];
   const clientOrderIds: string[] = [];
   const intentIds: string[] = [];
   let finalizedZeroFills = 0;
@@ -5372,7 +5440,10 @@ Promise<ControlledFreefallServiceExerciseResult> {
       && quoteFetches >= options.windowChangesAfterQuoteFetchCount
         ? "2026-08-22T07:15"
         : windowKey,
-    fetchKalshiTarget: async () => 100,
+    fetchKalshiTarget: async () => {
+      identityFetches += 1;
+      return options.identityTarget === undefined ? 100 : options.identityTarget;
+    },
     fetchOrderbookPrices: async () => {
       const sequence = options.authenticatedQuoteSequence;
       const configured = sequence != null && sequence.length > 0
@@ -5403,6 +5474,12 @@ Promise<ControlledFreefallServiceExerciseResult> {
     getKalshiCachedData: () => ({
       value: 100,
       ticker,
+      exchangeIndex: (
+        options.exchangeIndexSequence?.[
+          Math.max(0, identityFetches - 1)
+        ]
+        ?? (options.exchangeIndex === undefined ? 0 : options.exchangeIndex)
+      ) as number,
       closeTime,
       yesAsk: side === "yes" ? 0.97 : 0.03,
       yesBid: 0.02,
@@ -5476,6 +5553,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
       clientOrderIds.push(order.clientOrderId);
       submittedLimitPrices.push(order.limitPrice);
       submittedCounts.push(order.count);
+      submittedExchangeIndexes.push(order.exchangeIndex);
       const outcome =
         options.brokerOutcomeSequence?.[brokerSubmissions - 1] ?? "zero_fill";
       if (outcome === "confirmed_fill") {
@@ -5624,6 +5702,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
       quoteFetches,
       submittedLimitPrices,
       submittedCounts,
+      submittedExchangeIndexes,
       clientOrderIds,
       intentIds,
       finalizedZeroFillsBeforeSubmission,

@@ -3118,12 +3118,14 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(claim, /\[blockedReason, JSON\.stringify\(capEvidence\), reservationId\]/);
   });
 
-  it("status exposes retry readiness and cooldown for every policy-retryable outcome", () => {
+  it("status exposes policy retries but makes definitive HTTP rejections terminal", () => {
     const start = idx("recentAttempts: recentAttempts.map");
     const end = svc.indexOf("incidents,", start);
     const status = svc.slice(start, end);
     assert.match(status, /evaluateScalpReservationRetry\(/);
-    assert.match(status, /retryEligible: !retry\.terminal/);
+    assert.match(status, /reconciliationEvidence\?\.\["source"\] === "live_definitive_http_rejection"/);
+    assert.match(status, /retryEligible: !definitiveHttpRejection && !retry\.terminal/);
+    assert.match(status, /definitiveHttpRejection \|\| retry\.terminal/);
     assert.match(status, /retryAfterMs: retry\.retryAfterMs/);
   });
 

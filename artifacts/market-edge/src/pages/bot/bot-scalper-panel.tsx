@@ -21,6 +21,7 @@ import type {
 } from "./types";
 import {
   describeScalperAttempt,
+  isDefinitiveScalperRejection,
   describeScalperEvidence,
   describeScalperReason,
   getScalperGuardBlock,
@@ -2435,12 +2436,13 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                   const isFilled = attempt.status === "filled";
                   const isUnsafe = attempt.status === "unknown" || attempt.status === "error";
                   const isZeroFill = attempt.status === "zero_fill";
+                  const isDefinitiveRejection = isDefinitiveScalperRejection(attempt);
                   const guardBlock = getScalperGuardBlock(attempt);
                   const executionPricing = attempt.observedWinningAsk != null && attempt.executionWinningLimit != null
                     ? `${(attempt.observedWinningAsk * 100).toFixed(1).replace(/\.0$/, "")}¢ quote → ${(attempt.executionWinningLimit * 100).toFixed(1).replace(/\.0$/, "")}¢ ${attempt.mode === "live" ? "IOC" : "sim"} cap`
                     : null;
                   const evidenceLines = describeScalperEvidence(attempt);
-                  const retryText = isZeroFill
+                  const retryText = isZeroFill && !isDefinitiveRejection
                     ? (attempt.retryEligible
                         ? attempt.retryState === "ready"
                           ? `Retry ready · ${attempt.submissionCount}/${statusData!.executionPolicy.maxSubmissionsPerWindow} used`

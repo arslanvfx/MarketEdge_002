@@ -3,10 +3,54 @@ import { describe, it } from "node:test";
 import {
   DefinitiveScalpOrderRejectionError,
   parseDefinitiveScalpOrderRejection,
+  placeScalpOrderStrict,
 } from "./kalshi-scalper-exchange.ts";
 import fs from "node:fs";
+import { generateKeyPairSync } from "node:crypto";
 
 describe("definitive Scalper order rejections", () => {
+  it("sends both shard 2 and shard 0 in the CreateOrderV2 body", async () => {
+    const previousKeyId = process.env["KALSHI_API_KEY_ID"];
+    const previousPrivateKey = process.env["KALSHI_PRIVATE_KEY"];
+    const previousFetch = globalThis.fetch;
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env["KALSHI_API_KEY_ID"] = "controlled-key";
+    process.env["KALSHI_PRIVATE_KEY"] = privateKey.export({
+      type: "pkcs1",
+      format: "pem",
+    }).toString();
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response('{"error":{"code":"market_not_found"}}', { status: 404 });
+    };
+    try {
+      for (const exchangeIndex of [2, 0]) {
+        await assert.rejects(
+          placeScalpOrderStrict({
+            ticker: `CONTROLLED-SHARD-${exchangeIndex}`,
+            exchangeIndex,
+            side: "yes",
+            limitPrice: 0.97,
+            count: 2,
+            clientOrderId: `controlled-client-${exchangeIndex}`,
+          }),
+          DefinitiveScalpOrderRejectionError,
+        );
+      }
+      assert.deepEqual(
+        bodies.map((body) => body["exchange_index"]),
+        [2, 0],
+      );
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousKeyId === undefined) delete process.env["KALSHI_API_KEY_ID"];
+      else process.env["KALSHI_API_KEY_ID"] = previousKeyId;
+      if (previousPrivateKey === undefined) delete process.env["KALSHI_PRIVATE_KEY"];
+      else process.env["KALSHI_PRIVATE_KEY"] = previousPrivateKey;
+    }
+  });
+
   it("classifies market_not_found as authoritative no-order evidence", () => {
     const rejection = parseDefinitiveScalpOrderRejection(
       new Error(

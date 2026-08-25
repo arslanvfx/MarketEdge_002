@@ -141,6 +141,17 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
       ? `Confirmed fill — layered on regular ${attempt.layeredRegularSide.toUpperCase()}`
       : "Confirmed fill";
   }
+  if (
+    attempt.status === "zero_fill"
+    && attempt.reconciliationEvidence?.source === "live_definitive_http_rejection"
+  ) {
+    const status = attempt.reconciliationEvidence["httpStatus"];
+    const code = attempt.reconciliationEvidence["exchangeCode"];
+    const details = [status, code].filter(
+      (value) => typeof value === "number" || (typeof value === "string" && value.length > 0),
+    ).join(" ");
+    return `Kalshi rejected order — market routing failed${details ? ` (${details})` : ""}`;
+  }
   if (attempt.status === "zero_fill") return "IOC returned zero fills";
   if (attempt.status === "unknown") return "Order result unknown — reconciliation required";
   if (attempt.status === "error") return attempt.reason ? `Error — ${describeScalperReason(attempt.reason)}` : "Attempt failed";
@@ -152,6 +163,10 @@ export function describeScalperAttempt(attempt: ScalperAttempt): string {
   if (attempt.reason === "first_quote_outside_band") return "Current price was outside your entry range";
   if (attempt.status === "claimed") return "Checks in progress";
   return attempt.reason ? describeScalperReason(attempt.reason) : "Skipped before order";
+}
+
+export function isDefinitiveScalperRejection(attempt: ScalperAttempt): boolean {
+  return attempt.reconciliationEvidence?.source === "live_definitive_http_rejection";
 }
 
 export function describeEntryGuardEvidence(ege: EntryGuardEvidence): string[] {

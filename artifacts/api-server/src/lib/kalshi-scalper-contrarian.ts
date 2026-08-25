@@ -10,6 +10,12 @@ import type {
 } from "./kalshi-scalper-types.ts";
 
 export type ContrarianSide = "yes" | "no";
+
+export function parseContrarianExchangeIndex(value: unknown): number | null {
+  return Number.isInteger(value) && (value as number) >= 0
+    ? value as number
+    : null;
+}
 export type ContrarianMode = ScalpMode;
 
 /** Persisted, deliberately narrow admission policy for reversal executions. */

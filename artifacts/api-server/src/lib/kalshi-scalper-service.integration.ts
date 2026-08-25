@@ -25,6 +25,46 @@ describe("authenticated final quote retry boundary", () => {
     assert.equal(result.brokerSubmissions, 1);
     assert.deepEqual(result.submittedLimitPrices, [0.99]);
     assert.deepEqual(result.submittedCounts, [2]);
+    assert.deepEqual(result.submittedExchangeIndexes, [0]);
+  });
+
+  it("pins authoritative shard 2 and shard 0 in CreateOrder submissions", async () => {
+    const shardTwo = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      exchangeIndex: 2,
+    });
+    const shardZero = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      exchangeIndex: 0,
+    });
+    assert.deepEqual(shardTwo.submittedExchangeIndexes, [2]);
+    assert.deepEqual(shardZero.submittedExchangeIndexes, [0]);
+  });
+
+  it("blocks missing or invalid routing identity before intent and broker POST", async () => {
+    for (const exchangeIndex of [null, -1, 1.5, "bad"]) {
+      const result = await runControlledFreefallServiceExercise({
+        onlyRecoveredStep: true,
+        exchangeIndex,
+      });
+      assert.equal(result.intentWrites, 0);
+      assert.equal(result.brokerSubmissions, 0);
+      assert.equal(
+        result.skippedAttempts.at(-1)?.reason,
+        "identity_exchange_index_invalid_after_refresh",
+      );
+    }
+  });
+
+  it("does not authorize a stale valid cache when force refresh resolves null", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      identityTarget: null,
+      exchangeIndex: 2,
+    });
+    assert.equal(result.intentWrites, 0);
+    assert.equal(result.brokerSubmissions, 0);
+    assert.equal(result.skippedAttempts.at(-1)?.reason, "identity_refresh_failed");
   });
 
   it("does not retry a valid above-cap or below-floor quote and records the exact terminal value", async () => {
@@ -152,6 +192,17 @@ describe("confirmed IOC zero-fill same-lifecycle retry", () => {
     assert.equal(new Set(result.clientOrderIds).size, 2);
     assert.deepEqual(result.submittedLimitPrices, [0.99, 0.99]);
     assert.deepEqual(result.submittedCounts, [2, 2]);
+    assert.deepEqual(result.submittedExchangeIndexes, [0, 0]);
+  });
+
+  it("reruns identity and uses a fresh shard for a same-lifecycle zero-fill retry", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      immediateZeroFillRetry: true,
+      brokerOutcomeSequence: ["zero_fill", "confirmed_fill"],
+      exchangeIndexSequence: [2, 0],
+    });
+    assert.deepEqual(result.submittedExchangeIndexes, [2, 0]);
   });
 
   it("never retries an unknown/ambiguous classification", () => {

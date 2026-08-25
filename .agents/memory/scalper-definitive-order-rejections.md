@@ -13,6 +13,22 @@ Persisted historical error text may repair an old unresolved row only when it co
 
 **How to apply:** Classify the HTTP response at the Scalper-owned exchange boundary, carry definitive rejection as typed evidence, and resolve it before the generic unknown-exposure branch. Keep every non-definitive case fail-closed.
 
+Kalshi event markets may be assigned to a nonzero `exchange_index`. The V2
+order request must carry the index from the same successful, forced-fresh
+market identity lookup used at the final execution boundary. A fulfilled
+refresh that returns no target is still a refresh failure; never reuse the
+older cached ticker, close time, or exchange index to authorize submission.
+
+**Why:** Kalshi's documented ticker auto-routing returned `404
+market_not_found` for live markets on exchange shard 2 while shard-0 orders
+continued filling. The markets existed and their market payloads identified
+the correct shard.
+
+**How to apply:** Parse only nonnegative integer exchange indexes, preserve
+shard 0, fail closed before intent creation when the forced refresh or routing
+identity is missing, and include `exchange_index` in every strict Scalper and
+Contrarian V2 order request. Same-lifecycle retries must refresh and repin it.
+
 Stale pre-submit reservations may be released only when they are old, still
 `claimed`, retain budget, and have no matching order-intent row. Cleanup and
 intent creation must share the same cap advisory lock; intent creation must

@@ -11,6 +11,7 @@ import {
   computeContrarianPnl,
   evaluateContrarianGuardEligibility,
   planContrarianOrder,
+  parseContrarianExchangeIndex,
   replayContrarianGuardOutcomeRows,
   validateContrarianConfig,
   type ContrarianConfig,
@@ -78,6 +79,7 @@ export interface ContrarianFreshGuardContext {
   noAsk: number | null;
   targetPrice: number | null;
   closeTime: string | null;
+  exchangeIndex: number | null;
   evidence: Record<string, unknown>;
 }
 
@@ -617,6 +619,7 @@ export async function triggerContrarianFromNormalGuard(
         noAsk: null,
         targetPrice: null,
         closeTime: null,
+        exchangeIndex: null,
         evidence: { error: String(error) },
       }),
     );
@@ -765,6 +768,7 @@ export async function triggerContrarianFromNormalGuard(
           noAsk: null,
           targetPrice: null,
           closeTime: null,
+          exchangeIndex: null,
           evidence: { error: String(error) },
         }),
       ),
@@ -779,6 +783,19 @@ export async function triggerContrarianFromNormalGuard(
         snapshot,
         reservation,
         reason: final.reason,
+        context: finalContext,
+      });
+      return;
+    }
+    if (
+      snapshot.config.mode === "live"
+      && parseContrarianExchangeIndex(finalContext.exchangeIndex) == null
+    ) {
+      await rejectAfterClaim({
+        trigger,
+        snapshot,
+        reservation,
+        reason: "identity_exchange_index_invalid_after_refresh",
         context: finalContext,
       });
       return;
@@ -936,6 +953,7 @@ export async function triggerContrarianFromNormalGuard(
     try {
       submitted = await placeScalpOrderStrict({
         ticker: order.ticker,
+        exchangeIndex: parseContrarianExchangeIndex(finalContext.exchangeIndex)!,
         side: order.oppositeSide,
         count: order.contractCount,
         limitPrice: order.yesLimitPrice,

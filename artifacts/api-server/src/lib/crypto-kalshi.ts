@@ -16,6 +16,7 @@ import { KALSHI_SERIES } from "./market-defs";
 export const kalshiTargetCache = new Map<string, {
   value: number | null;
   ticker?: string;
+  exchangeIndex?: number;
   at: number;
   closeTime?: string;
   yesPrice?: number | null;
@@ -92,6 +93,7 @@ export function getKalshiWindowContext(symbol: string): {
 export function getKalshiCachedData(symbol: string): {
   value: number | null;
   ticker?: string;
+  exchangeIndex?: number;
   yesPrice?: number | null;
   yesAsk?: number | null;
   yesBid?: number | null;
@@ -289,6 +291,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
       markets?: {
         floor_strike?: number | string;
         ticker?: string;
+        exchange_index?: number | string;
         close_time?: string;
         // Current API: YES-side dollar strings (primary — confirmed present as of mid-2026)
         yes_ask_dollars?: string;
@@ -334,6 +337,18 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
     }
 
     if (selected) {
+      const floorStrike = Number(selected.floor_strike);
+      const rawExchangeIndex = selected.exchange_index;
+      const parsedExchangeIndex =
+        typeof rawExchangeIndex === "number"
+          ? rawExchangeIndex
+          : typeof rawExchangeIndex === "string" && rawExchangeIndex.trim() !== ""
+            ? Number(rawExchangeIndex)
+            : NaN;
+      const exchangeIndex =
+        Number.isInteger(parsedExchangeIndex) && parsedExchangeIndex >= 0
+          ? parsedExchangeIndex
+          : undefined;
       // Parse a dollar-string (e.g. "0.6100") that the current Kalshi API returns.
       const parseDollar = (s: string | undefined | null): number | null => {
         if (!s) return null;
@@ -379,8 +394,9 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
         yesAsk !== null && yesBid !== null ? (yesAsk + yesBid) / 2
         : yesAsk ?? yesBid ?? lastP ?? null;
       kalshiTargetCache.set(sym, {
-        value: selected.floor_strike!,
+        value: floorStrike,
         ticker: selected.ticker,
+        exchangeIndex,
         at: Date.now(),
         closeTime: (selected as Record<string, unknown>).close_time as string | undefined,
         yesPrice,
@@ -409,6 +425,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
             );
             kalshiTargetCache.set(sym, {
               ...kalshiTargetCache.get(sym)!,
+              exchangeIndex,
               yesPrice: obPrice,
               yesAsk: obYesAsk,
               yesBid: obYesBid,
@@ -426,11 +443,11 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
           confirmedTargetStore.set(sym, {
             ticker: selected.ticker,
             confirmedAt: Date.now(),
-            target: selected.floor_strike!,
+            target: floorStrike,
           });
         }
       }
-      return selected.floor_strike!;
+      return floorStrike;
     }
 
     // Same guard: a forceRefresh that finds no market must not erase an existing
