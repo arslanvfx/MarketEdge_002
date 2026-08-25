@@ -321,7 +321,8 @@ export function secondsUntilEligible(
  * configurable: they control exchange pressure and duplicate-order safety,
  * rather than trading strategy. */
 export const SCALP_SCAN_INTERVAL_MS = 250;
-export const SCALP_AUTH_RETRY_COOLDOWN_MS = 500;
+/** Re-arm transient authenticated quote churn on the next 250ms scan pass. */
+export const SCALP_AUTH_RETRY_COOLDOWN_MS = 250;
 /** Maximum additional authenticated quote requests within one reserved attempt. */
 export const SCALP_MAX_AUTHENTICATED_QUOTE_RETRIES = 2;
 /** Leave enough time for a retry response and the synchronous safety boundary. */
@@ -348,6 +349,26 @@ export const SCALP_PREFLIGHT_FAST_ZONE_SECONDS = 30;
 export const SCALP_MAX_CONCURRENT_CANDIDATES = 3;
 /** Keep one of the three ticker lanes free for final authoritative guard work. */
 export const SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES = 2;
+
+/**
+ * Allow the execution guard to use recent preflight samples without ever
+ * carrying observations across market windows. The guard's own trailing
+ * lookback still limits how much history is selected.
+ */
+export function scalpGuardObservationStartMs(
+  windowKey: string,
+  closeTime: string,
+  finalWindowSeconds: number,
+): number {
+  const windowOpenMs = Date.parse(`${windowKey}:00.000Z`);
+  const closeMs = Date.parse(closeTime);
+  const eligibilityStartMs = closeMs - finalWindowSeconds * 1_000;
+  const preflightStartMs =
+    eligibilityStartMs - SCALP_PREFLIGHT_LEAD_SECONDS * 1_000;
+  if (!Number.isFinite(windowOpenMs)) return eligibilityStartMs;
+  if (!Number.isFinite(preflightStartMs)) return windowOpenMs;
+  return Math.max(windowOpenMs, preflightStartMs);
+}
 
 export function scalpPreflightRefreshMs(startsInSeconds: number): number {
   return startsInSeconds <= SCALP_PREFLIGHT_FAST_ZONE_SECONDS
@@ -777,7 +798,7 @@ function selectCommodityOracleSamples(
  *
  * FAIL-CLOSED: returns evaluable=false (NOT a clear) whenever the data is not
  * reliable enough to trust:
- *   - fewer than N+1 valid finite samples after eligibility opens
+ *   - fewer than N+1 valid finite samples in the same-window observation range
  *   - the newest in-window sample is stale (older than FREEFALL_MAX_SAMPLE_AGE_MS)
  *   - samples are not spaced at a trustworthy one-second cadence
  *   - the live underlying is not on the contract side of the active target
@@ -900,7 +921,8 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     input.eligibilityStartMs,
     input.nowMs - (maxObservationSeconds + 3) * 1_000,
   );
-  // Only VALID (finite, positive price; sane timestamp after eligibility) samples.
+  // Only VALID (finite, positive price; sane timestamp after the caller's
+  // same-window observation boundary) samples.
   const relevant = input.samples.filter(
     (s) =>
       s != null &&

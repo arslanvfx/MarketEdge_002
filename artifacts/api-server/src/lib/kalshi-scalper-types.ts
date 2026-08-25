@@ -452,6 +452,7 @@ export type ScalpLatencyStage =
   | "queue_wait"
   | "cap_claim"
   | "parallel_refresh"
+  | "guard_readiness"
   | "final_requote"
   | "intent_write"
   | "broker_submit"
@@ -473,6 +474,8 @@ export interface ScalpAttemptLatency {
   identityRefreshMs: number | null;
   quoteRefreshMs: number | null;
   parallelRefreshMs: number | null;
+  /** Guard evaluation after mandatory parallel refreshes are available. */
+  guardReadinessMs: number | null;
   /** Fresh authenticated quote immediately before the intent boundary. */
   finalRequoteMs: number | null;
   intentWriteMs: number | null;

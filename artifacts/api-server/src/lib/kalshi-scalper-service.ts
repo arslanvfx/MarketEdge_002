@@ -47,6 +47,7 @@ import {
   selectScalpSide,
   isInFinalWindow,
   resolveTimingPhase,
+  scalpGuardObservationStartMs,
   secondsUntilEligible,
   computeLimitPrice,
   winningCostFromFill,
@@ -542,6 +543,7 @@ interface MutableScalpAttemptLatency {
   identityRefreshMs: number | null;
   quoteRefreshMs: number | null;
   parallelRefreshMs: number | null;
+  guardReadinessMs: number | null;
   finalRequoteMs: number | null;
   intentWriteMs: number | null;
   brokerSubmitMs: number | null;
@@ -574,6 +576,7 @@ function _beginAttemptLatency(
     identityRefreshMs: null,
     quoteRefreshMs: null,
     parallelRefreshMs: null,
+    guardReadinessMs: null,
     finalRequoteMs: null,
     intentWriteMs: null,
     brokerSubmitMs: null,
@@ -593,6 +596,7 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
     timing.queueWaitMs,
     timing.capClaimMs,
     timing.parallelRefreshMs,
+    timing.guardReadinessMs,
     timing.finalRequoteMs,
     timing.intentWriteMs,
     timing.brokerSubmitMs,
@@ -620,6 +624,7 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
     identityRefreshMs: timing.identityRefreshMs,
     quoteRefreshMs: timing.quoteRefreshMs,
     parallelRefreshMs: timing.parallelRefreshMs,
+    guardReadinessMs: timing.guardReadinessMs,
     finalRequoteMs: timing.finalRequoteMs,
     intentWriteMs: timing.intentWriteMs,
     brokerSubmitMs: timing.brokerSubmitMs,
@@ -1766,6 +1771,7 @@ interface Candidate {
   cachedNoAsk: number | null;
   side: "yes" | "no";
   winningAsk: number;
+  retryReady?: boolean;
 }
 
 function _findCandidates(wk: string): Candidate[] {
@@ -1811,6 +1817,7 @@ function _findCandidates(wk: string): Candidate[] {
       cachedNoAsk: noAsk,
       side: match.side,
       winningAsk: match.winningAsk,
+      retryReady: _nextAttemptAt.has(key),
     });
   }
 
@@ -2273,6 +2280,7 @@ async function _executeScalpAttempt(
   let identityRefreshMs: number | null = null;
   let quoteRefreshMs: number | null = null;
   let parallelRefreshMs: number | null = null;
+  let guardReadinessStartedAtMs: number | null = null;
 
   // NOTE: cap checks are NOT repeated here. They were performed atomically
   // inside claimReservationAndCap under the per-mode advisory lock, which
@@ -2286,6 +2294,14 @@ async function _executeScalpAttempt(
   // Helper: build base timing evidence from the close time at skip time.
   const _timingEvidence = (): ScalpSkipEvidence => {
     const nowMs = runtime.nowMs();
+    if (
+      latency
+      && guardReadinessStartedAtMs != null
+      && latency.guardReadinessMs == null
+    ) {
+      latency.guardReadinessMs =
+        Math.max(0, nowMs - guardReadinessStartedAtMs);
+    }
     const closeMs = new Date(closeTime).getTime();
     const secondsRemainingVal = Number.isFinite(closeMs)
       ? (closeMs - nowMs) / 1000
@@ -2383,6 +2399,7 @@ async function _executeScalpAttempt(
       : Promise.resolve({ ok: true as const, availableBalance: null }),
   ]);
   const concurrentFetchMs = runtime.nowMs() - concurrentFetchStartMs;
+  guardReadinessStartedAtMs = runtime.nowMs();
   identityRefreshMs = identityResult.latencyMs;
   quoteRefreshMs = orderbookResult.latencyMs;
   parallelRefreshMs = concurrentFetchMs;
@@ -2747,7 +2764,11 @@ async function _executeScalpAttempt(
     side: effectiveSide,
     nowMs,
     eligibilityStartMs:
-      Date.parse(snapshot.closeTime) - snapshot.finalWindowSeconds * 1_000,
+      scalpGuardObservationStartMs(
+        windowKey,
+        snapshot.closeTime,
+        snapshot.finalWindowSeconds,
+      ),
     consecutiveSeconds: snapshot.freefallConsecutiveSeconds,
     favorableTrendConfirmationEnabled:
       snapshot.favorableTrendConfirmationEnabled,
@@ -3053,6 +3074,10 @@ async function _executeScalpAttempt(
       }).catch((err) => logger.warn({ err, symbol }, "[kalshi-scalper] contrarian experiment evaluation failed"));
       return;
     }
+  }
+  if (latency) {
+    latency.guardReadinessMs =
+      runtime.nowMs() - guardReadinessStartedAtMs;
   }
   // ── Size the order STRICTLY within the durable reserved budget ─────────────
   // Principal plus the upward-rounded worst-case taker fee at the band-capped
@@ -4549,7 +4574,11 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
           nowMs: nowForStatus,
           directionEnabled: _config.freefallGuardEnabled,
           eligibilityStartMs:
-            Date.parse(closeTime!) - params.finalWindowSeconds * 1_000,
+            scalpGuardObservationStartMs(
+              wk,
+              closeTime!,
+              params.finalWindowSeconds,
+            ),
           consecutiveSeconds: _config.freefallConsecutiveSeconds,
           favorableTrendConfirmationEnabled:
             _config.favorableTrendConfirmationEnabled,

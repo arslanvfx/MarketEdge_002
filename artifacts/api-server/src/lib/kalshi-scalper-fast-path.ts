@@ -157,9 +157,11 @@ export function prioritizeScalpCandidates<T extends {
   symbol: string;
   closeTime: string;
   winningAsk: number;
+  retryReady?: boolean;
 }>(candidates: readonly T[]): T[] {
   return [...candidates].sort((a, b) => (
-    Date.parse(a.closeTime) - Date.parse(b.closeTime)
+    Number(Boolean(b.retryReady)) - Number(Boolean(a.retryReady))
+    || Date.parse(a.closeTime) - Date.parse(b.closeTime)
     || b.winningAsk - a.winningAsk
     || a.symbol.localeCompare(b.symbol)
   ));
@@ -223,6 +225,7 @@ const STAGES: ScalpLatencyStage[] = [
   "queue_wait",
   "cap_claim",
   "parallel_refresh",
+  "guard_readiness",
   "final_requote",
   "intent_write",
   "broker_submit",
@@ -232,13 +235,14 @@ const STAGES: ScalpLatencyStage[] = [
 export function findSlowestScalpLatencyStage(
   latency: Pick<
     ScalpAttemptLatency,
-    "queueWaitMs" | "capClaimMs" | "parallelRefreshMs" | "finalRequoteMs" | "intentWriteMs" | "brokerSubmitMs" | "decisionFinalizeMs"
+    "queueWaitMs" | "capClaimMs" | "parallelRefreshMs" | "guardReadinessMs" | "finalRequoteMs" | "intentWriteMs" | "brokerSubmitMs" | "decisionFinalizeMs"
   >,
 ): { stage: ScalpLatencyStage | null; latencyMs: number | null } {
   const values: Record<ScalpLatencyStage, number | null> = {
     queue_wait: latency.queueWaitMs,
     cap_claim: latency.capClaimMs,
     parallel_refresh: latency.parallelRefreshMs,
+    guard_readiness: latency.guardReadinessMs,
     final_requote: latency.finalRequoteMs,
     intent_write: latency.intentWriteMs,
     broker_submit: latency.brokerSubmitMs,
@@ -277,6 +281,7 @@ export function summarizeScalpAttemptLatencies(
           queue_wait: attempt.queueWaitMs,
           cap_claim: attempt.capClaimMs,
           parallel_refresh: attempt.parallelRefreshMs,
+          guard_readiness: attempt.guardReadinessMs,
           final_requote: attempt.finalRequoteMs,
           intent_write: attempt.intentWriteMs,
           broker_submit: attempt.brokerSubmitMs,

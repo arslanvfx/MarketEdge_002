@@ -19,6 +19,7 @@ import {
   classifyScalpFillAgainstBand,
   isInFinalWindow,
   resolveTimingPhase,
+  scalpGuardObservationStartMs,
   secondsUntilEligible,
   checkFreefallGuard,
   evaluateFreefallPreSubmitGuard,
@@ -648,6 +649,55 @@ describe("secondsUntilEligible", () => {
     assert.ok(result != null);
     // Allow ±1 s tolerance for timing jitter
     assert.ok(Math.abs(result - 60) <= 1, `expected ~60, got ${result}`);
+  });
+});
+
+describe("scalpGuardObservationStartMs", () => {
+  it("admits fresh preflight context before the final entry boundary", () => {
+    assert.equal(
+      scalpGuardObservationStartMs(
+        "2026-08-25T19:00",
+        "2026-08-25T19:15:00.000Z",
+        90,
+      ),
+      Date.parse("2026-08-25T19:10:30.000Z"),
+    );
+  });
+
+  it("never admits samples from the previous market window", () => {
+    assert.equal(
+      scalpGuardObservationStartMs(
+        "2026-08-25T19:00",
+        "2026-08-25T19:02:00.000Z",
+        90,
+      ),
+      Date.parse("2026-08-25T19:00:00.000Z"),
+    );
+  });
+
+  it("lets the first eligible tick use fresh same-window preflight cadence", () => {
+    const windowKey = "2026-08-25T19:00";
+    const closeTime = "2026-08-25T19:15:00.000Z";
+    const nowMs = Date.parse("2026-08-25T19:13:30.000Z");
+    const result = checkFreefallGuard({
+      samples: [4, 3, 2, 1, 0].map((secondsAgo) => ({
+        price: 100 + (4 - secondsAgo) * 0.01,
+        at: nowMs - secondsAgo * 1_000,
+      })),
+      side: "yes",
+      nowMs,
+      directionEnabled: true,
+      eligibilityStartMs: scalpGuardObservationStartMs(windowKey, closeTime, 90),
+      consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false,
+      targetPrice: 99,
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+    });
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.samplesUsed, 5);
   });
 });
 
@@ -3027,10 +3077,7 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(preflight, /getScalpCommittedTotals\(/);
     assert.match(preflight, /fetchKalshiTarget\(/);
     assert.match(preflight, /getBalance\(\)/);
-    assert.ok(
-      !/checkFreefallGuard\(/.test(preflight),
-      "direction streak must start at eligibility, not use earlier preflight samples",
-    );
+    assert.ok(!/checkFreefallGuard\(/.test(preflight), "preflight must never make an execution decision");
     assert.ok(!/claimReservationAndCap\(/.test(preflight), "preflight must not claim a reservation");
     assert.ok(!/insertScalpOrderIntent\(/.test(preflight), "preflight must not create an order intent");
     assert.ok(!/placeScalpOrderStrict\(/.test(preflight), "preflight must not submit an order");
@@ -3083,7 +3130,7 @@ describe("execution wiring (static source assertions)", () => {
     // It must use the pinned snapshot freefall config.
     assert.match(
       svc,
-      /eligibilityStartMs:[\s\S]*?snapshot\.finalWindowSeconds \* 1_000,[\s\S]*?consecutiveSeconds: snapshot\.freefallConsecutiveSeconds,[\s\S]*?rapidMoveEnabled: snapshot\.rapidMoveGuardEnabled/,
+      /eligibilityStartMs:[\s\S]*?scalpGuardObservationStartMs\([\s\S]*?windowKey,[\s\S]*?snapshot\.closeTime,[\s\S]*?snapshot\.finalWindowSeconds,[\s\S]*?\),[\s\S]*?consecutiveSeconds: snapshot\.freefallConsecutiveSeconds,[\s\S]*?rapidMoveEnabled: snapshot\.rapidMoveGuardEnabled/,
     );
     assert.match(
       svc,
@@ -3333,6 +3380,17 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(boundary, /fetchOrderbookPrices\(/);
     assert.match(boundary, /runtime\.collectPriceSample\(/);
     assert.match(boundary, /getBalance\(\)/);
+  });
+
+  it("records guard readiness for blocked attempts through skip timing evidence", () => {
+    assert.match(
+      svc,
+      /const _timingEvidence[\s\S]*?guardReadinessStartedAtMs != null[\s\S]*?latency\.guardReadinessMs[\s\S]*?nowMs - guardReadinessStartedAtMs/,
+    );
+    const proximitySkip = idx('"target proximity guard skip (final boundary)"');
+    const freefallSkip = idx('"freefall guard skip (final boundary)"');
+    assert.ok(svc.indexOf("..._timingEvidence()", proximitySkip) > proximitySkip);
+    assert.ok(svc.indexOf("..._timingEvidence()", freefallSkip) > freefallSkip);
   });
 
   it("confirmed zero fills schedule a bounded retry but confirmed fills terminate", () => {

@@ -125,6 +125,14 @@ describe("prioritizeScalpCandidates", () => {
     assert.deepEqual(candidates.map((candidate) => candidate.symbol), ["ETH", "BTC", "SOL"]);
     assert.equal(candidates.length, 3);
   });
+
+  it("gives a re-armed authenticated candidate the next bounded lane", () => {
+    const candidates = prioritizeScalpCandidates([
+      { symbol: "BTC", closeTime: "2026-08-23T12:15:00.000Z", winningAsk: 0.99 },
+      { symbol: "WTI", closeTime: "2026-08-23T12:15:00.000Z", winningAsk: 0.95, retryReady: true },
+    ]);
+    assert.deepEqual(candidates.map((candidate) => candidate.symbol), ["WTI", "BTC"]);
+  });
 });
 
 describe("buildScalpWindowFunnelReport", () => {
@@ -217,6 +225,7 @@ describe("Scalper latency summaries", () => {
       identityRefreshMs: 30,
       quoteRefreshMs: 40,
       parallelRefreshMs: 50,
+      guardReadinessMs: 15,
       finalRequoteMs: 25,
       intentWriteMs: null,
       brokerSubmitMs: null,
@@ -240,6 +249,7 @@ describe("Scalper latency summaries", () => {
         { stage: "queue_wait", sampleSize: 10, p50Ms: 10, p90Ms: 10, p99Ms: 10, maxMs: 10 },
         { stage: "cap_claim", sampleSize: 10, p50Ms: 20, p90Ms: 20, p99Ms: 20, maxMs: 20 },
         { stage: "parallel_refresh", sampleSize: 10, p50Ms: 50, p90Ms: 50, p99Ms: 50, maxMs: 50 },
+        { stage: "guard_readiness", sampleSize: 10, p50Ms: 15, p90Ms: 15, p99Ms: 15, maxMs: 15 },
         { stage: "final_requote", sampleSize: 10, p50Ms: 25, p90Ms: 25, p99Ms: 25, maxMs: 25 },
         { stage: "intent_write", sampleSize: 0, p50Ms: null, p90Ms: null, p99Ms: null, maxMs: null },
         { stage: "broker_submit", sampleSize: 0, p50Ms: null, p90Ms: null, p99Ms: null, maxMs: null },
@@ -255,6 +265,7 @@ describe("Scalper latency summaries", () => {
       queueWaitMs: 15,
       capClaimMs: 81,
       parallelRefreshMs: 40,
+      guardReadinessMs: 20,
       finalRequoteMs: 35,
       intentWriteMs: 6,
       brokerSubmitMs: 25,
