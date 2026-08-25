@@ -320,15 +320,15 @@ describe("real Scalper service Freefall boundary", () => {
     {
       side: "no" as const,
       adversePrices: [99, 99.01, 99.02, 99.01, 99.03],
-      reason: "coordinated_direction_clearance_safe_no",
+      reason: "coordinated_direction_clearance_requires_favorable_minimum_no",
     },
     {
       side: "yes" as const,
       adversePrices: [101, 100.99, 100.98, 100.99, 100.97],
-      reason: "coordinated_direction_clearance_safe_yes",
+      reason: "coordinated_direction_clearance_requires_favorable_minimum_yes",
     },
   ]) {
-    it(`submits a projected-safe weak ${scenario.side.toUpperCase()} adverse trend through the final live boundary`, async () => {
+    it(`blocks a projected-safe weak ${scenario.side.toUpperCase()} adverse trend at the final live boundary`, async () => {
       const result = await runControlledFreefallServiceExercise({
         side: scenario.side,
         targetProximityGuardEnabled: true,
@@ -344,18 +344,20 @@ describe("real Scalper service Freefall boundary", () => {
           brokerSubmissions: adverse?.brokerSubmissions,
         },
         {
-          state: "submitted",
-          reason: null,
-          intentWrites: 1,
-          brokerSubmissions: 1,
+          state: "skipped",
+          reason: `freefall_favorable_trend_not_confirmed_${scenario.side}`,
+          intentWrites: 0,
+          brokerSubmissions: 0,
         },
       );
-      const evidence = result.submittedEntryEvidences[0];
-      assert.ok(evidence, "first live intent must retain coordinated evidence");
-      assert.equal(evidence.side, scenario.side);
-      assert.equal(evidence.targetProximityGuardEnabled, true);
+      const evidence = result.skippedAttempts.find(
+        (attempt) =>
+          attempt.reason
+          === `freefall_favorable_trend_not_confirmed_${scenario.side}`,
+      )?.evidence;
+      assert.ok(evidence, "blocked attempt must retain coordinated evidence");
       assert.equal(evidence.coordinatedDirectionClearanceEnabled, true);
-      assert.equal(evidence.coordinatedDirectionClearanceApplied, true);
+      assert.equal(evidence.coordinatedDirectionClearanceApplied, false);
       assert.equal(evidence.coordinatedDirectionClearanceSafe, true);
       assert.equal(
         evidence.coordinatedDirectionClearanceReason,
@@ -403,19 +405,20 @@ describe("real Scalper service Freefall boundary", () => {
     assert.ok((blocked.evidence?.secondsRemaining ?? 0) > 0);
   });
 
-  it("stores the decisive post-intent projection used by a live submission", async () => {
+  it("stores the decisive post-intent favorable evidence used by a live submission", async () => {
     const result = await runControlledFreefallServiceExercise({
       side: "no",
       targetProximityGuardEnabled: true,
       coordinatedDirectionClearanceEnabled: true,
-      adversePrices: [99, 99.01, 99.02, 99.01, 99.03],
+      adversePrices: [99, 98.99, 98.98, 98.99, 98.97],
       intentWriteAdvanceMs: 1_000,
     });
     const adverse = result.steps.find((step) => step.label === "adverse");
     assert.equal(adverse?.state, "submitted");
     const evidence = result.submittedEntryEvidences[0];
     assert.ok(evidence);
-    assert.equal(evidence.coordinatedDirectionClearanceApplied, true);
+    assert.equal(evidence.coordinatedDirectionClearanceApplied, false);
+    assert.equal(evidence.favorableTrendConfirmed, true);
     assert.equal(evidence.secondsRemaining, 39);
     assert.equal(
       evidence.evaluatedAt,
@@ -424,13 +427,13 @@ describe("real Scalper service Freefall boundary", () => {
     );
   });
 
-  it("applies the same coordinated result at the final paper boundary", async () => {
+  it("applies the same meaningful favorable minimum at the final paper boundary", async () => {
     const result = await runControlledFreefallServiceExercise({
       mode: "paper",
       side: "yes",
       targetProximityGuardEnabled: true,
       coordinatedDirectionClearanceEnabled: true,
-      adversePrices: [101, 100.99, 100.98, 100.99, 100.97],
+      adversePrices: [101, 101.01, 101.02, 101.01, 101.03],
     });
     const adverse = result.steps.find((step) => step.label === "adverse");
     assert.equal(adverse?.state, "submitted");
@@ -440,11 +443,8 @@ describe("real Scalper service Freefall boundary", () => {
     const evidence = result.submittedEntryEvidences[0];
     assert.ok(evidence);
     assert.equal(evidence.side, "yes");
-    assert.equal(evidence.coordinatedDirectionClearanceApplied, true);
-    assert.equal(
-      evidence.coordinatedDirectionClearanceReason,
-      "coordinated_direction_clearance_safe_yes",
-    );
+    assert.equal(evidence.coordinatedDirectionClearanceApplied, false);
+    assert.equal(evidence.favorableTrendConfirmed, true);
   });
 
   it("copies final target distance into every retry intent and retains the newest snapshot", async () => {

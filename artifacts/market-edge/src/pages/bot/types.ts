@@ -621,6 +621,8 @@ export interface ScalpSkipEvidence {
   consecutiveWrongWayMoves?: number | null;
   consecutiveWrongWaySeconds?: number | null;
   directionalMovePct?: number | null;
+  favorableTrendMinimumPct?: number | null;
+  uniqueDirectionalSamples?: number | null;
   wrongWayResetCount?: number | null;
   lastWrongWayResetAt?: string | null;
   favorableTrendConfirmationEnabled?: boolean | null;
@@ -811,6 +813,8 @@ export interface EntryGuardEvidence {
   consecutiveWrongWayMoves: number | null;
   consecutiveWrongWaySeconds: number | null;
   directionalMovePct: number | null;
+  favorableTrendMinimumPct?: number | null;
+  uniqueDirectionalSamples?: number | null;
   favorableTrendConfirmed?: boolean | null;
   favorableTrendReason?: string | null;
   coordinatedDirectionClearanceApplied?: boolean;

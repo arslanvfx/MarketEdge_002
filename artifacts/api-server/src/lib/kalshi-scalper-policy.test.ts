@@ -896,7 +896,7 @@ describe("checkFreefallGuard", () => {
     assert.equal(result.favorableTrendConfirmed, false);
   });
 
-  it("optionally clears a slow NO rise when projection remains safely below target", () => {
+  it("does not let safe target projection override a slow NO rise", () => {
     const result = evaluate(
       makeSamples([109, 109.01, 109.02, 109.01, 109.03]),
       "no",
@@ -908,20 +908,20 @@ describe("checkFreefallGuard", () => {
       },
     );
     assert.equal(result.evaluable, true);
-    assert.equal(result.blocked, false);
+    assert.equal(result.blocked, true);
     assert.equal(result.favorableTrendBlocked, true);
-    assert.equal(result.coordinatedDirectionClearanceApplied, true);
+    assert.equal(result.coordinatedDirectionClearanceApplied, false);
     assert.equal(result.coordinatedDirectionClearanceSafe, true);
     assert.equal(
       result.coordinatedDirectionClearanceReason,
-      "coordinated_direction_clearance_safe_no",
+      "coordinated_direction_clearance_requires_favorable_minimum_no",
     );
     assert.ok((result.adversePacePctPerSecond ?? 0) > 0);
     assert.ok((result.projectedPrice ?? Infinity) < 110);
     assert.ok((result.projectedDistancePct ?? 0) > 0.05);
   });
 
-  it("optionally clears a slow YES fall when projection remains safely above target", () => {
+  it("does not let safe target projection override a slow YES fall", () => {
     const result = evaluate(
       makeSamples([101, 100.99, 100.98, 100.99, 100.97]),
       "yes",
@@ -933,13 +933,13 @@ describe("checkFreefallGuard", () => {
       },
     );
     assert.equal(result.evaluable, true);
-    assert.equal(result.blocked, false);
+    assert.equal(result.blocked, true);
     assert.equal(result.favorableTrendBlocked, true);
-    assert.equal(result.coordinatedDirectionClearanceApplied, true);
+    assert.equal(result.coordinatedDirectionClearanceApplied, false);
     assert.equal(result.coordinatedDirectionClearanceSafe, true);
     assert.equal(
       result.coordinatedDirectionClearanceReason,
-      "coordinated_direction_clearance_safe_yes",
+      "coordinated_direction_clearance_requires_favorable_minimum_yes",
     );
     assert.ok((result.adversePacePctPerSecond ?? 0) > 0);
     assert.ok((result.projectedPrice ?? 0) > 100);
@@ -1139,6 +1139,59 @@ describe("checkFreefallGuard", () => {
     assert.equal(no.reason, "freefall_favorable_trend_not_confirmed_no");
     assert.equal(yes.favorableTrendConfirmed, false);
     assert.equal(no.favorableTrendConfirmed, false);
+  });
+
+  it("blocks the production-shaped SILVER tiny rebound as quote noise", () => {
+    const result = evaluate(
+      makeSamples([67.644, 67.644, 67.644, 67.644, 67.64, 67.64402]),
+      "yes",
+      {
+        targetPrice: 67.541,
+        consecutiveSeconds: 4,
+        coordinatedDirectionClearanceEnabled: true,
+        targetProximityGuardEnabled: true,
+        targetProximityThresholdPct: 0.05,
+        secondsRemaining: 62,
+      },
+    );
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.reason, "freefall_favorable_trend_not_confirmed_yes");
+    assert.equal(result.favorableTrendConfirmed, false);
+    assert.equal(result.coordinatedDirectionClearanceApplied, false);
+    assert.ok(
+      result.directionalMovePct < result.favorableTrendMinimumPct,
+      "microscopic positive movement must stay below the confirmation floor",
+    );
+    assert.equal(result.uniqueDirectionalSamples, 2);
+  });
+
+  it("does not count repeated identical prices as favorable confirmation", () => {
+    const result = evaluate(
+      makeSamples([101, 101, 101, 101, 101]),
+      "yes",
+    );
+    assert.equal(result.evaluable, true);
+    assert.equal(result.blocked, true);
+    assert.equal(result.favorableTrendConfirmed, false);
+    assert.equal(result.uniqueDirectionalSamples, 1);
+  });
+
+  it("allows meaningful favorable movement symmetrically for YES and NO", () => {
+    const yes = evaluate(
+      makeSamples([101, 101.001, 101.003, 101.006, 101.01]),
+      "yes",
+    );
+    const no = evaluate(
+      makeSamples([99, 98.999, 98.997, 98.994, 98.99]),
+      "no",
+    );
+    assert.equal(yes.blocked, false);
+    assert.equal(no.blocked, false);
+    assert.equal(yes.favorableTrendConfirmed, true);
+    assert.equal(no.favorableTrendConfirmed, true);
+    assert.ok(yes.directionalMovePct >= yes.favorableTrendMinimumPct);
+    assert.ok(-no.directionalMovePct >= no.favorableTrendMinimumPct);
   });
 
   it("preserves legacy strict-streak behavior when confirmation is disabled", () => {

@@ -22,7 +22,7 @@ import {
   reconcileScalpOrderStrict,
   type ScalpReconciliationResult,
 } from "./kalshi-scalper-exchange.ts";
-import { getTicker } from "./crypto-data.ts";
+import { getTicker, getTickerFresh } from "./crypto-data.ts";
 import type {
   ScalpAttemptLatency,
   ScalpConfig,
@@ -498,7 +498,17 @@ const _authoritativeSampleQueue: PriceSampleJob[] = [];
 const _backgroundSampleQueue: PriceSampleJob[] = [];
 let _activePriceSampleFetches = 0;
 let _activeBackgroundPriceSampleFetches = 0;
-let _fetchScalpUnderlyingPrice: typeof getTicker = getTicker;
+type ScalpUnderlyingPriceFetcher = (
+  product: string,
+  priority: PriceSamplePriority,
+) => Promise<number>;
+// Only the execution-critical authoritative lane bypasses the shared cache.
+// Shadow/Contrarian/background warm-up keeps its existing cached fetch policy.
+let _fetchScalpUnderlyingPrice: ScalpUnderlyingPriceFetcher =
+  (product, priority) =>
+    priority === "authoritative"
+      ? getTickerFresh(product)
+      : getTicker(product);
 
 interface MutableScalpAttemptLatency {
   mode: ScalpMode;
@@ -1182,7 +1192,7 @@ function _drainPriceSampleQueue(): void {
     void (async () => {
       try {
         // getTicker has its own AbortController-backed request timeout.
-        const price = await _fetchScalpUnderlyingPrice(job.product);
+        const price = await _fetchScalpUnderlyingPrice(job.product, job.priority);
         if (!Number.isFinite(price) || price <= 0) return false;
         const samples = _priceSamples.get(job.symbol) ?? [];
         samples.push({ price, at: Date.now() });
@@ -2638,6 +2648,10 @@ async function _executeScalpAttempt(
           consecutiveWrongWaySeconds: ffFinal?.consecutiveWrongWaySeconds ?? null,
           favorableTrendConfirmed: ffFinal?.favorableTrendConfirmed ?? null,
           favorableTrendReason: ffFinal?.favorableTrendReason ?? null,
+          favorableTrendMinimumPct:
+            ffFinal?.favorableTrendMinimumPct ?? null,
+          uniqueDirectionalSamples:
+            ffFinal?.uniqueDirectionalSamples ?? null,
           coordinatedDirectionClearanceEnabled:
             snapshot.coordinatedDirectionClearanceEnabled,
           coordinatedDirectionClearanceApplied:
@@ -2694,6 +2708,10 @@ async function _executeScalpAttempt(
           && snapshot.favorableTrendConfirmationEnabled,
         favorableTrendConfirmed: ffFinal?.favorableTrendConfirmed ?? null,
         favorableTrendReason: ffFinal?.favorableTrendReason ?? null,
+        favorableTrendMinimumPct:
+          ffFinal?.favorableTrendMinimumPct ?? null,
+        uniqueDirectionalSamples:
+          ffFinal?.uniqueDirectionalSamples ?? null,
         coordinatedDirectionClearanceEnabled:
           snapshot.coordinatedDirectionClearanceEnabled,
         coordinatedDirectionClearanceApplied:
@@ -3254,6 +3272,10 @@ async function _executeScalpAttempt(
       && snapshot.favorableTrendConfirmationEnabled
         ? finalFreefallResult?.favorableTrendReason ?? null
         : null,
+    favorableTrendMinimumPct:
+      finalFreefallResult?.favorableTrendMinimumPct ?? null,
+    uniqueDirectionalSamples:
+      finalFreefallResult?.uniqueDirectionalSamples ?? null,
     coordinatedDirectionClearanceApplied:
       finalFreefallResult?.coordinatedDirectionClearanceApplied ?? false,
     coordinatedDirectionClearanceSafe:

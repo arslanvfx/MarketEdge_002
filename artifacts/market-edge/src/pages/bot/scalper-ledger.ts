@@ -231,13 +231,19 @@ export function describeEntryGuardEvidence(ege: EntryGuardEvidence): string[] {
     const moveText = ege.directionalMovePct == null
       ? "net movement unavailable"
       : `${ege.directionalMovePct >= 0 ? "+" : ""}${ege.directionalMovePct.toFixed(3)}% net`;
+    const minimumText = ege.favorableTrendMinimumPct == null
+      ? ""
+      : ` · ${ege.favorableTrendMinimumPct.toFixed(5)}% minimum`;
+    const uniqueText = ege.uniqueDirectionalSamples == null
+      ? ""
+      : ` · ${ege.uniqueDirectionalSamples} unique price updates`;
     if (ege.favorableTrendConfirmed === true) {
       lines.push(
-        `Favorable-trend confirmation: ${moveText} — net favorable trend confirmed for ${ege.side.toUpperCase()} — CLEAR`,
+        `Favorable-trend confirmation: ${moveText}${minimumText}${uniqueText} — net favorable trend confirmed for ${ege.side.toUpperCase()} — CLEAR`,
       );
     } else {
       lines.push(
-        `Favorable-trend confirmation: ${moveText} — ${ege.favorableTrendReason ?? "confirmation unavailable"}`,
+        `Favorable-trend confirmation: ${moveText}${minimumText}${uniqueText} — ${ege.favorableTrendReason ?? "confirmation unavailable"}`,
       );
     }
     const targetDirection = ege.side === "yes" ? "above" : "below";
@@ -406,7 +412,17 @@ export function describeScalperEvidence(attempt: ScalperAttempt): string[] {
     const reason = evidence.favorableTrendReason
       ? ` · ${describeScalperReason(evidence.favorableTrendReason)}`
       : "";
-    details.push(`Full-window favorable trend ${disposition}: ${movement}${reason}`);
+    const minimum = evidence.favorableTrendMinimumPct == null
+      ? ""
+      : ` · ${evidence.favorableTrendMinimumPct.toFixed(5)}% minimum`;
+    const unique = evidence.uniqueDirectionalSamples == null
+      ? ""
+      : ` · ${evidence.uniqueDirectionalSamples} unique price update${
+          evidence.uniqueDirectionalSamples === 1 ? "" : "s"
+        }`;
+    details.push(
+      `Full-window favorable trend ${disposition}: ${movement}${minimum}${unique}${reason}`,
+    );
     const targetDirection = evidence.protectedSide === "no" ? "below" : "above";
     if (evidence.targetSideWindowConfirmed != null) {
       const targetDisposition = evidence.targetSideWindowConfirmed

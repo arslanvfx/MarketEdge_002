@@ -548,6 +548,10 @@ export interface FreefallGuardResult {
   requiredConsecutiveMoves: number;
   observedSpanMs: number;
   directionalMovePct: number;
+  /** Absolute side-aware displacement required for favorable confirmation. */
+  favorableTrendMinimumPct: number;
+  /** Number of distinct price updates available to the directional guard. */
+  uniqueDirectionalSamples: number;
   /** True when the complete direction window moved away from the target. */
   favorableTrendConfirmed: boolean | null;
   /** True when the enabled complete-window confirmation rejected the entry. */
@@ -596,6 +600,13 @@ export interface FreefallPreSubmitDecision {
 export const FREEFALL_MAX_SAMPLE_AGE_MS = 2_000;
 export const FREEFALL_MIN_SAMPLE_INTERVAL_MS = 700;
 export const FREEFALL_MAX_SAMPLE_INTERVAL_MS = 1_800;
+/**
+ * A favorable endpoint move must clear ordinary quote noise. This is separate
+ * from the rapid-move threshold: it proves direction rather than limiting
+ * speed. 0.00005% is 0.5 ppm: above the incident's +0.00003% endpoint
+ * noise, while production replay preserves meaningful low-volatility updates.
+ */
+export const FAVORABLE_TREND_MIN_MOVE_PCT = 0.00005;
 
 export interface FreefallGuardInput {
   samples: FreefallSample[];
@@ -729,6 +740,8 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     requiredConsecutiveMoves: requiredMoves,
     observedSpanMs: 0,
     directionalMovePct: 0,
+    favorableTrendMinimumPct: FAVORABLE_TREND_MIN_MOVE_PCT,
+    uniqueDirectionalSamples: 0,
     favorableTrendConfirmed: null,
     favorableTrendBlocked: false,
     favorableTrendReason: null,
@@ -835,6 +848,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   }
 
   const directionSamples = directional?.ok ? directional.samples : [newest];
+  const uniqueDirectionalSamples = new Set(
+    directionSamples.map((sample) => sample.price),
+  ).size;
   const directionOldest = directionSamples[0];
   const directionNewest = directionSamples[directionSamples.length - 1];
   const directionObservedSpanMs =
@@ -901,8 +917,13 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     : null;
   const wrongTargetSide =
     latestWrongTargetSide || targetSideViolation != null;
+  const favorableDirectionalMovePct =
+    input.side === "yes" ? priceChangePct : -priceChangePct;
   const favorableTrendConfirmed = favorableTrendConfirmationEnabled
-    ? (input.side === "yes" ? priceChangePct > 0 : priceChangePct < 0)
+    ? (
+      uniqueDirectionalSamples >= 2
+      && favorableDirectionalMovePct >= FAVORABLE_TREND_MIN_MOVE_PCT
+    )
     : null;
   const favorableTrendBlocked =
     favorableTrendConfirmationEnabled && favorableTrendConfirmed !== true;
@@ -1010,23 +1031,22 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       coordinatedDirectionClearanceReason =
         "coordinated_direction_clearance_unavailable";
     } else {
-      coordinatedDirectionClearanceSafe =
-        projectedDistancePct! > minimumPct!;
-      coordinatedDirectionClearanceApplied =
-        coordinatedDirectionClearanceSafe;
+      coordinatedDirectionClearanceSafe = projectedDistancePct! > minimumPct!;
+      // Target distance may be retained as diagnostic evidence, but it may not
+      // override the hard requirement for meaningful favorable movement.
+      coordinatedDirectionClearanceApplied = false;
       coordinatedDirectionClearanceReason =
         coordinatedDirectionClearanceSafe
           ? (input.side === "yes"
-            ? "coordinated_direction_clearance_safe_yes"
-            : "coordinated_direction_clearance_safe_no")
+            ? "coordinated_direction_clearance_requires_favorable_minimum_yes"
+            : "coordinated_direction_clearance_requires_favorable_minimum_no")
           : (input.side === "yes"
             ? "coordinated_direction_clearance_projected_too_close_yes"
             : "coordinated_direction_clearance_projected_too_close_no");
     }
   }
 
-  const effectiveFavorableTrendBlocked =
-    favorableTrendBlocked && !coordinatedDirectionClearanceApplied;
+  const effectiveFavorableTrendBlocked = favorableTrendBlocked;
   const blocked =
     wrongTargetSide
     || directionalBlocked
@@ -1041,7 +1061,11 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
         ? "freefall_consecutive_falling"
         : "freefall_consecutive_rising")
       : effectiveFavorableTrendBlocked
-        ? coordinatedDirectionClearanceReason ?? favorableTrendReason
+        ? (
+          coordinatedDirectionClearanceSafe === false
+            ? coordinatedDirectionClearanceReason ?? favorableTrendReason
+            : favorableTrendReason
+        )
         : rapidMoveReason;
   const evaluatedSamplesByTimestamp = new Map<number, FreefallSample>();
   if (input.directionEnabled) {
@@ -1070,6 +1094,8 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     requiredConsecutiveMoves: requiredMoves,
     observedSpanMs,
     directionalMovePct: priceChangePct,
+    favorableTrendMinimumPct: FAVORABLE_TREND_MIN_MOVE_PCT,
+    uniqueDirectionalSamples,
     favorableTrendConfirmed,
     favorableTrendBlocked,
     favorableTrendReason,

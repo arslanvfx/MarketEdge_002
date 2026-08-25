@@ -155,6 +155,8 @@ export interface ScalpEntryGuardEvidence {
   consecutiveWrongWayMoves: number | null;
   consecutiveWrongWaySeconds: number | null;
   directionalMovePct: number | null;
+  favorableTrendMinimumPct?: number | null;
+  uniqueDirectionalSamples?: number | null;
   favorableTrendConfirmed?: boolean | null;
   favorableTrendReason?: string | null;
   coordinatedDirectionClearanceApplied?: boolean;
@@ -525,6 +527,8 @@ export interface ScalpSkipEvidence {
   consecutiveWrongWaySeconds?: number | null;
   /** Net signed move across the directional observation window. */
   directionalMovePct?: number | null;
+  favorableTrendMinimumPct?: number | null;
+  uniqueDirectionalSamples?: number | null;
   /** Number of interrupted wrong-way streaks inside the evaluated window. */
   wrongWayResetCount?: number | null;
   /** ISO timestamp of the latest wrong-way streak reset. */
