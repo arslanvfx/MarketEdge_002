@@ -4906,7 +4906,14 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
           consecutiveSeconds: _config.freefallConsecutiveSeconds,
           favorableTrendConfirmationEnabled:
             _config.favorableTrendConfirmationEnabled,
+          coordinatedDirectionClearanceEnabled:
+            _config.coordinatedDirectionClearanceEnabled,
           targetPrice: Number(cached?.value),
+          targetProximityGuardEnabled:
+            _config.targetProximityGuardEnabled,
+          targetProximityThresholdPct:
+            _config.targetProximityThresholdPct,
+          secondsRemaining,
           rapidMoveEnabled: _config.rapidMoveGuardEnabled,
           rapidMoveLookbackSeconds: _config.rapidMoveLookbackSeconds,
           rapidMoveThresholdPct: _config.rapidMoveThresholdPct,
@@ -4914,11 +4921,7 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         // Unavailable (not evaluable) is a fail-closed skip, NOT a clear signal:
         // surface it as blocked with its unavailability reason so the UI does not
         // imply the guard is passing when it actually cannot evaluate.
-        freefallBlocked =
-          !ff.evaluable
-          || ff.directionalBlocked
-          || ff.favorableTrendBlocked
-          || ff.wrongTargetSide;
+        freefallBlocked = !ff.evaluable || ff.blocked;
         freefallSamplesUsed = ff.samplesUsed;
         freefallRequiredSamples = ff.requiredSamples;
         freefallMovementPct = ff.evaluable ? ff.directionalMovePct : null;

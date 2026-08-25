@@ -543,6 +543,45 @@ describe("real Scalper service Freefall boundary", () => {
     });
   }
 
+  it("submits without waiting for oracle movement when a stable WTI-shaped window is safely beyond target", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      side: "yes",
+      targetProximityGuardEnabled: true,
+      coordinatedDirectionClearanceEnabled: true,
+      adversePrices: [
+        100.5,
+        100.5,
+        100.5,
+        100.5,
+        100.5,
+      ],
+    });
+    const stable = result.steps.find((step) => step.label === "adverse");
+    assert.deepEqual(
+      {
+        state: stable?.state,
+        reason: stable?.reason,
+        intentWrites: stable?.intentWrites,
+        brokerSubmissions: stable?.brokerSubmissions,
+      },
+      {
+        state: "submitted",
+        reason: null,
+        intentWrites: 1,
+        brokerSubmissions: 1,
+      },
+    );
+    const evidence = result.submittedEntryEvidences[0];
+    assert.ok(evidence);
+    assert.equal(evidence.favorableTrendConfirmed, false);
+    assert.equal(evidence.coordinatedDirectionClearanceSafe, true);
+    assert.equal(evidence.coordinatedDirectionClearanceApplied, true);
+    assert.equal(
+      evidence.coordinatedDirectionClearanceReason,
+      "coordinated_direction_clearance_stable_safe_yes",
+    );
+  });
+
   it("persists projected-too-close evidence when coordination rejects before intent creation", async () => {
     const result = await runControlledFreefallServiceExercise({
       side: "no",

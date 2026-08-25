@@ -1177,6 +1177,37 @@ describe("checkFreefallGuard", () => {
     assert.ok((result.projectedDistancePct ?? 0) > 0.05);
   });
 
+  it("clears a stable production-shaped WTI YES window when projected target distance stays safe", () => {
+    const result = evaluate(
+      makeSamples([
+        81.48339,
+        81.48339,
+        81.48339,
+        81.48339,
+        81.48339,
+      ]),
+      "yes",
+      {
+        targetPrice: 81.13,
+        coordinatedDirectionClearanceEnabled: true,
+        targetProximityGuardEnabled: true,
+        targetProximityThresholdPct: 0.04,
+        secondsRemaining: 77,
+      },
+    );
+    assert.equal(result.evaluable, true);
+    assert.equal(result.favorableTrendBlocked, true);
+    assert.equal(result.blocked, false);
+    assert.equal(result.reason, null);
+    assert.equal(result.coordinatedDirectionClearanceSafe, true);
+    assert.equal(result.coordinatedDirectionClearanceApplied, true);
+    assert.equal(
+      result.coordinatedDirectionClearanceReason,
+      "coordinated_direction_clearance_stable_safe_yes",
+    );
+    assert.ok((result.projectedDistancePct ?? 0) > 0.04);
+  });
+
   it("blocks mirrored adverse drifts projected to reach the target buffer", () => {
     const no = evaluate(
       makeSamples([109.85, 109.9, 109.95, 109.9, 109.94]),
@@ -3482,11 +3513,27 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(body, /return false;/);
   });
 
-  it("status builder treats unavailable freefall as blocked, not clear", () => {
+  it("status builder uses the canonical final freefall decision, including coordinated clearance", () => {
     assert.match(
       svc,
-      /freefallBlocked =[\s\S]*?!ff\.evaluable[\s\S]*?\|\| ff\.directionalBlocked[\s\S]*?\|\| ff\.wrongTargetSide/,
+      /freefallBlocked = !ff\.evaluable \|\| ff\.blocked/,
     );
+    const statusStart = idx("function _buildMarketStatuses(");
+    const statusEnd = svc.indexOf("return statuses;", statusStart);
+    const status = svc.slice(statusStart, statusEnd);
+    assert.match(
+      status,
+      /coordinatedDirectionClearanceEnabled:\s*_config\.coordinatedDirectionClearanceEnabled/,
+    );
+    assert.match(
+      status,
+      /targetProximityGuardEnabled:\s*_config\.targetProximityGuardEnabled/,
+    );
+    assert.match(
+      status,
+      /targetProximityThresholdPct:\s*_config\.targetProximityThresholdPct/,
+    );
+    assert.match(status, /secondsRemaining,/);
   });
 
   // ── Route wiring: strict parse + pass parsed value (never raw body) ─────────

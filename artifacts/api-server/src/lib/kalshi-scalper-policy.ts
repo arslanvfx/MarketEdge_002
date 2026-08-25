@@ -1233,6 +1233,7 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     && favorableTrendBlocked
     && !wrongTargetSide
     && !directionalBlocked
+    && !adverseExcursionBlocked
     && !rapidMoveBlocked
   ) {
     const targetGuardEnabled = input.targetProximityGuardEnabled ?? false;
@@ -1254,11 +1255,21 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
         "coordinated_direction_clearance_unavailable";
     } else {
       coordinatedDirectionClearanceSafe = projectedDistancePct! > minimumPct!;
-      // Target distance may be retained as diagnostic evidence, but it may not
-      // override the hard requirement for meaningful favorable movement.
-      coordinatedDirectionClearanceApplied = false;
-      coordinatedDirectionClearanceReason =
-        coordinatedDirectionClearanceSafe
+      // A genuinely stable target-side window is safe to clear when its
+      // projected distance remains beyond the mandatory proximity threshold.
+      // Keep this deliberately narrow: any adverse tick/reset still requires
+      // the normal meaningful favorable movement confirmation.
+      const stableTargetSideWindow =
+        endpointAdverseMovePct === 0
+        && consecutiveWrongWayMoves === 0
+        && wrongWayResetCount === 0;
+      coordinatedDirectionClearanceApplied =
+        coordinatedDirectionClearanceSafe && stableTargetSideWindow;
+      coordinatedDirectionClearanceReason = coordinatedDirectionClearanceApplied
+        ? (input.side === "yes"
+          ? "coordinated_direction_clearance_stable_safe_yes"
+          : "coordinated_direction_clearance_stable_safe_no")
+        : coordinatedDirectionClearanceSafe
           ? (input.side === "yes"
             ? "coordinated_direction_clearance_requires_favorable_minimum_yes"
             : "coordinated_direction_clearance_requires_favorable_minimum_no")
@@ -1268,7 +1279,8 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     }
   }
 
-  const effectiveFavorableTrendBlocked = favorableTrendBlocked;
+  const effectiveFavorableTrendBlocked =
+    favorableTrendBlocked && !coordinatedDirectionClearanceApplied;
   const blocked =
     wrongTargetSide
     || directionalBlocked
