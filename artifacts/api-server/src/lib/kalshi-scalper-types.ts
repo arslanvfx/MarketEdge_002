@@ -303,8 +303,13 @@ export interface ScalpPerformance {
 /** Durable stages recorded for a symbol/window without changing execution policy. */
 export type ScalpFunnelEventStage =
   | "candidate"
+  | "preparation_started"
+  | "claim_acquired"
   | "authenticated_eligible"
-  | "final_quote_loss";
+  | "final_quote_loss"
+  | "guard_rejected"
+  | "intent_persisted"
+  | "broker_request_started";
 
 /**
  * A read-only window-level view of the Scalper execution funnel. Counts are
@@ -314,8 +319,13 @@ export type ScalpFunnelEventStage =
 export interface ScalpWindowFunnel {
   windowKey: string;
   candidateSymbols: number;
+  preparationStarted: number;
+  claimsAcquired: number;
   eligibleQuotes: number;
   finalQuoteLoss: number;
+  guardRejected: number;
+  intentsPersisted: number;
+  brokerRequestsStarted: number;
   safetyBlocks: number;
   submissions: number;
   zeroFills: number;
@@ -453,6 +463,9 @@ export interface ScalpShadowStudyReport {
 export type ScalpLatencyStage =
   | "queue_wait"
   | "cap_claim"
+  | "identity_refresh"
+  | "routed_balance"
+  | "authenticated_quote"
   | "parallel_refresh"
   | "guard_readiness"
   | "final_requote"
@@ -474,6 +487,7 @@ export interface ScalpAttemptLatency {
   queueWaitMs: number | null;
   capClaimMs: number | null;
   identityRefreshMs: number | null;
+  routedBalanceMs: number | null;
   quoteRefreshMs: number | null;
   parallelRefreshMs: number | null;
   /** Guard evaluation after mandatory parallel refreshes are available. */
@@ -482,6 +496,8 @@ export interface ScalpAttemptLatency {
   finalRequoteMs: number | null;
   intentWriteMs: number | null;
   brokerSubmitMs: number | null;
+  /** Detection-to-broker-call expression; excludes Kalshi response time. */
+  candidateToBrokerRequestMs: number | null;
   /** Remaining guard evaluation + durable outcome work not covered above. */
   decisionFinalizeMs: number | null;
   slowestStage: ScalpLatencyStage | null;
@@ -493,6 +509,7 @@ export interface ScalpLatencyStageSummary {
   sampleSize: number;
   p50Ms: number | null;
   p90Ms: number | null;
+  p95Ms: number | null;
   p99Ms: number | null;
   maxMs: number | null;
 }
@@ -501,6 +518,7 @@ export interface ScalpLatencySummary {
   sampleSize: number;
   p50Ms: number | null;
   p90Ms: number | null;
+  p95Ms: number | null;
   p99Ms: number | null;
   maxMs: number | null;
   /** Percentiles for the serial stages that make up the protected attempt. */
@@ -508,6 +526,11 @@ export interface ScalpLatencySummary {
   /** Highest p90 stage; this is the first local bottleneck to investigate. */
   dominantStage: ScalpLatencyStage | null;
   dominantStageP90Ms: number | null;
+  /** Placement-critical detection-to-POST-start percentiles. */
+  brokerRequestSampleSize: number;
+  brokerRequestStartP50Ms: number | null;
+  brokerRequestStartP95Ms: number | null;
+  brokerRequestStartP99Ms: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -646,6 +669,8 @@ export interface ScalpSkipEvidence {
   identityRefreshMs?: number | null;
   /** Duration of the authenticated orderbook request. */
   quoteRefreshMs?: number | null;
+  /** Duration of the exact exchange-scoped balance request after identity. */
+  routedBalanceMs?: number | null;
   /** Wall time for all concurrent final refreshes. */
   parallelRefreshMs?: number | null;
   /** ISO timestamp when the skip was recorded. */

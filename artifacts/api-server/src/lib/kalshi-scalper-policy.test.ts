@@ -3063,6 +3063,27 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(unknownHandler > submitCall && unknownHandler < svc.indexOf("throw new OrderIntentExistsError", submitCatch) + 200);
   });
 
+  it("requires durable breaker persistence for ambiguous live exposure", () => {
+    const start = idx("async function _handleUnknownExposure");
+    const end = idx("async function _recoverSubmittingOrders");
+    const block = svc.slice(start, end > start ? end : start + 5_000);
+    assert.match(block, /await _tripCircuitBreaker\(reason,\s*true\)/);
+  });
+
+  it("durably latches restart-recovered ambiguous exposure before changing its order state", () => {
+    const start = idx("async function _recoverSubmittingOrders");
+    const end = idx("export function getScalpConfig");
+    const block = svc.slice(start, end);
+    const durableBreaker = block.indexOf(
+      'await _tripCircuitBreaker("submitting_order_found_after_restart", true)',
+    );
+    const finalize = block.indexOf("await finalizeScalpOrder(");
+    const reservation = block.indexOf("await updateReservationStatus(");
+    assert.ok(durableBreaker >= 0);
+    assert.ok(durableBreaker < finalize);
+    assert.ok(durableBreaker < reservation);
+  });
+
   it("builds the pinned snapshot and reserves snapshot.budgetDollars", () => {
     assert.ok(idx("buildExecutionRiskSnapshot(") >= 0);
     // claim reserves the snapshot budget + snapshot caps
@@ -3077,7 +3098,8 @@ describe("execution wiring (static source assertions)", () => {
     const preflight = svc.slice(start, end);
     assert.match(preflight, /getScalpCommittedTotals\(/);
     assert.match(preflight, /fetchKalshiTarget\(/);
-    assert.match(preflight, /getBalance\(\)/);
+    assert.match(preflight, /getBalance\(refreshed\.exchangeIndex!\)/);
+    assert.match(preflight, /_collectPriceSample\([\s\S]*?"authoritative"/);
     assert.ok(!/checkFreefallGuard\(/.test(preflight), "preflight must never make an execution decision");
     assert.ok(!/claimReservationAndCap\(/.test(preflight), "preflight must not claim a reservation");
     assert.ok(!/insertScalpOrderIntent\(/.test(preflight), "preflight must not create an order intent");
@@ -3230,8 +3252,8 @@ describe("execution wiring (static source assertions)", () => {
     const decl = svc.indexOf("function _finalRiskValidationSync(");
     assert.ok(decl >= 0, "sync helper must exist");
     assert.ok(!/async function _finalRiskValidationSync/.test(svc), "helper must NOT be async");
-    // Extract the helper body up to _executeScalpAttempt and assert no `await`.
-    const bodyEnd = svc.indexOf("async function _executeScalpAttempt", decl);
+    // Extract only the helper declaration, not later async readiness helpers.
+    const bodyEnd = svc.indexOf("interface ScalpAttemptRuntime", decl);
     const body = svc.slice(decl, bodyEnd);
     assert.ok(!/\bawait\b/.test(body), "sync final-validation helper must contain no await");
   });
@@ -3352,9 +3374,10 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(finalFf >= 0 && place >= 0 && intent >= 0);
     // The authoritative fresh sample is awaited in the concurrent readiness
     // batch, then the shared production decision receives that exact result.
+    const readinessStart = idx("function _startScalpReadiness");
     const executeStart = idx("async function _executeScalpAttempt");
-    const parallelBoundary = svc.slice(executeStart, finalFf);
-    assert.match(parallelBoundary, /await Promise\.all\(\[[\s\S]*?runtime\.collectPriceSample\(/);
+    const parallelBoundary = svc.slice(readinessStart, executeStart);
+    assert.match(parallelBoundary, /Promise\.all\(\[[\s\S]*?runtime\.collectPriceSample\(/);
     const block = svc.slice(finalFf, idx("Size the order STRICTLY"));
     assert.match(block, /evaluateFreefallPreSubmitGuard\(\{[\s\S]*?freshSampleSucceeded: authoritativeFreshSampleSucceeded/);
     // Must NOT swallow the final fetch with a silent .catch.
@@ -3373,10 +3396,12 @@ describe("execution wiring (static source assertions)", () => {
   });
 
   it("overlaps quote and Freefall readiness while checking the routed exchange balance after identity", () => {
+    const readinessStart = idx("function _startScalpReadiness");
     const executeStart = idx("async function _executeScalpAttempt");
     const finalFf = idx("FINAL FREEFALL GUARD");
-    const boundary = svc.slice(executeStart, finalFf);
-    assert.match(boundary, /await Promise\.all\(\[/);
+    const boundary = svc.slice(readinessStart, finalFf);
+    assert.ok(readinessStart >= 0 && readinessStart < executeStart);
+    assert.match(boundary, /Promise\.all\(\[/);
     assert.match(boundary, /fetchKalshiTarget\(/);
     assert.match(boundary, /fetchOrderbookPrices\(/);
     assert.match(boundary, /runtime\.collectPriceSample\(/);

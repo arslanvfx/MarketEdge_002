@@ -75,7 +75,11 @@ function formatScalperLatencyStage(stage: string | null): string {
   const labels: Record<string, string> = {
     queue_wait: "Candidate queue",
     cap_claim: "Cap reservation",
+    identity_refresh: "Market identity",
+    routed_balance: "Routed balance",
+    authenticated_quote: "Authenticated quote",
     parallel_refresh: "Identity / quote / balance refresh",
+    guard_readiness: "Guard readiness",
     final_requote: "Final authenticated quote",
     intent_write: "Durable intent",
     broker_submit: "Kalshi submit",
@@ -1212,7 +1216,16 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
               {statusData.latency.sampleSize > 0 ? (
                 <>
                   <span>p50 {formatScalperLatency(statusData.latency.p50Ms)}</span>
-                  <span>p90 {formatScalperLatency(statusData.latency.p90Ms)}</span>
+                  <span>p95 {formatScalperLatency(statusData.latency.p95Ms)}</span>
+                  {statusData.latency.brokerRequestSampleSize > 0 && (
+                    <span className={
+                      (statusData.latency.brokerRequestStartP95Ms ?? 0) < 1_000
+                        ? "text-emerald-300"
+                        : "text-red-300 font-bold"
+                    }>
+                      Candidate→POST p95 {formatScalperLatency(statusData.latency.brokerRequestStartP95Ms)}
+                    </span>
+                  )}
                   <span>
                     Bottleneck: {formatScalperLatencyStage(statusData.latency.dominantStage)}{" "}
                     {formatScalperLatency(statusData.latency.dominantStageP90Ms)} p90
@@ -1241,7 +1254,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                     .map((stage) => (
                       <span key={stage.stage}>
                         {formatScalperLatencyStage(stage.stage)}: p50 {formatScalperLatency(stage.p50Ms)}
-                        {" · "}p90 {formatScalperLatency(stage.p90Ms)}
+                        {" · "}p95 {formatScalperLatency(stage.p95Ms)}
                       </span>
                     ))}
                 </div>
@@ -1997,8 +2010,13 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                     && window.confirmedFills <= funnelData.targetMaxFills;
                   const stages = [
                     ["Considered", window.candidateSymbols],
+                    ["Prepared", window.preparationStarted],
+                    ["Claimed", window.claimsAcquired],
                     ["Eligible", window.eligibleQuotes],
                     ["Quote loss", window.finalQuoteLoss],
+                    ["Guard rejected", window.guardRejected],
+                    ["Intent saved", window.intentsPersisted],
+                    ["Broker started", window.brokerRequestsStarted],
                     ["Safety blocks", window.safetyBlocks],
                     ["Submitted", window.submissions],
                     ["Zero fills", window.zeroFills],

@@ -1243,8 +1243,13 @@ export async function getScalpWindowFunnelCounters(
        event_totals AS (
          SELECT window_key,
                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'candidate')::int AS candidate_symbols,
+                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'preparation_started')::int AS preparation_started,
+                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'claim_acquired')::int AS claims_acquired,
                  COUNT(DISTINCT symbol) FILTER (WHERE stage = 'authenticated_eligible')::int AS eligible_quotes,
                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'final_quote_loss')::int AS final_quote_loss,
+                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'guard_rejected')::int AS guard_rejected,
+                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'intent_persisted')::int AS intents_persisted,
+                 COUNT(DISTINCT symbol) FILTER (WHERE stage = 'broker_request_started')::int AS broker_requests_started,
                 MAX(created_at) AS last_activity_at
            FROM kalshi_scalp_funnel_events
           WHERE mode = $1
@@ -1266,8 +1271,13 @@ export async function getScalpWindowFunnelCounters(
        )
        SELECT w.window_key,
               GREATEST(COALESCE(e.candidate_symbols, 0), COALESCE(r.reservation_symbols, 0))::int AS candidate_symbols,
+               COALESCE(e.preparation_started, 0)::int AS preparation_started,
+               COALESCE(e.claims_acquired, 0)::int AS claims_acquired,
                COALESCE(e.eligible_quotes, 0)::int AS eligible_quotes,
               COALESCE(e.final_quote_loss, 0)::int AS final_quote_loss,
+               COALESCE(e.guard_rejected, 0)::int AS guard_rejected,
+               COALESCE(e.intents_persisted, 0)::int AS intents_persisted,
+               COALESCE(e.broker_requests_started, 0)::int AS broker_requests_started,
               COALESCE(r.safety_blocks, 0)::int AS safety_blocks,
               COALESCE(o.submissions, 0)::int AS submissions,
               COALESCE(o.zero_fills, 0)::int AS zero_fills,
@@ -1288,8 +1298,13 @@ export async function getScalpWindowFunnelCounters(
     return res.rows.map((row) => ({
       windowKey: String(row["window_key"]),
       candidateSymbols: Number(row["candidate_symbols"] ?? 0),
+      preparationStarted: Number(row["preparation_started"] ?? 0),
+      claimsAcquired: Number(row["claims_acquired"] ?? 0),
       eligibleQuotes: Number(row["eligible_quotes"] ?? 0),
       finalQuoteLoss: Number(row["final_quote_loss"] ?? 0),
+      guardRejected: Number(row["guard_rejected"] ?? 0),
+      intentsPersisted: Number(row["intents_persisted"] ?? 0),
+      brokerRequestsStarted: Number(row["broker_requests_started"] ?? 0),
       safetyBlocks: Number(row["safety_blocks"] ?? 0),
       submissions: Number(row["submissions"] ?? 0),
       zeroFills: Number(row["zero_fills"] ?? 0),

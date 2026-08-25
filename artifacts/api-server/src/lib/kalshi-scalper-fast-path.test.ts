@@ -140,8 +140,13 @@ describe("buildScalpWindowFunnelReport", () => {
     const report = buildScalpWindowFunnelReport("live", [{
       windowKey: "W1",
       candidateSymbols: 3,
+      preparationStarted: 3,
+      claimsAcquired: 2,
       eligibleQuotes: 2,
       finalQuoteLoss: 1,
+      guardRejected: 0,
+      intentsPersisted: 2,
+      brokerRequestsStarted: 2,
       safetyBlocks: 0,
       submissions: 2,
       zeroFills: 1,
@@ -159,8 +164,13 @@ describe("buildScalpWindowFunnelReport", () => {
     const report = buildScalpWindowFunnelReport("paper", [{
       windowKey: "W2",
       candidateSymbols: 2,
+      preparationStarted: 2,
+      claimsAcquired: 1,
       eligibleQuotes: 2,
       finalQuoteLoss: 0,
+      guardRejected: 1,
+      intentsPersisted: 1,
+      brokerRequestsStarted: 1,
       safetyBlocks: 1,
       submissions: 1,
       zeroFills: 1,
@@ -223,12 +233,14 @@ describe("Scalper latency summaries", () => {
       queueWaitMs: 10,
       capClaimMs: 20,
       identityRefreshMs: 30,
+      routedBalanceMs: 35,
       quoteRefreshMs: 40,
       parallelRefreshMs: 50,
       guardReadinessMs: 15,
       finalRequoteMs: 25,
       intentWriteMs: null,
       brokerSubmitMs: null,
+      candidateToBrokerRequestMs: null,
       decisionFinalizeMs: 10,
       slowestStage: "parallel_refresh",
       slowestStageMs: 50,
@@ -243,20 +255,28 @@ describe("Scalper latency summaries", () => {
       sampleSize: 10,
       p50Ms: 500,
       p90Ms: 900,
+      p95Ms: 10_000,
       p99Ms: 10_000,
       maxMs: 10_000,
       stages: [
-        { stage: "queue_wait", sampleSize: 10, p50Ms: 10, p90Ms: 10, p99Ms: 10, maxMs: 10 },
-        { stage: "cap_claim", sampleSize: 10, p50Ms: 20, p90Ms: 20, p99Ms: 20, maxMs: 20 },
-        { stage: "parallel_refresh", sampleSize: 10, p50Ms: 50, p90Ms: 50, p99Ms: 50, maxMs: 50 },
-        { stage: "guard_readiness", sampleSize: 10, p50Ms: 15, p90Ms: 15, p99Ms: 15, maxMs: 15 },
-        { stage: "final_requote", sampleSize: 10, p50Ms: 25, p90Ms: 25, p99Ms: 25, maxMs: 25 },
-        { stage: "intent_write", sampleSize: 0, p50Ms: null, p90Ms: null, p99Ms: null, maxMs: null },
-        { stage: "broker_submit", sampleSize: 0, p50Ms: null, p90Ms: null, p99Ms: null, maxMs: null },
-        { stage: "decision_finalize", sampleSize: 10, p50Ms: 10, p90Ms: 10, p99Ms: 10, maxMs: 10 },
+        { stage: "queue_wait", sampleSize: 10, p50Ms: 10, p90Ms: 10, p95Ms: 10, p99Ms: 10, maxMs: 10 },
+        { stage: "cap_claim", sampleSize: 10, p50Ms: 20, p90Ms: 20, p95Ms: 20, p99Ms: 20, maxMs: 20 },
+        { stage: "identity_refresh", sampleSize: 10, p50Ms: 30, p90Ms: 30, p95Ms: 30, p99Ms: 30, maxMs: 30 },
+        { stage: "routed_balance", sampleSize: 10, p50Ms: 35, p90Ms: 35, p95Ms: 35, p99Ms: 35, maxMs: 35 },
+        { stage: "authenticated_quote", sampleSize: 10, p50Ms: 40, p90Ms: 40, p95Ms: 40, p99Ms: 40, maxMs: 40 },
+        { stage: "parallel_refresh", sampleSize: 10, p50Ms: 50, p90Ms: 50, p95Ms: 50, p99Ms: 50, maxMs: 50 },
+        { stage: "guard_readiness", sampleSize: 10, p50Ms: 15, p90Ms: 15, p95Ms: 15, p99Ms: 15, maxMs: 15 },
+        { stage: "final_requote", sampleSize: 10, p50Ms: 25, p90Ms: 25, p95Ms: 25, p99Ms: 25, maxMs: 25 },
+        { stage: "intent_write", sampleSize: 0, p50Ms: null, p90Ms: null, p95Ms: null, p99Ms: null, maxMs: null },
+        { stage: "broker_submit", sampleSize: 0, p50Ms: null, p90Ms: null, p95Ms: null, p99Ms: null, maxMs: null },
+        { stage: "decision_finalize", sampleSize: 10, p50Ms: 10, p90Ms: 10, p95Ms: 10, p99Ms: 10, maxMs: 10 },
       ],
       dominantStage: "parallel_refresh",
       dominantStageP90Ms: 50,
+      brokerRequestSampleSize: 0,
+      brokerRequestStartP50Ms: null,
+      brokerRequestStartP95Ms: null,
+      brokerRequestStartP99Ms: null,
     });
   });
 
@@ -264,6 +284,9 @@ describe("Scalper latency summaries", () => {
     assert.deepEqual(findSlowestScalpLatencyStage({
       queueWaitMs: 15,
       capClaimMs: 81,
+      identityRefreshMs: 34,
+      routedBalanceMs: 22,
+      quoteRefreshMs: 28,
       parallelRefreshMs: 40,
       guardReadinessMs: 20,
       finalRequoteMs: 35,
@@ -271,6 +294,22 @@ describe("Scalper latency summaries", () => {
       brokerSubmitMs: 25,
       decisionFinalizeMs: 12,
     }), { stage: "cap_claim", latencyMs: 81 });
+  });
+
+  it("reports the controlled candidate-to-broker p95 against the one-second SLO", () => {
+    const attempts = [410, 455, 480, 505, 530, 570, 610, 675, 740, 920]
+      .map((candidateToBrokerRequestMs) => ({
+        ...latency(candidateToBrokerRequestMs + 80),
+        mode: "live" as const,
+        candidateToBrokerRequestMs,
+        intentWriteMs: 18,
+        brokerSubmitMs: 80,
+      }));
+    const summary = summarizeScalpAttemptLatencies(attempts);
+    assert.equal(summary.brokerRequestSampleSize, 10);
+    assert.equal(summary.brokerRequestStartP50Ms, 530);
+    assert.equal(summary.brokerRequestStartP95Ms, 920);
+    assert.ok((summary.brokerRequestStartP95Ms ?? Infinity) < 1_000);
   });
 });
 

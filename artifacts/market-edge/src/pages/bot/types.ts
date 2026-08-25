@@ -715,7 +715,11 @@ export interface ScalperStatusMarket {
 export type ScalperLatencyStage =
   | "queue_wait"
   | "cap_claim"
+  | "identity_refresh"
+  | "routed_balance"
+  | "authenticated_quote"
   | "parallel_refresh"
+  | "guard_readiness"
   | "final_requote"
   | "intent_write"
   | "broker_submit"
@@ -726,6 +730,7 @@ export interface ScalperLatencyStageSummary {
   sampleSize: number;
   p50Ms: number | null;
   p90Ms: number | null;
+  p95Ms: number | null;
   p99Ms: number | null;
   maxMs: number | null;
 }
@@ -745,11 +750,16 @@ export interface ScalperStatus {
     sampleSize: number;
     p50Ms: number | null;
     p90Ms: number | null;
+    p95Ms: number | null;
     p99Ms: number | null;
     maxMs: number | null;
     stages: ScalperLatencyStageSummary[];
     dominantStage: ScalperLatencyStage | null;
     dominantStageP90Ms: number | null;
+    brokerRequestSampleSize: number;
+    brokerRequestStartP50Ms: number | null;
+    brokerRequestStartP95Ms: number | null;
+    brokerRequestStartP99Ms: number | null;
   };
   scanHealth: {
     running: boolean;
@@ -963,8 +973,13 @@ export interface ScalperPerformance {
 export interface ScalperWindowFunnel {
   windowKey: string;
   candidateSymbols: number;
+  preparationStarted: number;
+  claimsAcquired: number;
   eligibleQuotes: number;
   finalQuoteLoss: number;
+  guardRejected: number;
+  intentsPersisted: number;
+  brokerRequestsStarted: number;
   safetyBlocks: number;
   submissions: number;
   zeroFills: number;

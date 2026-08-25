@@ -26,6 +26,7 @@ import { getTicker, getTickerFresh, getTickerFreshEvidence } from "./crypto-data
 import type {
   ScalpAttemptLatency,
   ScalpConfig,
+  ScalpFunnelEventStage,
   ScalpMode,
   ScalpOrder,
   ScalpIncident,
@@ -218,6 +219,12 @@ const _attemptsInFlight = new Set<string>();
 const _terminalAttemptKeys = new Set<string>();
 const _nextAttemptAt = new Map<string, number>();
 const _preflightIdentityReady = new Set<string>();
+const _preflightSampleReady = new Set<string>();
+const _preflightRoutedBalanceReady = new Map<string, {
+  exchangeIndex: number;
+  availableBalance: number;
+  checkedAt: number;
+}>();
 const _preflightRegularPositions = new Map<string, RegularPositionForScalperLayering>();
 let _regularBotReadView: {
   openPositions?: Map<string, RegularPositionForScalperLayering>;
@@ -476,7 +483,7 @@ function _recordScalpFunnelEvent(
   mode: ScalpMode,
   windowKey: string,
   symbol: string,
-  stage: "candidate" | "authenticated_eligible" | "final_quote_loss",
+  stage: ScalpFunnelEventStage,
 ): void {
   _funnelRecorder.record({ mode, windowKey, symbol, stage });
 }
@@ -541,12 +548,14 @@ interface MutableScalpAttemptLatency {
   queueWaitMs: number | null;
   capClaimMs: number | null;
   identityRefreshMs: number | null;
+  routedBalanceMs: number | null;
   quoteRefreshMs: number | null;
   parallelRefreshMs: number | null;
   guardReadinessMs: number | null;
   finalRequoteMs: number | null;
   intentWriteMs: number | null;
   brokerSubmitMs: number | null;
+  candidateToBrokerRequestMs: number | null;
 }
 const _recentAttemptLatencies: ScalpAttemptLatency[] = [];
 const _latestAttemptLatencyByKey = new Map<string, ScalpAttemptLatency>();
@@ -574,12 +583,14 @@ function _beginAttemptLatency(
     queueWaitMs: Math.max(0, startedAtMs - detectedAtMs),
     capClaimMs: null,
     identityRefreshMs: null,
+    routedBalanceMs: null,
     quoteRefreshMs: null,
     parallelRefreshMs: null,
     guardReadinessMs: null,
     finalRequoteMs: null,
     intentWriteMs: null,
     brokerSubmitMs: null,
+    candidateToBrokerRequestMs: null,
   };
 }
 
@@ -592,10 +603,15 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
     ? null
     : timing.closeTimeMs - completedAtMs;
   const totalMs = Math.max(0, completedAtMs - timing.detectedAtMs);
+  // Reservation ownership and read-only preparation run concurrently. Count
+  // only their critical-path maximum here; adding both would fabricate latency.
+  const preparationClaimCriticalMs = Math.max(
+    timing.capClaimMs ?? 0,
+    timing.parallelRefreshMs ?? 0,
+  );
   const measuredSequentialMs = [
     timing.queueWaitMs,
-    timing.capClaimMs,
-    timing.parallelRefreshMs,
+    preparationClaimCriticalMs,
     timing.guardReadinessMs,
     timing.finalRequoteMs,
     timing.intentWriteMs,
@@ -622,12 +638,14 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
     queueWaitMs: timing.queueWaitMs,
     capClaimMs: timing.capClaimMs,
     identityRefreshMs: timing.identityRefreshMs,
+    routedBalanceMs: timing.routedBalanceMs,
     quoteRefreshMs: timing.quoteRefreshMs,
     parallelRefreshMs: timing.parallelRefreshMs,
     guardReadinessMs: timing.guardReadinessMs,
     finalRequoteMs: timing.finalRequoteMs,
     intentWriteMs: timing.intentWriteMs,
     brokerSubmitMs: timing.brokerSubmitMs,
+    candidateToBrokerRequestMs: timing.candidateToBrokerRequestMs,
     decisionFinalizeMs,
     slowestStage: slowest.stage,
     slowestStageMs: slowest.latencyMs,
@@ -649,6 +667,8 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
 
 function _resetPreflightState(): void {
   _preflightIdentityReady.clear();
+  _preflightSampleReady.clear();
+  _preflightRoutedBalanceReady.clear();
   _preflightRegularPositions.clear();
   _lastPreflightStartedAt = 0;
   _preflightStatus = {
@@ -832,16 +852,17 @@ async function _tripCircuitBreaker(reason: string, requireDurable = false): Prom
       ? "[kalshi-scalper] CIRCUIT BREAKER TRIPPED — halting new scalp attempts"
       : "[kalshi-scalper] circuit-breaker event recorded — enforcement disabled, scans continue",
   );
-  // Persist through the serialized writer. If a newer event arrived before
-  // this queued operation began, leave its reason untouched.
-  await persistCircuitBreakerWithPolicy(
-    () => _enqueueScalpConfigMutation(
+  // Persist through the serialized writer. Ordinary safety events are already
+  // enforced by the in-memory latch and must not make the scan/placement task
+  // wait behind an unrelated settings write. Unknown live exposure still uses
+  // the strict durable path before any ownership may be released.
+  const persist = () => _enqueueScalpConfigMutation(
       (current) => _breakerVersion === eventVersion
         ? { ...current, circuitBreaker: true, circuitBreakerReason: reason }
         : current,
       false,
-    ),
-    (persistErr) => {
+    );
+  const onFailure = (persistErr: unknown) => {
       // Keep in-memory breaker true and retry in the background until the
       // transient DB failure clears. Strict callers also receive the failure.
       logger.error(
@@ -849,9 +870,12 @@ async function _tripCircuitBreaker(reason: string, requireDurable = false): Prom
         "[kalshi-scalper] CRITICAL: circuit breaker persist FAILED — breaker active in memory; durable retry scheduled",
       );
       _scheduleBreakerPersistenceRetry();
-    },
-    requireDurable,
-  );
+    };
+  if (!requireDurable) {
+    void persistCircuitBreakerWithPolicy(persist, onFailure, false);
+    return;
+  }
+  await persistCircuitBreakerWithPolicy(persist, onFailure, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -923,6 +947,10 @@ async function _recoverSubmittingOrders(): Promise<void> {
       { id: order.id, symbol: order.symbol, mode: order.mode, reconciliationReason: reconciliation.reason },
       "[kalshi-scalper] found submitting order from prior crash — marking UNKNOWN, tripping breaker (reserved budget retained)",
     );
+    // Persist the fail-closed latch before changing the durable order state.
+    // If this write fails, leave the row as `submitting` so the next restart
+    // discovers and blocks on the same unresolved exposure again.
+    await _tripCircuitBreaker("submitting_order_found_after_restart", true);
     // Mark order UNKNOWN (indeterminate fill), NOT error. Retain reserved budget.
     await finalizeScalpOrder(
       order.id, "unknown", 0, null, null, 0, order.orderId,
@@ -952,7 +980,6 @@ async function _recoverSubmittingOrders(): Promise<void> {
     };
     await insertScalpIncident(incident).catch(() => {});
     await setScalpOrderIncident(order.id, incidentId).catch(() => {});
-    await _tripCircuitBreaker("submitting_order_found_after_restart");
   }
 }
 
@@ -1398,21 +1425,19 @@ async function _runPreflight(
 ): Promise<void> {
   const mode = _config.mode;
   _warmRegularPositionReadView(mode, windowKey);
-  const sampleTime = Date.now();
-  const accountPromise = Promise.all([
-    getScalpCommittedTotals(mode, windowKey),
-    mode === "live"
-      ? getBalance().then(
-          (balance) => ({ available: balance.availableBalance, error: null as string | null }),
-          (err) => ({ available: null, error: String(err) }),
-        )
-      : Promise.resolve({ available: null, error: null as string | null }),
-  ]);
+  const accountPromise = getScalpCommittedTotals(mode, windowKey);
 
-  const needsIdentity = targets.filter(
-    (target) => !_preflightIdentityReady.has(`${windowKey}:${target.symbol}`),
-  );
-  await _runWithConcurrency(needsIdentity, SCALP_MAX_CONCURRENT_CANDIDATES, async (target) => {
+  // Refresh every target rather than treating an old identity marker as
+  // readiness. This intentionally primes provider connections, the exact
+  // exchange-scoped balance, and the reserved authoritative sample lane before
+  // the final window; none of these warm values authorizes an order.
+  await _runWithConcurrency(targets, SCALP_MAX_CONCURRENT_CANDIDATES, async (target) => {
+    const readinessKey = `${windowKey}:${target.symbol}`;
+    const samplePromise = _collectPriceSample(
+      target.symbol,
+      target.product,
+      "authoritative",
+    );
     try {
       await fetchKalshiTarget(target.symbol, new Date(target.closeTime), true);
       const refreshed = getKalshiCachedData(target.symbol);
@@ -1421,7 +1446,26 @@ async function _runPreflight(
         refreshed.closeTime &&
         Math.abs(Date.parse(refreshed.closeTime) - Date.parse(target.closeTime)) <= 30_000
       ) {
-        _preflightIdentityReady.add(`${windowKey}:${target.symbol}`);
+        _preflightIdentityReady.add(readinessKey);
+        const [sampleReady, routedBalance] = await Promise.all([
+          samplePromise,
+          mode === "live"
+            ? Number.isInteger(refreshed.exchangeIndex) && refreshed.exchangeIndex! >= 0
+              ? getBalance(refreshed.exchangeIndex!).then(
+                  (balance) => ({
+                    exchangeIndex: refreshed.exchangeIndex!,
+                    availableBalance: balance.availableBalance,
+                    checkedAt: Date.now(),
+                  }),
+                  () => null,
+                )
+              : Promise.resolve(null)
+            : Promise.resolve(null),
+        ]);
+        if (sampleReady) _preflightSampleReady.add(readinessKey);
+        if (routedBalance) {
+          _preflightRoutedBalanceReady.set(readinessKey, routedBalance);
+        }
       }
     } catch (err) {
       logger.debug(
@@ -1431,19 +1475,28 @@ async function _runPreflight(
     }
   });
 
-  const [{ dailyCommitted, openCommitted }, balance] = await accountPromise;
+  const { dailyCommitted, openCommitted } = await accountPromise;
   if (windowKey !== currentWindowKey() || mode !== _config.mode) return;
+  const guardSampleRequired =
+    _config.freefallGuardEnabled
+    || _config.adverseExcursionGuardEnabled
+    || _config.rapidMoveGuardEnabled
+    || _config.targetProximityGuardEnabled;
 
   const marketStatuses = targets.map((target): ScalpPreflightMarketStatusInternal => {
+    const readinessKey = `${windowKey}:${target.symbol}`;
+    const routedBalance = _preflightRoutedBalanceReady.get(readinessKey) ?? null;
     let reason: string | null = null;
     if (_isCircuitBreakerBlocking()) {
       reason = "circuit_breaker_active";
-    } else if (mode === "live" && balance.error) {
+    } else if (!_preflightIdentityReady.has(readinessKey)) {
+      reason = "market_identity_not_ready";
+    } else if (mode === "live" && routedBalance == null) {
       reason = "balance_unavailable";
     } else if (
       mode === "live" &&
-      balance.available != null &&
-      balance.available + 1e-9 < target.params.budgetDollars
+      routedBalance != null &&
+      routedBalance.availableBalance + 1e-9 < target.params.budgetDollars
     ) {
       reason = "insufficient_balance";
     } else if (
@@ -1456,8 +1509,8 @@ async function _runPreflight(
       openCommitted + target.params.budgetDollars > _config.openCapDollars + 1e-9
     ) {
       reason = "open_cap_reached";
-    } else if (!_preflightIdentityReady.has(`${windowKey}:${target.symbol}`)) {
-      reason = "market_identity_not_ready";
+    } else if (guardSampleRequired && !_preflightSampleReady.has(readinessKey)) {
+      reason = "authoritative_sample_not_ready";
     }
     return { symbol: target.symbol, ready: reason == null, reason };
   });
@@ -1468,6 +1521,12 @@ async function _runPreflight(
       : readySymbols === 0
         ? marketStatuses[0]?.reason ?? "markets_not_ready"
         : `${targets.length - readySymbols}_markets_blocked_or_warming`;
+  const routedBalances = targets
+    .map((target) =>
+      _preflightRoutedBalanceReady.get(`${windowKey}:${target.symbol}`)
+        ?.availableBalance,
+    )
+    .filter((value): value is number => value != null && Number.isFinite(value));
 
   _preflightStatus = {
     state: readySymbols === 0 ? "blocked" : "ready",
@@ -1478,7 +1537,11 @@ async function _runPreflight(
     readySymbols,
     totalSymbols: targets.length,
     reason,
-    availableBalance: balance.available,
+    // A single status value cannot represent multiple exchange shards. Expose
+    // the conservative minimum while per-symbol readiness uses the exact route.
+    availableBalance: routedBalances.length > 0
+      ? Math.min(...routedBalances)
+      : null,
     dailyCommitted,
     openCommitted,
     markets: marketStatuses,
@@ -1905,8 +1968,9 @@ async function _handleUnknownExposure(args: {
     entryGuardEvidence,
   } = args;
 
-  // 1. Breaker first (fail-closed) — sets in-memory true synchronously.
-  await _tripCircuitBreaker(reason);
+  // 1. Breaker first (fail-closed). Ambiguous live exposure must survive a
+  // process restart, so this path requires the durable latch before continuing.
+  await _tripCircuitBreaker(reason, true);
 
   // 2. Best-effort mark the order UNKNOWN (do not throw on failure).
   await finalizeScalpOrder(
@@ -2115,6 +2179,16 @@ async function _evaluateCandidate(
       { symbol, windowKey, ticker, closeTime },
     );
     const budget = snapshot.budgetDollars;
+    _recordScalpFunnelEvent(mode, windowKey, symbol, "preparation_started");
+    // Read-only market preparation is safe to overlap with the durable cap
+    // claim. Its result is discarded unless the reservation wins; no intent or
+    // broker call can occur before claim.allowed is true.
+    const readinessPromise = _startScalpReadiness(
+      candidate,
+      mode,
+      snapshot,
+      LIVE_SCALP_ATTEMPT_RUNTIME,
+    );
 
     let claim: Awaited<ReturnType<typeof claimReservationAndCap>>;
     const claimStartedAtMs = Date.now();
@@ -2150,6 +2224,7 @@ async function _evaluateCandidate(
       logger.debug({ symbol, windowKey, reason: claim.reason }, "[kalshi-scalper] cap-denied, skipped");
       return;
     }
+    _recordScalpFunnelEvent(mode, windowKey, symbol, "claim_acquired");
 
     try {
       await _executeScalpAttempt(
@@ -2162,6 +2237,7 @@ async function _evaluateCandidate(
         key,
         LIVE_SCALP_ATTEMPT_RUNTIME,
         latency,
+        readinessPromise,
       );
     } catch (err) {
       _lastError = String(err);
@@ -2264,6 +2340,170 @@ interface ScalpAttemptRuntime {
   regularPositionCompatibilitySync: typeof _regularPositionCompatibilitySync;
   recordFunnelEvent?: typeof _recordScalpFunnelEvent;
 }
+
+type ScalpIdentityReadinessResult =
+  | {
+      ok: true;
+      target: number | null;
+      identity: ReturnType<typeof getKalshiCachedData>;
+      error: null;
+      latencyMs: number;
+    }
+  | {
+      ok: false;
+      target: null;
+      identity: null;
+      error: unknown;
+      latencyMs: number;
+    };
+
+interface PreparedScalpReadiness {
+  identityResult: ScalpIdentityReadinessResult;
+  orderbookResult:
+    | {
+        ok: true;
+        orderbook: Awaited<ReturnType<typeof fetchOrderbookPrices>>;
+        latencyMs: number;
+      }
+    | {
+        ok: false;
+        orderbook: null;
+        error: unknown;
+        latencyMs: number;
+      };
+  freshSampleResult: boolean;
+  balanceResult:
+    | {
+        ok: true;
+        availableBalance: number | null;
+        exchangeIndex: number | null;
+        error: null;
+        latencyMs: number | null;
+      }
+    | {
+        ok: false;
+        availableBalance: null;
+        exchangeIndex: number | null;
+        error: unknown;
+        latencyMs: number | null;
+      };
+  parallelRefreshMs: number;
+}
+
+function _startScalpReadiness(
+  candidate: Candidate,
+  mode: ScalpMode,
+  snapshot: ExecutionRiskSnapshot,
+  runtime: ScalpAttemptRuntime,
+): Promise<PreparedScalpReadiness> {
+  const { symbol, ticker, closeTime } = candidate;
+  const startedAtMs = runtime.nowMs();
+  const identityStartedAtMs = runtime.nowMs();
+  const quoteStartedAtMs = runtime.nowMs();
+  const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
+  const priceGuardSampleRequested =
+    snapshot.freefallGuardEnabled
+    || snapshot.adverseExcursionGuardEnabled
+    || snapshot.rapidMoveGuardEnabled
+    || snapshot.targetProximityGuardEnabled;
+  const identityPromise: Promise<ScalpIdentityReadinessResult> =
+    runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
+      (target) => ({
+        ok: true as const,
+        target,
+        identity: runtime.getKalshiCachedData(symbol),
+        error: null,
+        latencyMs: runtime.nowMs() - identityStartedAtMs,
+      }),
+      (error) => ({
+        ok: false as const,
+        target: null,
+        identity: null,
+        error,
+        latencyMs: runtime.nowMs() - identityStartedAtMs,
+      }),
+    );
+  const routedBalancePromise = mode === "live"
+    ? identityPromise.then(async (identity): Promise<PreparedScalpReadiness["balanceResult"]> => {
+        if (!identity.ok) {
+          return {
+            ok: false,
+            availableBalance: null,
+            exchangeIndex: null,
+            error: identity.error,
+            latencyMs: null,
+          };
+        }
+        const routedExchangeIndex = identity.identity?.exchangeIndex;
+        if (!Number.isInteger(routedExchangeIndex) || routedExchangeIndex! < 0) {
+          return {
+            ok: false,
+            availableBalance: null,
+            exchangeIndex: null,
+            error: new Error("routed exchange_index unavailable for final balance check"),
+            latencyMs: null,
+          };
+        }
+        const balanceStartedAtMs = runtime.nowMs();
+        try {
+          const balance = await runtime.getBalance(routedExchangeIndex);
+          return {
+            ok: true,
+            availableBalance: balance.availableBalance,
+            exchangeIndex: routedExchangeIndex!,
+            error: null,
+            latencyMs: runtime.nowMs() - balanceStartedAtMs,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            availableBalance: null,
+            exchangeIndex: routedExchangeIndex!,
+            error,
+            latencyMs: runtime.nowMs() - balanceStartedAtMs,
+          };
+        }
+      })
+    : Promise.resolve({
+        ok: true as const,
+        availableBalance: null,
+        exchangeIndex: null,
+        error: null,
+        latencyMs: null,
+      });
+  return Promise.all([
+    identityPromise,
+    runtime.fetchOrderbookPrices(ticker).then(
+      (orderbook) => ({
+        ok: true as const,
+        orderbook,
+        latencyMs: runtime.nowMs() - quoteStartedAtMs,
+      }),
+      (error) => ({
+        ok: false as const,
+        orderbook: null,
+        error,
+        latencyMs: runtime.nowMs() - quoteStartedAtMs,
+      }),
+    ),
+    priceGuardSampleRequested
+      ? coin
+        ? runtime.collectPriceSample(coin.symbol, coin.product).then(
+            (ready) => ready,
+            () => false,
+          )
+        : Promise.resolve(false)
+      : Promise.resolve(true),
+    routedBalancePromise,
+  ]).then(([identityResult, orderbookResult, freshSampleResult, balanceResult]) => ({
+    identityResult,
+    orderbookResult,
+    freshSampleResult,
+    balanceResult,
+    parallelRefreshMs: runtime.nowMs() - startedAtMs,
+  }));
+}
+
 async function _executeScalpAttempt(
   reservationId: string,
   candidate: Candidate,
@@ -2274,6 +2514,7 @@ async function _executeScalpAttempt(
   attemptKey: string,
   runtime: ScalpAttemptRuntime = LIVE_SCALP_ATTEMPT_RUNTIME,
   latency?: MutableScalpAttemptLatency,
+  preparedReadiness?: Promise<PreparedScalpReadiness>,
 ): Promise<void> {
   const { symbol, ticker, closeTime, side: initialSide } = candidate;
   const attemptStartMs = runtime.nowMs();
@@ -2317,6 +2558,7 @@ async function _executeScalpAttempt(
       elapsedMs: nowMs - attemptStartMs,
       identityRefreshMs,
       quoteRefreshMs,
+      routedBalanceMs: latency?.routedBalanceMs ?? null,
       parallelRefreshMs,
     };
   };
@@ -2365,87 +2607,29 @@ async function _executeScalpAttempt(
     return;
   }
 
-  const concurrentFetchStartMs = runtime.nowMs();
-  const identityRefreshStartMs = runtime.nowMs();
-  const quoteRefreshStartMs = runtime.nowMs();
   const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
   const priceGuardSampleRequested =
     snapshot.freefallGuardEnabled
     || snapshot.adverseExcursionGuardEnabled
     || snapshot.rapidMoveGuardEnabled
     || snapshot.targetProximityGuardEnabled;
-  const identityPromise = runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
-      (target) => ({
-        ok: true as const,
-        target,
-        identity: runtime.getKalshiCachedData(symbol),
-        error: null as unknown,
-        latencyMs: runtime.nowMs() - identityRefreshStartMs,
-      }),
-      (error) => ({ ok: false as const, error, latencyMs: runtime.nowMs() - identityRefreshStartMs }),
-    );
-  const routedBalancePromise = mode === "live"
-    ? identityPromise.then(async (identity) => {
-        if (!identity.ok) {
-          return {
-            ok: false as const,
-            availableBalance: null,
-            exchangeIndex: null,
-            error: identity.error,
-          };
-        }
-        const routedExchangeIndex = identity.identity?.exchangeIndex;
-        if (!Number.isInteger(routedExchangeIndex) || routedExchangeIndex! < 0) {
-          return {
-            ok: false as const,
-            availableBalance: null,
-            exchangeIndex: null,
-            error: new Error("routed exchange_index unavailable for final balance check"),
-          };
-        }
-        try {
-          const balance = await runtime.getBalance(routedExchangeIndex);
-          return {
-            ok: true as const,
-            availableBalance: balance.availableBalance,
-            exchangeIndex: routedExchangeIndex!,
-            error: null,
-          };
-        } catch (error) {
-          return {
-            ok: false as const,
-            availableBalance: null,
-            exchangeIndex: routedExchangeIndex!,
-            error,
-          };
-        }
-      })
-    : Promise.resolve({
-        ok: true as const,
-        availableBalance: null,
-        exchangeIndex: null,
-        error: null,
-      });
-  const [identityResult, orderbookResult, freshSampleResult, balanceResult] = await Promise.all([
-    identityPromise,
-    runtime.fetchOrderbookPrices(ticker).then(
-      (orderbook) => ({ ok: true as const, orderbook, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
-      (error) => ({ ok: false as const, orderbook: null, error, latencyMs: runtime.nowMs() - quoteRefreshStartMs }),
-    ),
-    priceGuardSampleRequested
-      ? coin
-        ? runtime.collectPriceSample(coin.symbol, coin.product)
-        : Promise.resolve(false)
-      : Promise.resolve(true),
-    routedBalancePromise,
-  ]);
-  const concurrentFetchMs = runtime.nowMs() - concurrentFetchStartMs;
+  const {
+    identityResult,
+    orderbookResult,
+    freshSampleResult,
+    balanceResult,
+    parallelRefreshMs: concurrentFetchMs,
+  } = await (
+    preparedReadiness
+    ?? _startScalpReadiness(candidate, mode, snapshot, runtime)
+  );
   guardReadinessStartedAtMs = runtime.nowMs();
   identityRefreshMs = identityResult.latencyMs;
   quoteRefreshMs = orderbookResult.latencyMs;
   parallelRefreshMs = concurrentFetchMs;
   if (latency) {
     latency.identityRefreshMs = identityRefreshMs;
+    latency.routedBalanceMs = balanceResult.latencyMs;
     latency.quoteRefreshMs = quoteRefreshMs;
     latency.parallelRefreshMs = parallelRefreshMs;
   }
@@ -2789,6 +2973,7 @@ async function _executeScalpAttempt(
         "[kalshi-scalper] target proximity guard skip (final boundary)",
       );
       const proximityReason = proximityFinal.reason ?? "target_proximity_blocked_final";
+      runtime.recordFunnelEvent?.(mode, windowKey, symbol, "guard_rejected");
       await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", proximityReason, true, {
         ..._timingEvidence(),
         distancePct: proximityFinal.distancePct,
@@ -2898,6 +3083,7 @@ async function _executeScalpAttempt(
         "[kalshi-scalper] freefall guard skip (final boundary)",
       );
       const freefallReason = freefallDecision.reason ?? "freefall_blocked_final";
+      runtime.recordFunnelEvent?.(mode, windowKey, symbol, "guard_rejected");
       const guardOutcomeStudy = _buildGuardOutcomeStudy(
         freefallDecision,
         effectiveSide,
@@ -3900,6 +4086,7 @@ async function _executeScalpAttempt(
     const intentWriteStartedAtMs = runtime.nowMs();
     try {
       await runtime.insertScalpOrderIntent(orderRecord);
+      runtime.recordFunnelEvent?.(mode, windowKey, symbol, "intent_persisted");
     } finally {
       if (latency) latency.intentWriteMs = runtime.nowMs() - intentWriteStartedAtMs;
     }
@@ -3943,6 +4130,7 @@ async function _executeScalpAttempt(
           : null
       );
     if (finalAbortReason !== null) {
+      runtime.recordFunnelEvent?.(mode, windowKey, symbol, "guard_rejected");
       logger.info(
         { symbol, windowKey, reason: finalAbortReason },
         "[kalshi-scalper] live final validation failed after intent, before submit — aborting intent + releasing (no broker call)",
@@ -4057,6 +4245,11 @@ async function _executeScalpAttempt(
     // limitPrice, and STRICTLY parses the raw response (no zero-coercion).
     // NOTE: no await occurs between the successful check above and this call.
     const brokerSubmitStartedAtMs = runtime.nowMs();
+    if (latency) {
+      latency.candidateToBrokerRequestMs =
+        Math.max(0, brokerSubmitStartedAtMs - latency.detectedAtMs);
+    }
+    runtime.recordFunnelEvent?.(mode, windowKey, symbol, "broker_request_started");
     try {
       const result = await runtime.placeScalpOrderStrict({
         ticker,

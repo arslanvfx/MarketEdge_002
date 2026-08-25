@@ -171,8 +171,13 @@ export function prioritizeScalpCandidates<T extends {
 export interface ScalpWindowFunnelCounters {
   windowKey: string;
   candidateSymbols: number;
+  preparationStarted: number;
+  claimsAcquired: number;
   eligibleQuotes: number;
   finalQuoteLoss: number;
+  guardRejected: number;
+  intentsPersisted: number;
+  brokerRequestsStarted: number;
   safetyBlocks: number;
   submissions: number;
   zeroFills: number;
@@ -196,8 +201,13 @@ export function buildScalpWindowFunnelReport(
   const windows: ScalpWindowFunnel[] = rows.map((row) => ({
     windowKey: row.windowKey,
     candidateSymbols: funnelCount(row.candidateSymbols),
+    preparationStarted: funnelCount(row.preparationStarted),
+    claimsAcquired: funnelCount(row.claimsAcquired),
     eligibleQuotes: funnelCount(row.eligibleQuotes),
     finalQuoteLoss: funnelCount(row.finalQuoteLoss),
+    guardRejected: funnelCount(row.guardRejected),
+    intentsPersisted: funnelCount(row.intentsPersisted),
+    brokerRequestsStarted: funnelCount(row.brokerRequestsStarted),
     safetyBlocks: funnelCount(row.safetyBlocks),
     submissions: funnelCount(row.submissions),
     zeroFills: funnelCount(row.zeroFills),
@@ -224,6 +234,9 @@ export function buildScalpWindowFunnelReport(
 const STAGES: ScalpLatencyStage[] = [
   "queue_wait",
   "cap_claim",
+  "identity_refresh",
+  "routed_balance",
+  "authenticated_quote",
   "parallel_refresh",
   "guard_readiness",
   "final_requote",
@@ -235,12 +248,15 @@ const STAGES: ScalpLatencyStage[] = [
 export function findSlowestScalpLatencyStage(
   latency: Pick<
     ScalpAttemptLatency,
-    "queueWaitMs" | "capClaimMs" | "parallelRefreshMs" | "guardReadinessMs" | "finalRequoteMs" | "intentWriteMs" | "brokerSubmitMs" | "decisionFinalizeMs"
+    "queueWaitMs" | "capClaimMs" | "identityRefreshMs" | "routedBalanceMs" | "quoteRefreshMs" | "parallelRefreshMs" | "guardReadinessMs" | "finalRequoteMs" | "intentWriteMs" | "brokerSubmitMs" | "decisionFinalizeMs"
   >,
 ): { stage: ScalpLatencyStage | null; latencyMs: number | null } {
   const values: Record<ScalpLatencyStage, number | null> = {
     queue_wait: latency.queueWaitMs,
     cap_claim: latency.capClaimMs,
+    identity_refresh: latency.identityRefreshMs,
+    routed_balance: latency.routedBalanceMs,
+    authenticated_quote: latency.quoteRefreshMs,
     parallel_refresh: latency.parallelRefreshMs,
     guard_readiness: latency.guardReadinessMs,
     final_requote: latency.finalRequoteMs,
@@ -280,6 +296,9 @@ export function summarizeScalpAttemptLatencies(
         const stageValues: Record<ScalpLatencyStage, number | null> = {
           queue_wait: attempt.queueWaitMs,
           cap_claim: attempt.capClaimMs,
+          identity_refresh: attempt.identityRefreshMs,
+          routed_balance: attempt.routedBalanceMs,
+          authenticated_quote: attempt.quoteRefreshMs,
           parallel_refresh: attempt.parallelRefreshMs,
           guard_readiness: attempt.guardReadinessMs,
           final_requote: attempt.finalRequoteMs,
@@ -298,6 +317,7 @@ export function summarizeScalpAttemptLatencies(
       sampleSize: values.length,
       p50Ms: percentile(values, 0.5),
       p90Ms: percentile(values, 0.9),
+      p95Ms: percentile(values, 0.95),
       p99Ms: percentile(values, 0.99),
       maxMs: values.length > 0 ? Math.round(Math.max(...values) * 10) / 10 : null,
     };
@@ -307,14 +327,25 @@ export function summarizeScalpAttemptLatencies(
     if (current?.p90Ms == null || stage.p90Ms > current.p90Ms) return stage;
     return current;
   }, null);
+  const brokerRequestStarts = attempts
+    .map((attempt) => attempt.candidateToBrokerRequestMs)
+    .filter(
+      (value): value is number =>
+        value != null && Number.isFinite(value) && value >= 0,
+    );
   return {
     sampleSize: totals.length,
     p50Ms: percentile(totals, 0.5),
     p90Ms: percentile(totals, 0.9),
+    p95Ms: percentile(totals, 0.95),
     p99Ms: percentile(totals, 0.99),
     maxMs: totals.length > 0 ? Math.round(Math.max(...totals) * 10) / 10 : null,
     stages,
     dominantStage: dominant?.stage ?? null,
     dominantStageP90Ms: dominant?.p90Ms ?? null,
+    brokerRequestSampleSize: brokerRequestStarts.length,
+    brokerRequestStartP50Ms: percentile(brokerRequestStarts, 0.5),
+    brokerRequestStartP95Ms: percentile(brokerRequestStarts, 0.95),
+    brokerRequestStartP99Ms: percentile(brokerRequestStarts, 0.99),
   };
 }

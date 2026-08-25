@@ -7,6 +7,12 @@ Only a verified client rejection can resolve a Scalper submission as zero fill w
 
 Transport failures, invalid success bodies, `5xx`, `408`, `425`, `429`, and generic or duplicate-client-ID `409` responses remain unknown exposure. They must retain the reservation, trip or preserve the circuit breaker, and require authoritative reconciliation.
 
+Unknown-exposure handling must durably persist the circuit-breaker latch before
+continuing its recovery writes. Ordinary breaker events may latch in memory and
+persist asynchronously for scan latency, but ambiguous broker outcomes cannot:
+a restart between the broker result and a failed background write could
+otherwise resume trading around unresolved exposure.
+
 Persisted historical error text may repair an old unresolved row only when it contains the same definitive HTTP evidence. The repair must use the normal atomic reconciliation transaction and preserve its sibling-order checks.
 
 **Why:** Kalshi can reject an invalid ticker with `404 market_not_found`, which means no order exists to find in history. Treating that proof as ambiguous creates an impossible reconciliation loop, while broadly treating HTTP failures as zero fills risks duplicate live exposure.
