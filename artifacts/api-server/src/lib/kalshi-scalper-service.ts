@@ -16,6 +16,8 @@ import { getKalshiCachedData, fetchOrderbookPrices, fetchKalshiTarget } from "./
 // boundary (placeScalpOrderStrict) and NEVER imports/calls placeOrder.
 import { getBalance, fetchKalshiMarketResult, fetchKalshiSettledMarkets } from "./kalshi-trader.ts";
 import {
+  isDefinitiveScalpOrderRejection,
+  parseDefinitiveScalpOrderRejection,
   placeScalpOrderStrict,
   reconcileScalpOrderStrict,
   type ScalpReconciliationResult,
@@ -1078,7 +1080,24 @@ export async function reconcileUnresolvedScalpOrder(orderRecordId: string) {
       message: "This Scalper order was already resolved.",
     };
   }
-  const result = await _fetchScalpReconciliation(order);
+  const persistedRejection = parseDefinitiveScalpOrderRejection(
+    order.errorMessage ?? order.exchangeResponseReason,
+  );
+  const result: ScalpReconciliationResult = persistedRejection == null
+    ? await _fetchScalpReconciliation(order)
+    : {
+        outcome: "zero_fill",
+        reason: `definitive_http_rejection_${persistedRejection.status}`,
+        orderId: null,
+        filledCount: 0,
+        avgFillPrice: null,
+        budgetSpent: 0,
+        evidence: {
+          source: "persisted_definitive_http_rejection",
+          httpStatus: persistedRejection.status,
+          exchangeCode: persistedRejection.code,
+        },
+      };
   if (result.outcome === "ambiguous") {
     throw new ScalpReconciliationError(result.reason, result.evidence);
   }
@@ -3763,6 +3782,33 @@ async function _executeScalpAttempt(
     } catch (err) {
       if (latency) latency.brokerSubmitMs = runtime.nowMs() - brokerSubmitStartedAtMs;
       orderError = String(err);
+      if (isDefinitiveScalpOrderRejection(err)) {
+        const rejection = parseDefinitiveScalpOrderRejection(err)!;
+        await _applyScalpReconciliation(orderRecord, {
+          outcome: "zero_fill",
+          reason: `definitive_http_rejection_${rejection.status}`,
+          orderId: null,
+          filledCount: 0,
+          avgFillPrice: null,
+          budgetSpent: 0,
+          evidence: {
+            source: "live_definitive_http_rejection",
+            httpStatus: rejection.status,
+            exchangeCode: rejection.code,
+          },
+        });
+        logger.warn(
+          {
+            symbol,
+            ticker,
+            side: effectiveSide,
+            httpStatus: rejection.status,
+            exchangeCode: rejection.code,
+          },
+          "[kalshi-scalper] definitive exchange rejection — recorded zero fill without breaker",
+        );
+        return;
+      }
       logger.error({ err, symbol, ticker, side: effectiveSide }, "[kalshi-scalper] LIVE strict submit THREW — fill state UNKNOWN");
 
       const reconciliation = await _fetchScalpReconciliation({

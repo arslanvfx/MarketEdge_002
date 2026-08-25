@@ -128,3 +128,4 @@
 - [Contrarian durable ownership](contrarian-durable-ownership.md) — normal and Live experiment claims share a DB lock; conflict scope is mode+symbol+window, never ticker
 - [Contrarian strict reversal profile](contrarian-strict-reversal-profile.md) — monitor all markets independently in final 120s; only fresh 1–3¢ target-specific repeated reversals may reach the isolated lifecycle
 - [Scalper study durable outbox](scalper-study-durable-outbox.md) — observational guard studies replay from normal skip evidence; bounded fire-and-forget retries alone are not durable
+- [Scalper definitive order rejections](scalper-definitive-order-rejections.md) — verified client rejections are zero fills; ambiguous HTTP or transport failures must retain exposure and block reset

@@ -93,6 +93,69 @@ export interface ScalpSubmitParams {
   timeoutMs?: number;
 }
 
+export interface DefinitiveScalpOrderRejection {
+  status: number;
+  code: string | null;
+  message: string;
+}
+
+export class DefinitiveScalpOrderRejectionError extends Error {
+  readonly kind = "definitive_scalp_order_rejection" as const;
+  readonly status: number;
+  readonly code: string | null;
+
+  constructor(rejection: DefinitiveScalpOrderRejection) {
+    super(rejection.message);
+    this.name = "DefinitiveScalpOrderRejectionError";
+    this.status = rejection.status;
+    this.code = rejection.code;
+  }
+}
+
+/**
+ * A verified client rejection proves Kalshi did not accept the order. Network
+ * failures, 5xx, 408, 425, and 429 remain indeterminate. A generic 409 may be a
+ * duplicate client id, so only Kalshi's explicit no-liquidity rejection is safe.
+ */
+export function parseDefinitiveScalpOrderRejection(
+  value: unknown,
+): DefinitiveScalpOrderRejection | null {
+  if (
+    typeof value === "object"
+    && value != null
+    && (value as { kind?: string }).kind === "definitive_scalp_order_rejection"
+  ) {
+    const typed = value as DefinitiveScalpOrderRejectionError;
+    return { status: typed.status, code: typed.code, message: typed.message };
+  }
+  const message = String(
+    value instanceof Error ? value.message : value ?? "",
+  );
+  const status = Number(message.match(/→\s*(\d{3}):/)?.[1] ?? NaN);
+  if (
+    !Number.isInteger(status)
+    || status < 400
+    || status >= 500
+    || [408, 425, 429].includes(status)
+  ) {
+    return null;
+  }
+  const code = message.match(/"code"\s*:\s*"([^"]+)"/)?.[1] ?? null;
+  if (
+    status === 409
+    && code !== "fill_or_kill_insufficient_resting_volume"
+  ) {
+    return null;
+  }
+  return { status, code, message };
+}
+
+export function isDefinitiveScalpOrderRejection(
+  value: unknown,
+): value is DefinitiveScalpOrderRejectionError {
+  return parseDefinitiveScalpOrderRejection(value) != null;
+}
+
 /**
  * Submit a scalper entry order via a scalper-dedicated signed POST to
  * /portfolio/events/orders, then STRICTLY parse the raw response.
@@ -107,7 +170,8 @@ export interface ScalpSubmitParams {
  *   - self_trade_prevention_type = "taker_at_cross"
  *
  * THROWS on: auth absence, timeout/abort, transport failure, non-2xx status, or
- * invalid JSON. The service's catch treats any thrown submit as UNKNOWN.
+ * invalid JSON. Verified client rejections use a typed throw so the service can
+ * authoritatively record zero fill; all other submit throws remain UNKNOWN.
  *
  * On HTTP success returns a strictly-parsed discriminated result — never a
  * zero-coerced fill. A malformed body resolves to outcome "unknown".
@@ -175,7 +239,12 @@ export async function placeScalpOrderStrict(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Kalshi POST ${ORDERS_PATH} → ${res.status}: ${text}`);
+    const error = new Error(`Kalshi POST ${ORDERS_PATH} → ${res.status}: ${text}`);
+    const definitive = parseDefinitiveScalpOrderRejection(error);
+    if (definitive) {
+      throw new DefinitiveScalpOrderRejectionError(definitive);
+    }
+    throw error;
   }
 
   // Invalid JSON on a 2xx is indeterminate → THROW (caught as unknown).
@@ -217,8 +286,8 @@ export interface ScalpReconciliationInput {
 export type ScalpReconciliationResult =
   | {
       outcome: "zero_fill";
-      reason: "reconciled_terminal_zero_fill";
-      orderId: string;
+      reason: string;
+      orderId: string | null;
       filledCount: 0;
       avgFillPrice: null;
       budgetSpent: 0;
