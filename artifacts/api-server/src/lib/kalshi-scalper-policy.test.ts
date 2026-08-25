@@ -3123,7 +3123,11 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(svc, /selectNextScalpSamplePriority\(/);
     assert.match(svc, /SCALP_MAX_CONCURRENT_BACKGROUND_SAMPLES/);
     assert.match(svc, /priority === "authoritative"/);
-    assert.match(svc, /const existing = _priceSampleJobs\.get\(key\)/);
+    assert.match(svc, /let existing = _priceSampleJobs\.get\(key\)/);
+    assert.match(
+      svc,
+      /existing\?\.priority === "background"[\s\S]*?existing\.started[\s\S]*?key = `\$\{symbolKey\}:authoritative`/,
+    );
     assert.match(svc, /existing\.priority = "authoritative"/);
   });
 
@@ -3374,10 +3378,13 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(finalFf >= 0 && place >= 0 && intent >= 0);
     // The authoritative fresh sample is awaited in the concurrent readiness
     // batch, then the shared production decision receives that exact result.
+    const sampleHelperStart = idx("async function _collectAttemptReadinessSample");
     const readinessStart = idx("function _startScalpReadiness");
     const executeStart = idx("async function _executeScalpAttempt");
-    const parallelBoundary = svc.slice(readinessStart, executeStart);
-    assert.match(parallelBoundary, /Promise\.all\(\[[\s\S]*?runtime\.collectPriceSample\(/);
+    const parallelBoundary = svc.slice(sampleHelperStart, executeStart);
+    assert.match(parallelBoundary, /await collectSample\(\)/);
+    assert.match(parallelBoundary, /setImmediate\(resolve\)/);
+    assert.match(parallelBoundary, /Promise\.all\(\[[\s\S]*?_collectAttemptReadinessSample\(/);
     const block = svc.slice(finalFf, idx("Size the order STRICTLY"));
     assert.match(block, /evaluateFreefallPreSubmitGuard\(\{[\s\S]*?freshSampleSucceeded: authoritativeFreshSampleSucceeded/);
     // Must NOT swallow the final fetch with a silent .catch.
@@ -3396,11 +3403,12 @@ describe("execution wiring (static source assertions)", () => {
   });
 
   it("overlaps quote and Freefall readiness while checking the routed exchange balance after identity", () => {
+    const sampleHelperStart = idx("async function _collectAttemptReadinessSample");
     const readinessStart = idx("function _startScalpReadiness");
     const executeStart = idx("async function _executeScalpAttempt");
     const finalFf = idx("FINAL FREEFALL GUARD");
-    const boundary = svc.slice(readinessStart, finalFf);
-    assert.ok(readinessStart >= 0 && readinessStart < executeStart);
+    const boundary = svc.slice(sampleHelperStart, finalFf);
+    assert.ok(sampleHelperStart >= 0 && sampleHelperStart < readinessStart && readinessStart < executeStart);
     assert.match(boundary, /Promise\.all\(\[/);
     assert.match(boundary, /fetchKalshiTarget\(/);
     assert.match(boundary, /fetchOrderbookPrices\(/);

@@ -5,10 +5,28 @@ import {
   shouldRetryConfirmedZeroFillSameLifecycle,
 } from "./kalshi-scalper-policy.ts";
 import {
+  runControlledAttemptSampleRetryExercise,
   runControlledFreefallServiceExercise,
   runControlledSampleSchedulerExercise,
   runControlledScalperLayeringExercise,
 } from "./kalshi-scalper-service.ts";
+
+describe("authoritative attempt sample retry", () => {
+  it("makes a real second provider request after cleanup and remains fail-closed after two failures", async () => {
+    assert.deepEqual(
+      await runControlledAttemptSampleRetryExercise(),
+      {
+        recoveredAfterTransientFailure: true,
+        transientProviderCalls: 2,
+        blockedAfterDoubleFailure: true,
+        doubleFailureProviderCalls: 2,
+        authoritativeBypassedStartedBackground: true,
+        raceAuthoritativeProviderCalls: 1,
+        raceBackgroundProviderCalls: 1,
+      },
+    );
+  });
+});
 
 describe("authenticated final quote retry boundary", () => {
   const valid = { yesAsk: 0.97, yesBid: 0.02 };
@@ -273,6 +291,24 @@ describe("confirmed IOC zero-fill same-lifecycle retry", () => {
 });
 
 describe("real Scalper service Freefall boundary", () => {
+  it("recovers one transient authoritative sample failure inside the same reserved attempt", async () => {
+    const result = await runControlledFreefallServiceExercise({
+      onlyRecoveredStep: true,
+      targetProximityGuardEnabled: true,
+      underlyingSampleSuccessSequence: [false, true, true],
+    });
+
+    assert.equal(result.steps[0]?.state, "submitted");
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 1);
+    assert.equal(
+      result.skippedAttempts.some(
+        (attempt) => attempt.reason === "target_proximity_unavailable_fetch_failed",
+      ),
+      false,
+    );
+  });
+
   it("blocks actual intent/submit sinks, enforces cooldown, and recovers on fresh clear data", async () => {
     const result = await runControlledFreefallServiceExercise();
     const byLabel = new Map(result.steps.map((step) => [step.label, step]));

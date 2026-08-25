@@ -551,6 +551,8 @@ export function computeContractCount(
 export interface FreefallSample {
   price: number;
   at: number; // ms timestamp
+  /** Execution provenance; absent only in legacy or test fixtures. */
+  source?: "authoritative" | "background";
   /** Source oracle publish time for dedicated authoritative monitor samples. */
   oraclePublishedAtMs?: number | null;
   /** Oracle age at collection time, not reevaluated against later guard time. */

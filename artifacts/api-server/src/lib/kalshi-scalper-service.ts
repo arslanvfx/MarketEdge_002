@@ -1252,7 +1252,7 @@ function _drainPriceSampleQueue(): void {
         const price = await _fetchScalpUnderlyingPrice(job.product, job.priority);
         if (!Number.isFinite(price) || price <= 0) return false;
         const samples = _priceSamples.get(job.symbol) ?? [];
-        samples.push({ price, at: Date.now() });
+        samples.push({ price, at: Date.now(), source: job.priority });
         if (samples.length > MAX_PRICE_SAMPLES) {
           samples.splice(0, samples.length - MAX_PRICE_SAMPLES);
         }
@@ -1280,8 +1280,19 @@ function _collectPriceSample(
   product: string,
   priority: PriceSamplePriority = "authoritative",
 ): Promise<boolean> {
-  const key = symbol.toUpperCase();
-  const existing = _priceSampleJobs.get(key);
+  const symbolKey = symbol.toUpperCase();
+  let key = symbolKey;
+  let existing = _priceSampleJobs.get(key);
+  if (
+    priority === "authoritative"
+    && existing?.priority === "background"
+    && existing.started
+  ) {
+    // A started background read may use getTicker's short cache. Never let an
+    // execution-critical authoritative caller inherit that provenance.
+    key = `${symbolKey}:authoritative`;
+    existing = _priceSampleJobs.get(key);
+  }
   if (existing) {
     if (
       priority === "authoritative" &&
@@ -1302,7 +1313,7 @@ function _collectPriceSample(
   });
   const job: PriceSampleJob = {
     key,
-    symbol: key,
+    symbol: symbolKey,
     product,
     priority,
     started: false,
@@ -2390,6 +2401,41 @@ interface PreparedScalpReadiness {
   parallelRefreshMs: number;
 }
 
+function _authoritativeGuardSampleSnapshot(
+  symbol: string,
+  fetchSucceeded: boolean,
+): { latest: FreefallSample; samples: FreefallSample[] } | null {
+  if (!fetchSucceeded) return null;
+  const allSamples = _priceSamples.get(symbol) ?? [];
+  const latest = [...allSamples]
+    .reverse()
+    .find((sample) => sample.source === "authoritative") ?? null;
+  if (!latest) return null;
+  return {
+    latest,
+    // Background observations may provide prior directional context, but no
+    // completion after the exact authoritative boundary may replace it as the
+    // newest execution sample.
+    samples: allSamples.filter(
+      (sample) => sample === latest || sample.at < latest.at,
+    ),
+  };
+}
+
+async function _collectAttemptReadinessSample(
+  collectSample: () => Promise<boolean>,
+): Promise<boolean> {
+  // One immediate bounded retry closes a transient provider gap without
+  // weakening the guards: both reads are authoritative, and a double failure
+  // still blocks before an intent can exist.
+  if (await collectSample()) return true;
+  // The production collector resolves its public promise just before deleting
+  // the settled coalescing job. Yield once so retry #2 cannot reuse retry #1's
+  // already-resolved false promise.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return collectSample();
+}
+
 function _startScalpReadiness(
   candidate: Candidate,
   mode: ScalpMode,
@@ -2488,7 +2534,9 @@ function _startScalpReadiness(
     ),
     priceGuardSampleRequested
       ? coin
-        ? runtime.collectPriceSample(coin.symbol, coin.product).then(
+        ? _collectAttemptReadinessSample(
+            () => runtime.collectPriceSample(coin.symbol, coin.product),
+          ).then(
             (ready) => ready,
             () => false,
           )
@@ -2841,12 +2889,29 @@ async function _executeScalpAttempt(
   let effectiveSide = match2.side;
   let winningAsk = match2.winningAsk;
   const targetPriceNum = Number(identityResult.target);
-  let authoritativeFreshSampleSucceeded = freshSampleResult;
-  let finalPriceSamples = _priceSamples.get(symbol) ?? [];
-  let latestFinalPriceSample =
-    priceGuardSampleRequested && freshSampleResult
-      ? finalPriceSamples[finalPriceSamples.length - 1] ?? null
-      : null;
+  let authoritativeSampleSnapshot = priceGuardSampleRequested
+    ? _authoritativeGuardSampleSnapshot(symbol, freshSampleResult)
+    : null;
+  let authoritativeFreshSampleSucceeded =
+    !priceGuardSampleRequested || authoritativeSampleSnapshot != null;
+  let finalPriceSamples = authoritativeSampleSnapshot?.samples ?? [];
+  let latestFinalPriceSample = authoritativeSampleSnapshot?.latest ?? null;
+  const refreshPinnedAuthoritativeSnapshot = (): void => {
+    if (!priceGuardSampleRequested || !authoritativeFreshSampleSucceeded) return;
+    const refreshedSnapshot = _authoritativeGuardSampleSnapshot(symbol, true);
+    if (
+      !refreshedSnapshot
+      || (
+        latestFinalPriceSample
+        && refreshedSnapshot.latest.at < latestFinalPriceSample.at
+      )
+    ) {
+      return;
+    }
+    authoritativeSampleSnapshot = refreshedSnapshot;
+    finalPriceSamples = refreshedSnapshot.samples;
+    latestFinalPriceSample = refreshedSnapshot.latest;
+  };
   let finalProximityResult = latestFinalPriceSample == null
     ? null
     : checkTargetProximityGuard(
@@ -2871,8 +2936,8 @@ async function _executeScalpAttempt(
         latestSample: null,
       };
     }
-    const samples = _priceSamples.get(symbol) ?? [];
-    const latestSample = samples[samples.length - 1] ?? null;
+    refreshPinnedAuthoritativeSnapshot();
+    const latestSample = latestFinalPriceSample;
     if (
       latestSample == null
       || !Number.isFinite(latestSample.price)
@@ -2993,11 +3058,13 @@ async function _executeScalpAttempt(
   // guard must be evaluable AND not blocked to proceed.
   let finalFreefallResult: ReturnType<typeof checkFreefallGuard> | null = null;
   let guardEvaluatedAtMs = runtime.nowMs();
-  const evaluatePinnedFreefallAt = (nowMs: number) => evaluateFreefallPreSubmitGuard({
+  const evaluatePinnedFreefallAt = (nowMs: number) => {
+    refreshPinnedAuthoritativeSnapshot();
+    return evaluateFreefallPreSubmitGuard({
     directionEnabled: snapshot.freefallGuardEnabled,
     hasProduct: coin != null,
     freshSampleSucceeded: authoritativeFreshSampleSucceeded,
-    samples: _priceSamples.get(symbol) ?? finalPriceSamples,
+    samples: finalPriceSamples,
     side: effectiveSide,
     nowMs,
     eligibilityStartMs:
@@ -3024,8 +3091,9 @@ async function _executeScalpAttempt(
     adverseExcursionEnabled: snapshot.adverseExcursionGuardEnabled,
     adverseExcursionLookbackSeconds: snapshot.adverseExcursionLookbackSeconds,
     adverseExcursionThresholdPct: snapshot.adverseExcursionThresholdPct,
-    adverseExcursionRecoverySeconds: snapshot.adverseExcursionRecoverySeconds,
-  });
+      adverseExcursionRecoverySeconds: snapshot.adverseExcursionRecoverySeconds,
+    });
+  };
   if (
     snapshot.freefallGuardEnabled
     || snapshot.rapidMoveGuardEnabled
@@ -3422,12 +3490,14 @@ async function _executeScalpAttempt(
     ]);
     finalRequoteResult = quoteResult;
     if (refreshUnderlyingForRetry) {
-      finalRequoteFreshSampleSucceeded = retrySampleResult;
-      authoritativeFreshSampleSucceeded = retrySampleResult;
-      finalPriceSamples = _priceSamples.get(symbol) ?? finalPriceSamples;
-      latestFinalPriceSample = retrySampleResult
-        ? finalPriceSamples[finalPriceSamples.length - 1] ?? null
-        : null;
+      authoritativeSampleSnapshot = _authoritativeGuardSampleSnapshot(
+        symbol,
+        retrySampleResult,
+      );
+      finalRequoteFreshSampleSucceeded = authoritativeSampleSnapshot != null;
+      authoritativeFreshSampleSucceeded = authoritativeSampleSnapshot != null;
+      finalPriceSamples = authoritativeSampleSnapshot?.samples ?? [];
+      latestFinalPriceSample = authoritativeSampleSnapshot?.latest ?? null;
       finalProximityResult = latestFinalPriceSample == null
         ? null
         : checkTargetProximityGuard(
@@ -5792,8 +5862,8 @@ Promise<ControlledFreefallServiceExerciseResult> {
   const setLatestControlledPrice = (price: number): void => {
     const samples = _priceSamples.get(symbol) ?? currentSamples;
     const next = samples.length > 0
-      ? [...samples.slice(0, -1), { price, at: nowMs }]
-      : [{ price, at: nowMs }];
+      ? [...samples.slice(0, -1), { price, at: nowMs, source: "authoritative" }]
+      : [{ price, at: nowMs, source: "authoritative" }];
     currentSamples = next;
     _priceSamples.set(symbol, next);
   };
@@ -5873,6 +5943,17 @@ Promise<ControlledFreefallServiceExerciseResult> {
       const controlledPrice = options.underlyingPriceSequence?.[fetchIndex];
       if (succeeded && controlledPrice != null) {
         setLatestControlledPrice(controlledPrice);
+      } else if (succeeded) {
+        const samples = _priceSamples.get(symbol) ?? currentSamples;
+        const latest = samples[samples.length - 1];
+        if (latest) {
+          const tagged = {
+            ...latest,
+            source: "authoritative" as const,
+          };
+          currentSamples = [...samples.slice(0, -1), tagged];
+          _priceSamples.set(symbol, currentSamples);
+        }
       }
       return succeeded;
     },
@@ -6214,6 +6295,103 @@ Promise<ControlledSampleSchedulerExerciseResult> {
       for (let index = queue.length - 1; index >= 0; index -= 1) {
         if (symbols.includes(queue[index]!.symbol)) queue.splice(index, 1);
       }
+    }
+  }
+}
+
+export async function runControlledAttemptSampleRetryExercise(): Promise<{
+  recoveredAfterTransientFailure: boolean;
+  transientProviderCalls: number;
+  blockedAfterDoubleFailure: boolean;
+  doubleFailureProviderCalls: number;
+  authoritativeBypassedStartedBackground: boolean;
+  raceAuthoritativeProviderCalls: number;
+  raceBackgroundProviderCalls: number;
+}> {
+  if (
+    _activePriceSampleFetches !== 0
+    || _authoritativeSampleQueue.length !== 0
+    || _backgroundSampleQueue.length !== 0
+  ) {
+    throw new Error("attempt sample retry exercise requires an idle queue");
+  }
+
+  const originalFetcher = _fetchScalpUnderlyingPrice;
+  const transientProduct = "CTRL-ATTEMPT-TRANSIENT";
+  const failureProduct = "CTRL-ATTEMPT-FAILURE";
+  const raceProduct = "CTRL-ATTEMPT-RACE";
+  const transientSymbol = "CTRLATTEMPTTRANSIENT";
+  const failureSymbol = "CTRLATTEMPTFAILURE";
+  const raceSymbol = "CTRLATTEMPTRACE";
+  let transientProviderCalls = 0;
+  let doubleFailureProviderCalls = 0;
+  let raceAuthoritativeProviderCalls = 0;
+  let raceBackgroundProviderCalls = 0;
+  let releaseRaceBackground!: () => void;
+  const raceBackgroundGate = new Promise<void>((resolve) => {
+    releaseRaceBackground = resolve;
+  });
+  _fetchScalpUnderlyingPrice = async (
+    product: string,
+    priority: PriceSamplePriority,
+  ) => {
+    if (product === transientProduct) {
+      transientProviderCalls += 1;
+      if (transientProviderCalls === 1) throw new Error("controlled transient failure");
+      return 100;
+    }
+    if (product === failureProduct) {
+      doubleFailureProviderCalls += 1;
+      throw new Error("controlled persistent failure");
+    }
+    if (product === raceProduct) {
+      if (priority === "background") {
+        raceBackgroundProviderCalls += 1;
+        await raceBackgroundGate;
+        return 99;
+      }
+      raceAuthoritativeProviderCalls += 1;
+      return 100;
+    }
+    throw new Error(`unexpected controlled product: ${product}`);
+  };
+
+  try {
+    const recoveredAfterTransientFailure = await _collectAttemptReadinessSample(
+      () => _collectPriceSample(transientSymbol, transientProduct, "authoritative"),
+    );
+    const blockedAfterDoubleFailure = !(await _collectAttemptReadinessSample(
+      () => _collectPriceSample(failureSymbol, failureProduct, "authoritative"),
+    ));
+    const backgroundRacePromise = _collectPriceSample(
+      raceSymbol,
+      raceProduct,
+      "background",
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const authoritativeBypassedStartedBackground = await _collectPriceSample(
+      raceSymbol,
+      raceProduct,
+      "authoritative",
+    );
+    releaseRaceBackground();
+    await backgroundRacePromise;
+    return {
+      recoveredAfterTransientFailure,
+      transientProviderCalls,
+      blockedAfterDoubleFailure,
+      doubleFailureProviderCalls,
+      authoritativeBypassedStartedBackground,
+      raceAuthoritativeProviderCalls,
+      raceBackgroundProviderCalls,
+    };
+  } finally {
+    releaseRaceBackground();
+    _fetchScalpUnderlyingPrice = originalFetcher;
+    for (const symbol of [transientSymbol, failureSymbol, raceSymbol]) {
+      _priceSamples.delete(symbol);
+      _priceSampleJobs.delete(symbol);
+      _priceSampleJobs.delete(`${symbol}:authoritative`);
     }
   }
 }
