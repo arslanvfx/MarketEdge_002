@@ -234,5 +234,6 @@ export function setBotMode(mode: BotMode): void {
 export function setBotPaused(p: boolean): void {
   S.paused = p;
   logger.info({ paused: S.paused }, "[kalshi-bot] paused changed");
+  syncConvictionPoller();
 }
 

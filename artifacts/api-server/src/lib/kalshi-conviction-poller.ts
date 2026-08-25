@@ -35,6 +35,11 @@ import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT
 import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
 import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
+import {
+  startRegularSpotSampler,
+  stopRegularSpotSampler,
+  shouldRunRegularSpotSampler,
+} from "./kalshi-regular-spot-sampler";
 
 const POLL_INTERVAL_MS = 1_000;
 export const CONVICTION_LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
@@ -53,6 +58,7 @@ interface TickFeedHealth {
 }
 const tickFeedHealth = new Map<string, TickFeedHealth>();
 let lastHealthLogAt = 0;
+let pollerGeneration = 0;
 
 function healthFor(sym: string): TickFeedHealth {
   let h = tickFeedHealth.get(sym);
@@ -86,7 +92,7 @@ const convictionPriceMap = new Map<string, ConvictionLivePrice>();
 
 let pollerHandle: ReturnType<typeof setInterval> | null = null;
 
-async function pollOnce(): Promise<void> {
+async function pollOnce(generation = pollerGeneration): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
 
   // NOTE: the conviction zone is now derived PER SYMBOL inside the per-symbol
@@ -135,6 +141,7 @@ async function pollOnce(): Promise<void> {
         const h = healthFor(sym);
         try {
           const spot = await getTickerFresh(product);
+          if (generation !== pollerGeneration || pollerHandle === null) return;
           if (Number.isFinite(spot) && spot > 0) {
             const ticks = convictionPriceTicks.get(sym) ?? [];
             ticks.push({ price: spot, ts: Date.now() });
@@ -358,7 +365,11 @@ export function getConvictionLivePriceSnapshot(sym: string): ConvictionLivePrice
  * while already running is a no-op.
  */
 export function startConvictionPoller(): void {
+  // conviction owns the shared tick map while active; never permit two writers.
+  stopRegularSpotSampler();
   if (pollerHandle !== null) return;
+  pollerGeneration += 1;
+  convictionPriceTicks.clear();
   logger.info("[conviction-poller] starting 1 s fresh-price poll");
   // Fire immediately so the first bot tick after mode switch has fresh data.
   pollOnce().catch(() => {});
@@ -373,11 +384,12 @@ export function startConvictionPoller(): void {
  * Stop the conviction price poller.  Idempotent.
  */
 export function stopConvictionPoller(): void {
-  if (pollerHandle === null) return;
-  clearInterval(pollerHandle);
+  pollerGeneration += 1;
+  if (pollerHandle !== null) clearInterval(pollerHandle);
   pollerHandle = null;
   convictionPriceMap.clear();
   tickFeedHealth.clear();
+  convictionPriceTicks.clear();
   logger.info("[conviction-poller] stopped");
 }
 
@@ -391,6 +403,16 @@ export function syncConvictionPoller(): void {
     startConvictionPoller();
   } else {
     stopConvictionPoller();
+    if (shouldRunRegularSpotSampler({
+      enabled: S.config.enabled,
+      paused: S.paused,
+      botMode: S.botMode,
+      decisionMode: S.config.decisionMode,
+    })) {
+      startRegularSpotSampler();
+    } else {
+      stopRegularSpotSampler();
+    }
   }
 }
 

@@ -50,6 +50,10 @@ import {
   claimRegularOrderIntent, resolveRegularOrderIntent, markRegularOrderIntentUnknown,
   hasUnresolvedRegularIntent,
 } from "./kalshi-regular-order-intent";
+import {
+  describeRegularFreefallDecision,
+  evaluateRegularFreefallPreSubmitGuard,
+} from "./kalshi-regular-freefall-guard";
 import crypto from "crypto";
 import { decideRemainderAttempt } from "./kalshi-entry-remainder";
 import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
@@ -2869,6 +2873,41 @@ async function _runBotTick(
   }
 
   if (entryMode === "live") {
+    // Final regular-bot momentum authority. This deliberately reuses the
+    // Scalper policy against the existing Pyth/Coinbase-routed one-second
+    // conviction samples, but does not alter or share Scalper runtime state.
+    // It must remain immediately before durable intent creation.
+    const freefallProduct = CRYPTO_COINS.find(
+      (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
+    );
+    const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
+      samples: convictionPriceTicks.get(sym) ?? [],
+      side: direction,
+      nowMs: Date.now(),
+      windowStartMs,
+      closeTimeMs: windowStartMs + 15 * 60_000,
+      targetPrice: kalshiTarget,
+      hasProduct: freefallProduct != null,
+    });
+    if (!regularFreefall.allowed) {
+      const evidence = describeRegularFreefallDecision(regularFreefall);
+      releaseConvictionEntryReservation(evidence);
+      logger.warn(
+        {
+          sym,
+          windowKey,
+          direction,
+          product: freefallProduct?.product ?? null,
+          reason: regularFreefall.reason,
+          secondsRemaining: regularFreefall.secondsRemaining,
+          guardResult: regularFreefall.guardResult,
+        },
+        "[kalshi-bot] final regular freefall guard blocked order before durable intent",
+      );
+      setTickAbortReason(sym, windowKey, evidence);
+      return;
+    }
+
     // Persist and submit the exact same YES-side limit. Older fallback paths
     // stored NULL and let placeOrder derive the price internally, which made an
     // uncertain order impossible to match strictly during reconciliation.

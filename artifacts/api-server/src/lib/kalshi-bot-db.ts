@@ -1395,7 +1395,7 @@ export async function updateBotConfig(partial: Partial<BotConfig>): Promise<{ co
   }
   // Sync the conviction price poller whenever decisionMode may have changed.
   // Lazy import avoids a circular dependency chain (poller → state → db → poller).
-  if ("decisionMode" in partial) {
+  if ("decisionMode" in partial || "enabled" in partial) {
     const { syncConvictionPoller } = await import("./kalshi-conviction-poller");
     syncConvictionPoller();
   }
