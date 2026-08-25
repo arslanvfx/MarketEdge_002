@@ -3707,7 +3707,9 @@ async function _executeScalpAttempt(
     }
     const finalFreefallPaperAtMs = runtime.nowMs();
     const finalFreefallPaper =
-      snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled
+      snapshot.freefallGuardEnabled
+      || snapshot.rapidMoveGuardEnabled
+      || snapshot.adverseExcursionGuardEnabled
         ? evaluatePinnedFreefallAt(finalFreefallPaperAtMs)
         : null;
     if (finalFreefallPaper && !finalFreefallPaper.allowed) {
@@ -3839,7 +3841,9 @@ async function _executeScalpAttempt(
     const finalFreefallLiveAtMs = runtime.nowMs();
     const finalProximityLive = evaluatePinnedProximityAt(finalFreefallLiveAtMs);
     const finalFreefallLive =
-      snapshot.freefallGuardEnabled || snapshot.rapidMoveGuardEnabled
+      snapshot.freefallGuardEnabled
+      || snapshot.rapidMoveGuardEnabled
+      || snapshot.adverseExcursionGuardEnabled
         ? evaluatePinnedFreefallAt(finalFreefallLiveAtMs)
         : null;
     if (finalFreefallLive?.guardResult) {

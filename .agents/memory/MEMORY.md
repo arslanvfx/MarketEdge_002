@@ -130,3 +130,4 @@
 - [Scalper study durable outbox](scalper-study-durable-outbox.md) — observational guard studies replay from normal skip evidence; bounded fire-and-forget retries alone are not durable
 - [Scalper definitive order rejections](scalper-definitive-order-rejections.md) — verified client rejections are zero fills; ambiguous HTTP or transport failures must retain exposure and block reset
 - [Contrarian Pyth excursion cadence](contrarian-pyth-excursion-cadence.md) — commodity reversal detection must use distinct fresh oracle publications on a dedicated lane; local polling cadence cannot stand in for Pyth cadence
+- [Optional Scalper guard composition](optional-scalper-guard-composition.md) — additive guards may block on positive evidence but cannot veto normal entries merely because their own history is warming or unavailable

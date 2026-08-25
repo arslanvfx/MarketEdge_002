@@ -1375,11 +1375,9 @@ export function evaluateFreefallPreSubmitGuard(input: {
   requireDistinctOraclePublishTimes?: boolean;
   authoritativeCommodityCadence?: boolean;
 }): FreefallPreSubmitDecision {
-  if (
-    !input.directionEnabled
-    && !input.rapidMoveEnabled
-    && !input.adverseExcursionEnabled
-  ) {
+  const baselineEnabled = input.directionEnabled || input.rapidMoveEnabled;
+  const excursionEnabled = input.adverseExcursionEnabled === true;
+  if (!baselineEnabled && !excursionEnabled) {
     return {
       allowed: true,
       reason: null,
@@ -1388,7 +1386,10 @@ export function evaluateFreefallPreSubmitGuard(input: {
     };
   }
 
-  if (!input.hasProduct) {
+  // The established directional/rapid guards remain fail-closed. The optional
+  // excursion layer is additive: if it cannot evaluate, it must not turn an
+  // otherwise valid Scalper entry into a permanent skip.
+  if (!input.hasProduct && baselineEnabled) {
     return {
       allowed: false,
       reason: "freefall_unavailable_no_product",
@@ -1399,7 +1400,7 @@ export function evaluateFreefallPreSubmitGuard(input: {
 
   // A fresh fetch failure is authoritative. Never let older cached samples
   // hide the fact that the guard cannot see the current underlying price.
-  if (!input.freshSampleSucceeded) {
+  if (!input.freshSampleSucceeded && baselineEnabled) {
     return {
       allowed: false,
       reason: "freefall_unavailable_fetch_failed",
@@ -1408,11 +1409,15 @@ export function evaluateFreefallPreSubmitGuard(input: {
     };
   }
 
-  const result = checkFreefallGuard({
+  const evaluate = (overrides: {
+    directionEnabled: boolean;
+    rapidMoveEnabled: boolean;
+    adverseExcursionEnabled: boolean;
+  }) => checkFreefallGuard({
     samples: input.samples,
     side: input.side,
     nowMs: input.nowMs,
-    directionEnabled: input.directionEnabled,
+    directionEnabled: overrides.directionEnabled,
     eligibilityStartMs: input.eligibilityStartMs,
     consecutiveSeconds: input.consecutiveSeconds,
     favorableTrendConfirmationEnabled: input.favorableTrendConfirmationEnabled,
@@ -1422,10 +1427,10 @@ export function evaluateFreefallPreSubmitGuard(input: {
     targetProximityGuardEnabled: input.targetProximityGuardEnabled,
     targetProximityThresholdPct: input.targetProximityThresholdPct,
     secondsRemaining: input.secondsRemaining,
-    rapidMoveEnabled: input.rapidMoveEnabled,
+    rapidMoveEnabled: overrides.rapidMoveEnabled,
     rapidMoveLookbackSeconds: input.rapidMoveLookbackSeconds,
     rapidMoveThresholdPct: input.rapidMoveThresholdPct,
-    adverseExcursionEnabled: input.adverseExcursionEnabled,
+    adverseExcursionEnabled: overrides.adverseExcursionEnabled,
     adverseExcursionLookbackSeconds: input.adverseExcursionLookbackSeconds,
     adverseExcursionThresholdPct: input.adverseExcursionThresholdPct,
     adverseExcursionRecoverySeconds: input.adverseExcursionRecoverySeconds,
@@ -1433,6 +1438,55 @@ export function evaluateFreefallPreSubmitGuard(input: {
     authoritativeCommodityCadence: input.authoritativeCommodityCadence,
   });
 
+  const baselineResult = baselineEnabled
+    ? evaluate({
+      directionEnabled: input.directionEnabled,
+      rapidMoveEnabled: input.rapidMoveEnabled,
+      adverseExcursionEnabled: false,
+    })
+    : null;
+  if (baselineResult && (!baselineResult.evaluable || baselineResult.blocked)) {
+    return {
+      allowed: false,
+      reason: baselineResult.reason ?? "freefall_blocked_final",
+      guardResult: baselineResult,
+      sampleCoverageMs: baselineResult.observedSpanMs || null,
+    };
+  }
+
+  if (excursionEnabled) {
+    // Evaluate the optional layer independently so warming/cadence gaps cannot
+    // mask a valid baseline result. Only a positively evaluated excursion may
+    // veto a normal Scalper entry. Contrarian uses its own strict classifier
+    // and continues to fail closed on unavailable commodity evidence.
+    const excursionResult = evaluate({
+      directionEnabled: false,
+      rapidMoveEnabled: false,
+      adverseExcursionEnabled: true,
+    });
+    if (excursionResult.evaluable && excursionResult.blocked) {
+      return {
+        allowed: false,
+        reason: excursionResult.reason ?? "adverse_excursion_blocked_final",
+        guardResult: excursionResult,
+        sampleCoverageMs: excursionResult.observedSpanMs || null,
+      };
+    }
+    if (!excursionResult.evaluable) {
+      return {
+        allowed: true,
+        reason: null,
+        guardResult: baselineResult,
+        sampleCoverageMs: baselineResult?.observedSpanMs || null,
+      };
+    }
+  }
+
+  const result = evaluate({
+    directionEnabled: input.directionEnabled,
+    rapidMoveEnabled: input.rapidMoveEnabled,
+    adverseExcursionEnabled: excursionEnabled,
+  });
   return {
     allowed: result.evaluable && !result.blocked,
     reason: result.evaluable && !result.blocked

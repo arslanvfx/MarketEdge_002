@@ -695,12 +695,12 @@ describe("adverse excursion guard", () => {
     assert.equal(result.reason, "adverse_excursion_trough_rise_no");
   });
 
-  it("fails closed on stale authoritative evidence", () => {
+  it("does not let optional excursion warming veto the normal Scalper", () => {
     const result = evaluate("yes", [100, 99.9, 99.8, 99.75, 99.8, 99.78], {
       staleMs: 2_001,
     });
-    assert.equal(result.allowed, false);
-    assert.match(result.reason ?? "", /unavailable_stale/);
+    assert.equal(result.allowed, true);
+    assert.equal(result.reason, null);
   });
 
   it("is exactly compatible when the optional Scalper toggle is off", () => {
@@ -715,12 +715,10 @@ describe("adverse excursion guard", () => {
     });
   });
 
-  it("fails closed when repeated Pyth publish timestamps masquerade as one-second cadence", () => {
+  it("still exposes repeated Pyth publications as unavailable to strict Contrarian callers", () => {
     const nowMs = 100_000;
-    const result = evaluateFreefallPreSubmitGuard({
+    const result = checkFreefallGuard({
       directionEnabled: false,
-      hasProduct: true,
-      freshSampleSucceeded: true,
       samples: [100, 99.95, 99.9, 99.85, 99.8, 99.75].map((price, index) => ({
         price,
         at: nowMs - (5 - index) * 1_000,
@@ -743,14 +741,14 @@ describe("adverse excursion guard", () => {
       adverseExcursionRecoverySeconds: 3,
       requireDistinctOraclePublishTimes: true,
     });
-    assert.equal(result.allowed, false);
+    assert.equal(result.evaluable, false);
     assert.equal(result.reason, "adverse_excursion_unavailable_repeated_oracle_publish");
   });
 
-  it("rejects a 60-second-old Pyth value even when its local receipt timestamps look cadenced", () => {
+  it("exposes a 60-second-old Pyth value as unavailable to strict Contrarian callers", () => {
     const nowMs = 100_000;
-    const result = evaluateFreefallPreSubmitGuard({
-      directionEnabled: false, hasProduct: true, freshSampleSucceeded: true,
+    const result = checkFreefallGuard({
+      directionEnabled: false,
       samples: [100, 99.95, 99.9, 99.85, 99.8, 99.75].map((price, index) => ({
         price, at: nowMs - (5 - index) * 1_000,
         oraclePublishedAtMs: nowMs - 60_000 + index * 1_000,
@@ -763,14 +761,14 @@ describe("adverse excursion guard", () => {
       adverseExcursionThresholdPct: 0.03, adverseExcursionRecoverySeconds: 3,
       requireDistinctOraclePublishTimes: true,
     });
-    assert.equal(result.allowed, false);
+    assert.equal(result.evaluable, false);
     assert.equal(result.reason, "adverse_excursion_unavailable_oracle_stale");
   });
 
   it("requires enough distinct, gap-free Pyth publishes for commodity Contrarian cadence", () => {
     const nowMs = 100_000;
-    const decide = (publishOffsets: number[]) => evaluateFreefallPreSubmitGuard({
-      directionEnabled: false, hasProduct: true, freshSampleSucceeded: true,
+    const decide = (publishOffsets: number[]) => checkFreefallGuard({
+      directionEnabled: false,
       samples: publishOffsets.map((offset, index) => ({
         price: 100 - index * 0.04,
         at: nowMs - (publishOffsets.length - 1 - index) * 1_000,
@@ -788,6 +786,46 @@ describe("adverse excursion guard", () => {
     assert.equal(decide([-20_000, -15_000, 0, 0]).reason, "adverse_excursion_unavailable_oracle_gap");
     assert.equal(decide([-20_000, -13_000, 0]).reason, "adverse_excursion_unavailable_oracle_gap");
     assert.equal(decide([-20_000, 0]).reason, "adverse_excursion_unavailable_distinct_publishes");
+  });
+
+  it("keeps established guards fail-closed while excursion evidence warms", () => {
+    const nowMs = 100_000;
+    const base = {
+      hasProduct: true,
+      samples: [100, 100.01, 100.02, 100.03, 100.04].map((price, index) => ({
+        price,
+        at: nowMs - (4 - index) * 1_000,
+      })),
+      side: "yes" as const,
+      nowMs,
+      eligibilityStartMs: 0,
+      consecutiveSeconds: 4,
+      favorableTrendConfirmationEnabled: false,
+      targetPrice: 99,
+      secondsRemaining: 10,
+      rapidMoveEnabled: false,
+      rapidMoveLookbackSeconds: 4,
+      rapidMoveThresholdPct: 0.5,
+      adverseExcursionEnabled: true,
+      adverseExcursionLookbackSeconds: 20,
+      adverseExcursionThresholdPct: 0.1,
+      adverseExcursionRecoverySeconds: 3,
+    };
+    const warming = evaluateFreefallPreSubmitGuard({
+      ...base,
+      directionEnabled: true,
+      freshSampleSucceeded: true,
+    });
+    assert.equal(warming.allowed, true);
+    assert.equal(warming.reason, null);
+
+    const baselineUnavailable = evaluateFreefallPreSubmitGuard({
+      ...base,
+      directionEnabled: true,
+      freshSampleSucceeded: false,
+    });
+    assert.equal(baselineUnavailable.allowed, false);
+    assert.equal(baselineUnavailable.reason, "freefall_unavailable_fetch_failed");
   });
 });
 
@@ -3207,6 +3245,17 @@ describe("execution wiring (static source assertions)", () => {
     const simulate = svc.indexOf("PAPER order simulated");
     assert.ok(paperCheck >= 0 && simulate >= 0);
     assert.ok(paperCheck < simulate, "paper validation must precede simulated fill");
+  });
+
+  it("revalidates the optional adverse-excursion guard at paper and live submit boundaries", () => {
+    assert.match(
+      svc,
+      /const finalFreefallPaper =\s*snapshot\.freefallGuardEnabled\s*\|\|\s*snapshot\.rapidMoveGuardEnabled\s*\|\|\s*snapshot\.adverseExcursionGuardEnabled\s*\?\s*evaluatePinnedFreefallAt/,
+    );
+    assert.match(
+      svc,
+      /const finalFreefallLive =\s*snapshot\.freefallGuardEnabled\s*\|\|\s*snapshot\.rapidMoveGuardEnabled\s*\|\|\s*snapshot\.adverseExcursionGuardEnabled\s*\?\s*evaluatePinnedFreefallAt/,
+    );
   });
 
   it("abortIntentAndReleaseReservation exists in the DB layer (atomic)", () => {
