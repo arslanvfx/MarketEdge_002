@@ -11,7 +11,13 @@ const fmtTime = (iso: string) => {
   try {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
-    return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return d.toLocaleTimeString("en-US", {
+      timeZone: "America/New_York",
+      hour12: true,
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    });
   } catch {
     return iso;
   }
@@ -402,7 +408,12 @@ export function BotSmartExitPanel({ authPost }: Props) {
                       {fmtTime(item.triggeredAt)}
                     </td>
                     <td className="px-4 py-2 align-middle font-bold text-slate-200 text-xs">
-                      {item.symbol} <span className="text-[9px] text-slate-500">{item.side.toUpperCase()}</span>
+                      {item.symbol}{" "}
+                      <span className={`text-[9px] ${
+                        item.side === "yes" ? "text-emerald-400" : "text-red-400"
+                      }`}>
+                        {item.side.toUpperCase()}
+                      </span>
                     </td>
                     <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300 tabular-nums">
                       <div>{item.entryPriceCents != null ? `${item.entryPriceCents.toFixed(1)}¢` : "—"}</div>
@@ -434,7 +445,13 @@ export function BotSmartExitPanel({ authPost }: Props) {
                     </td>
                     <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300">
                       <div>{item.advisoryOnly ? "SHADOW" : item.executionStatus.toUpperCase()}</div>
-                      <div className="text-[9px] text-slate-600">
+                      <div className={`text-[9px] ${
+                        item.settlementResult === "yes"
+                          ? "text-emerald-400"
+                          : item.settlementResult === "no"
+                            ? "text-red-400"
+                            : "text-slate-400"
+                      }`}>
                         {item.settlementResult ? `${item.settlementResult.toUpperCase()} settled` : "Pending"}
                       </div>
                     </td>
