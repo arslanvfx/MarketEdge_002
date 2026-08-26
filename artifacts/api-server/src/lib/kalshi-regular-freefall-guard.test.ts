@@ -143,3 +143,100 @@ test("samples before the lifecycle boundary cannot establish conviction", () => 
   assert.equal(result.allowed, false);
   assert.match(result.reason ?? "", /unavailable/);
 });
+
+function pythSamples(
+  publications: Array<{ offset: number; price: number; polls?: number }>,
+  newestReceiptOffset = 0,
+) {
+  const result: Array<{
+    price: number;
+    ts: number;
+    oraclePublishedAtMs: number;
+    oracleAgeMs: number;
+  }> = [];
+  let receipt = NOW - 12_000;
+  for (const publication of publications) {
+    for (let poll = 0; poll < (publication.polls ?? 1); poll += 1) {
+      result.push({
+        price: publication.price,
+        ts: receipt,
+        oraclePublishedAtMs: NOW + publication.offset,
+        oracleAgeMs: 500,
+      });
+      receipt += 1_000;
+    }
+  }
+  result[result.length - 1].ts = NOW + newestReceiptOffset;
+  return result;
+}
+
+function evaluatePyth(
+  publications: Array<{ offset: number; price: number; polls?: number }>,
+  newestReceiptOffset = 0,
+) {
+  return evaluateRegularFreefallPreSubmitGuard({
+    samples: pythSamples(publications, newestReceiptOffset),
+    side: "yes",
+    nowMs: NOW,
+    windowStartMs: 0,
+    closeTimeMs: NOW + 120_000,
+    targetPrice: TARGET,
+    hasProduct: true,
+    authoritativeCommodityCadence: true,
+  });
+}
+
+test("Pyth uses distinct publication cadence and ignores repeated local polls", () => {
+  const clear = evaluatePyth([
+    { offset: -10_000, price: 100, polls: 3 },
+    { offset: -5_000, price: 100.1, polls: 3 },
+    { offset: 0, price: 100.2, polls: 3 },
+  ]);
+  assert.equal(clear.allowed, true);
+  assert.equal(clear.guardResult?.evaluatedSamples.length, 3);
+  assert.deepEqual(
+    clear.guardResult?.evaluatedSamples.map((sample) => sample.at),
+    [NOW - 10_000, NOW - 5_000, NOW],
+  );
+
+  const repeated = evaluatePyth([
+    { offset: -5_000, price: 100, polls: 4 },
+    { offset: 0, price: 100.1, polls: 4 },
+  ]);
+  assert.equal(repeated.allowed, false);
+  assert.equal(repeated.reason, "freefall_unavailable_distinct_publishes");
+});
+
+test("Pyth cadence fails closed while warming or stale", () => {
+  const warming = evaluatePyth([
+    { offset: -2_000, price: 100 },
+    { offset: -1_000, price: 100.1 },
+    { offset: 0, price: 100.2 },
+  ]);
+  assert.equal(warming.reason, "freefall_unavailable_warming");
+
+  const staleReceipt = evaluatePyth([
+    { offset: -10_000, price: 100 },
+    { offset: -5_000, price: 100.1 },
+    { offset: 0, price: 100.2 },
+  ], -3_000);
+  assert.equal(staleReceipt.reason, "freefall_unavailable_stale");
+
+  const staleOracle = evaluatePyth([
+    { offset: -16_000, price: 100 },
+    { offset: -11_000, price: 100.1 },
+    { offset: -6_000, price: 100.2 },
+  ]);
+  assert.equal(staleOracle.reason, "freefall_unavailable_oracle_stale");
+});
+
+test("Pyth adverse reversal blocks on distinct publications", () => {
+  const reversal = evaluatePyth([
+    { offset: -6_000, price: 100 },
+    { offset: -2_000, price: 100.4 },
+    { offset: 0, price: 100.2 },
+  ]);
+  assert.equal(reversal.allowed, false);
+  assert.equal(reversal.reason, "adverse_excursion_peak_fall_yes");
+  assert.equal(reversal.guardResult?.adverseExcursionBlocked, true);
+});

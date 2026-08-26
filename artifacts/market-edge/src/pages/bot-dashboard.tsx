@@ -239,9 +239,10 @@ export default function BotDashboard() {
     }
   }, [status?.mode]);
 
+  const historyKind = histSourceFilter === "skips" ? "skips" : "transactions";
   const { data: historyData } = useQuery<{ history: HistoryRecord[] }>({
-    queryKey: ["bot-all-history", historyMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=500&mode=${historyMode}`).then(r => r.json()),
+    queryKey: ["bot-all-history", historyMode, historyKind],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=500&mode=${historyMode}&kind=${historyKind}`).then(r => r.json()),
     refetchInterval: 15_000,
   });
 
@@ -382,7 +383,7 @@ export default function BotDashboard() {
     coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
     coinTrajectory?: Record<string, import("./bot/types").TrajectoryGateResult>;
     extremeCautionAborted?: string[];
-    convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
+    convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; advisory?: boolean; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; evidenceClass?: "unavailable" | "adverse" | "clear"; reason?: string | null; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
     activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
   }>({
     queryKey: ["bot-pipeline-status"],

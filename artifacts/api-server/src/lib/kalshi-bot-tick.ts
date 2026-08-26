@@ -52,6 +52,7 @@ import {
   describeRegularFreefallDecision,
   evaluateRegularFreefallPreSubmitGuard,
 } from "./kalshi-regular-freefall-guard";
+import { shouldPersistRegularFreefallSkip } from "./kalshi-freefall-telemetry";
 import crypto from "crypto";
 import { decideRemainderAttempt } from "./kalshi-entry-remainder";
 import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
@@ -2536,34 +2537,50 @@ async function _runBotTick(
     );
   }
 
-  if (entryMode === "live") {
-    // Final regular-bot momentum authority. This deliberately reuses the
-    // Scalper policy against the existing Pyth/Coinbase-routed one-second
-    // conviction samples, but does not alter or share Scalper runtime state.
-    // It must remain immediately before durable intent creation.
-    const freefallProduct = CRYPTO_COINS.find(
-      (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
-    );
-    const freefallStartedAt = Date.now();
-    const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
-      samples: convictionPriceTicks.get(sym) ?? [],
-      side: direction,
-      nowMs: Date.now(),
-      windowStartMs,
-      closeTimeMs: windowStartMs + 15 * 60_000,
-      targetPrice: kalshiTarget,
-      hasProduct: freefallProduct != null,
+  // Evaluate one canonical final decision for both modes at the exact same
+  // pre-submit boundary. Live fails closed; paper records the decision but
+  // remains advisory so it can measure the guard without changing exposure.
+  const freefallProduct = CRYPTO_COINS.find(
+    (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
+  );
+  const freefallStartedAt = Date.now();
+  const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
+    samples: convictionPriceTicks.get(sym) ?? [],
+    side: direction,
+    nowMs: freefallStartedAt,
+    windowStartMs,
+    closeTimeMs: windowStartMs + 15 * 60_000,
+    targetPrice: kalshiTarget,
+    hasProduct: freefallProduct != null,
+    authoritativeCommodityCadence: freefallProduct?.product.startsWith("PYTH:") ?? false,
+  });
+  const regularFreefallSignals = {
+    allowed: regularFreefall.allowed,
+    evidenceClass: regularFreefall.allowed
+      ? "clear"
+      : regularFreefall.guardResult?.evaluable === true ? "adverse" : "unavailable",
+    advisory: entryMode === "paper",
+    cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "coinbase",
+    reason: regularFreefall.reason,
+    guardResult: regularFreefall.guardResult,
+    sampleCoverageMs: regularFreefall.sampleCoverageMs,
+    secondsRemaining: regularFreefall.secondsRemaining,
+  } as const;
+  if (!regularFreefall.allowed) {
+    const evidence = describeRegularFreefallDecision(regularFreefall);
+    convictionDirectionGuardBlockedMap.set(sym, {
+      direction,
+      advisory: entryMode === "paper",
+      gate: regularFreefall.guardResult?.evaluable === false ? "no-data" : "tick",
+      evidenceClass: regularFreefallSignals.evidenceClass,
+      reason: regularFreefall.reason,
+      lookback: regularFreefall.guardResult?.samplesUsed ?? 0,
+      fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
+      toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
     });
-    if (!regularFreefall.allowed) {
-      const evidence = describeRegularFreefallDecision(regularFreefall);
+    if (entryMode === "live") {
+      setTickAbortReason(sym, windowKey, evidence);
       releaseConvictionEntryReservation(evidence);
-      convictionDirectionGuardBlockedMap.set(sym, {
-        direction,
-        gate: regularFreefall.guardResult?.evaluable === false ? "no-data" : "tick",
-        lookback: regularFreefall.guardResult?.samplesUsed ?? 0,
-        fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
-        toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
-      });
       logger.warn(
         {
           sym,
@@ -2576,30 +2593,46 @@ async function _runBotTick(
         },
         "[kalshi-bot] final regular freefall guard blocked order before durable intent",
       );
-      setTickAbortReason(sym, windowKey, evidence);
-      void persistBetRecord({
-        symbol: sym,
-        windowKey,
-        ticker: expectedTicker,
-        direction,
-        action: "skip",
-        signals: {
-          reason: "conviction_freefall_guard",
-          guardReason: regularFreefall.reason,
-          guardResult: regularFreefall.guardResult,
-          sampleCoverageMs: regularFreefall.sampleCoverageMs,
-          secondsRemaining: regularFreefall.secondsRemaining,
-        },
-        entryPrice: yesPrice,
-        kalshiTarget,
-      }).catch((err) => logger.warn(
-        { err, sym, windowKey },
-        "[kalshi-bot] freefall guard evidence persist failed",
-      ));
+      const persistSkip = (mode: BotMode) => {
+        const persistAt = Date.now();
+        const reason = regularFreefall.reason ?? "freefall_blocked_final";
+        if (!shouldPersistRegularFreefallSkip({
+          symbol: sym, windowKey, mode, reason, nowMs: persistAt,
+        })) return;
+        void persistBetRecord({
+          symbol: sym,
+          windowKey,
+          ticker: expectedTicker,
+          direction,
+          action: "skip",
+          signals: {
+            reason: "conviction_freefall_guard",
+            // Keep the established top-level fields for production analytics
+            // while the structured object carries paper/live parity metadata.
+            guardReason: regularFreefall.reason,
+            guardResult: regularFreefall.guardResult,
+            sampleCoverageMs: regularFreefall.sampleCoverageMs,
+            secondsRemaining: regularFreefall.secondsRemaining,
+            regularFreefall: regularFreefallSignals,
+          },
+          entryPrice: yesPrice,
+          kalshiTarget,
+          mode,
+          insertId: `${sym}:${windowKey}:freefall:${mode}:${persistAt}`,
+        }).catch((err) => logger.warn(
+          { err, sym, windowKey, mode },
+          "[kalshi-bot] freefall guard evidence persist failed",
+        ));
+      };
+      persistSkip("live");
+      if (S.config.shadowPaperBets) persistSkip("paper");
       return;
     }
+  } else {
     convictionDirectionGuardBlockedMap.delete(sym);
+  }
 
+  if (entryMode === "live") {
     // Persist and submit the exact same YES-side limit. Older fallback paths
     // stored NULL and let placeOrder derive the price internally, which made an
     // uncertain order impossible to match strictly during reconciliation.
@@ -3110,6 +3143,7 @@ async function _runBotTick(
     : null;
   const enrichedSignals = {
     ...(decision.signals as unknown as Record<string, unknown>),
+    regularFreefall: regularFreefallSignals,
     effectiveConfidence: decision.confidence,
     regime: S.regimeCache.get(sym) ?? null,
     trendStability: windowStabilityCache.get(sym) ?? null,

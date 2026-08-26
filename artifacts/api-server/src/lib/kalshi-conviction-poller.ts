@@ -33,7 +33,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // shared cache never has a transient null gap visible to other readers.
 import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, CONVICTION_OB_CACHE_TTL_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
 import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
-import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
+import { CRYPTO_COINS, getTickerFreshEvidence } from "./crypto-data";
 import { logger } from "./logger";
 import {
   getCachedKalshiBalance,
@@ -64,6 +64,8 @@ interface TickFeedHealth {
 const tickFeedHealth = new Map<string, TickFeedHealth>();
 let lastHealthLogAt = 0;
 let pollerGeneration = 0;
+let spotSamplerHandle: ReturnType<typeof setInterval> | null = null;
+let spotSampleInFlight: Promise<void> | null = null;
 
 function healthFor(sym: string): TickFeedHealth {
   let h = tickFeedHealth.get(sym);
@@ -128,11 +130,19 @@ function isActiveGeneration(generation: number): boolean {
 async function refreshSpotTick(sym: string, product: string, generation: number): Promise<void> {
   const h = healthFor(sym);
   try {
-    const spot = await getTickerFresh(product);
+    const evidence = await getTickerFreshEvidence(product);
     if (!isActiveGeneration(generation)) return;
-    if (Number.isFinite(spot) && spot > 0) {
+    if (Number.isFinite(evidence.price) && evidence.price > 0) {
+      const receivedAt = Date.now();
       const ticks = convictionPriceTicks.get(sym) ?? [];
-      ticks.push({ price: spot, ts: Date.now() });
+      ticks.push(evidence.publishedAtMs == null
+        ? { price: evidence.price, ts: receivedAt }
+        : {
+          price: evidence.price,
+          ts: receivedAt,
+          oraclePublishedAtMs: evidence.publishedAtMs,
+          oracleAgeMs: receivedAt - evidence.publishedAtMs,
+        });
       // Keep ~5 min of history at 1 s cadence; the guard filters to the
       // last few seconds via timestamp but deep history costs little.
       if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
@@ -158,6 +168,25 @@ async function refreshSpotTick(sym: string, product: string, generation: number)
       );
     }
   }
+}
+
+async function sampleSpotsOnceImpl(generation: number): Promise<void> {
+  await Promise.allSettled(
+    Object.entries(COIN_PRODUCT).map(([sym, product]) =>
+      refreshSpotTick(sym, product, generation)
+    ),
+  );
+}
+
+function sampleSpotsOnce(): Promise<void> {
+  if (spotSampleInFlight) return spotSampleInFlight;
+  const generation = pollerGeneration;
+  let run: Promise<void>;
+  run = sampleSpotsOnceImpl(generation).finally(() => {
+    if (spotSampleInFlight === run) spotSampleInFlight = null;
+  });
+  spotSampleInFlight = run;
+  return run;
 }
 
 /**
@@ -204,7 +233,6 @@ function startOrderbookWarmup(sym: string, ticker: string, generation: number): 
 
 async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
-  const spotWarmups: Promise<void>[] = [];
 
   // NOTE: the conviction zone is now derived PER SYMBOL inside the per-symbol
   // callback via getEffectiveConvictionZone(sym, S.config) — see the
@@ -237,25 +265,6 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
 
   await Promise.allSettled(
     syms.map(async (sym) => {
-      // ── Live spot-price tick for the direction guard ──────────────────────
-      // Fetch the REAL crypto spot price fresh (bypassing the 2 s ticker TTL)
-      // and push it into convictionPriceTicks.  This is the ONLY writer of that
-      // map — the direction guard reads it to detect consecutive-seconds adverse
-      // movement.  Previously the bot loop populated it from getCachedPrediction,
-      // whose predCache refreshes only every ~15 s, so every "tick" carried the
-      // same frozen price → the guard's net slope was always ~0 (flat) → it
-      // never blocked a wrong-way entry.  Fail-open: on fetch error or a 0/NaN
-      // price we push nothing, so a feed outage cannot fabricate a fake decline
-      // (the guard returns blocked=false when it has < 2 samples).
-      const product = COIN_PRODUCT[sym];
-      if (product) {
-        // Start this independently from the public Kalshi target request.
-        // Spot readiness must not add a network round-trip before zone
-        // dispatch, but the cycle still awaits it below before releasing its
-        // no-overlap lock.
-        spotWarmups.push(refreshSpotTick(sym, product, generation));
-      }
-
       // forceRefresh=true bypasses the TTL check without deleting the existing
       // cache entry.  The old entry stays readable to other callers until the
       // live fetch atomically overwrites it — no transient null gap.
@@ -410,11 +419,6 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
       // ─────────────────────────────────────────────────────────────────────
     }),
   );
-  // Spot warmups run in parallel with target work and do not delay individual
-  // zone dispatches.  Do await them before ending the cycle so the interval
-  // cannot start a second writer for the same symbol.
-  await Promise.allSettled(spotWarmups);
-
   // ── Periodic tick-feed health summary ────────────────────────────────────
   // Once a minute, log per-coin ok/fail counts since the previous summary so
   // production logs always show whether the direction-guard tick feed is
@@ -478,16 +482,22 @@ export function startConvictionPoller(): void {
   if (pollerHandle !== null) return;
   pollerGeneration += 1;
   convictionPriceTicks.clear();
-  logger.info("[conviction-poller] starting 1 s fresh-price poll");
+  logger.info("[conviction-poller] starting target poll and dedicated 1 s spot sampler");
   pollerHandle = setInterval(() => {
     pollOnce().catch((err) =>
       logger.debug({ err }, "[conviction-poller] poll error (non-fatal)"),
+    );
+  }, POLL_INTERVAL_MS);
+  spotSamplerHandle = setInterval(() => {
+    sampleSpotsOnce().catch((err) =>
+      logger.debug({ err }, "[conviction-poller] spot sample error (non-fatal)"),
     );
   }, POLL_INTERVAL_MS);
   // Fire immediately so the first bot tick after mode switch has fresh data.
   // Install the handle first: generation guards treat a missing handle as
   // stopped and must not discard this initial cycle.
   pollOnce().catch(() => {});
+  sampleSpotsOnce().catch(() => {});
 }
 
 /**
@@ -496,7 +506,10 @@ export function startConvictionPoller(): void {
 export function stopConvictionPoller(): void {
   pollerGeneration += 1;
   if (pollerHandle !== null) clearInterval(pollerHandle);
+  if (spotSamplerHandle !== null) clearInterval(spotSamplerHandle);
   pollerHandle = null;
+  spotSamplerHandle = null;
+  spotSampleInFlight = null;
   convictionPriceMap.clear();
   orderbookWarmups.clear();
   tickFeedHealth.clear();

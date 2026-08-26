@@ -15,6 +15,8 @@ describe("unified Scalper ledger wiring", () => {
   it("merges Scalper history instead of rendering a separate log", () => {
     assert.match(dashboardSource, /normalizeScalpOrders/);
     assert.match(dashboardSource, /scalper\/history\?limit=500/);
+    assert.match(dashboardSource, /kind=\$\{historyKind\}/);
+    assert.match(dashboardSource, /histSourceFilter === "skips" \? "skips" : "transactions"/);
     assert.doesNotMatch(dashboardSource, /ScalpTransactionLog/);
   });
 
@@ -81,6 +83,8 @@ describe("unified Scalper ledger wiring", () => {
   it("renders pre-submit guard evidence in Scalper history cards", () => {
     assert.match(transactionLogSource, /describeEntryGuardEvidence/);
     assert.match(transactionLogSource, /text-scalper-entry-guard-evidence-/);
+    assert.match(transactionLogSource, /button-scalper-entry-guard-evidence-/);
+    assert.match(transactionLogSource, /Safety checks passed · Show details/);
     assert.match(transactionLogSource, /SAFETY CHECKS PASSED/);
   });
 

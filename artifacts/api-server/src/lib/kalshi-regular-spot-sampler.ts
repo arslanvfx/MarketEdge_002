@@ -1,4 +1,4 @@
-import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
+import { CRYPTO_COINS, getTickerFreshEvidence } from "./crypto-data";
 import { convictionPriceTicks } from "./kalshi-bot-state";
 import { logger } from "./logger";
 import {
@@ -36,9 +36,10 @@ async function sampleOnce(): Promise<void> {
     );
     await collectRegularEntrySpotSamples({
       products: CRYPTO_COINS,
-      fetchFresh: getTickerFresh,
+      fetchFresh: getTickerFreshEvidence,
       samples: nextSamples,
       nowMs,
+      receiptClock: Date.now,
     });
     // A stop/mode transition may occur while network requests are in flight.
     // Never let that retired owner repopulate the shared map afterward.
@@ -46,6 +47,7 @@ async function sampleOnce(): Promise<void> {
       generation !== samplerGeneration
       || samplerHandle === null
       || samplerWindowStartMs !== windowStartMs
+      || Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS !== windowStartMs
     ) return;
     convictionPriceTicks.clear();
     for (const [symbol, ticks] of nextSamples) {
@@ -62,12 +64,12 @@ export function startRegularSpotSampler(): void {
   convictionPriceTicks.clear();
   samplerWindowStartMs = null;
   samplerGeneration += 1;
-  sampleOnce().catch(() => {});
   samplerHandle = setInterval(() => {
     sampleOnce().catch((err) =>
       logger.debug({ err }, "[regular-spot-sampler] sample failed"),
     );
   }, SAMPLE_INTERVAL_MS);
+  sampleOnce().catch(() => {});
   logger.info("[regular-spot-sampler] started 1 s regular-entry spot sampling");
 }
 

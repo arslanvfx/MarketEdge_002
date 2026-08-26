@@ -11,13 +11,19 @@ export const REGULAR_FREEFALL_ADVERSE_EXCURSION_THRESHOLD_PCT = 0.1;
 export const REGULAR_FREEFALL_ADVERSE_EXCURSION_RECOVERY_SECONDS = 3;
 
 export interface RegularFreefallGuardInput {
-  samples: Array<{ price: number; ts: number }>;
+  samples: Array<{
+    price: number;
+    ts: number;
+    oraclePublishedAtMs?: number | null;
+    oracleAgeMs?: number | null;
+  }>;
   side: "yes" | "no";
   nowMs: number;
   windowStartMs: number;
   closeTimeMs: number;
   targetPrice: number;
   hasProduct: boolean;
+  authoritativeCommodityCadence?: boolean;
 }
 
 export interface RegularFreefallGuardDecision extends FreefallPreSubmitDecision {
@@ -58,7 +64,12 @@ export function evaluateRegularFreefallPreSubmitGuard(
   // adverse-excursion layer non-vetoing. Regular conviction requires this
   // complete evidence set before every submission.
   const guardResult = checkFreefallGuard({
-    samples: input.samples.map(({ price, ts }) => ({ price, at: ts })),
+    samples: input.samples.map((sample) => ({
+      price: sample.price,
+      at: sample.ts,
+      oraclePublishedAtMs: sample.oraclePublishedAtMs,
+      oracleAgeMs: sample.oracleAgeMs,
+    })),
     side: input.side,
     nowMs: input.nowMs,
     directionEnabled: true,
@@ -78,6 +89,8 @@ export function evaluateRegularFreefallPreSubmitGuard(
       REGULAR_FREEFALL_ADVERSE_EXCURSION_THRESHOLD_PCT,
     adverseExcursionRecoverySeconds:
       REGULAR_FREEFALL_ADVERSE_EXCURSION_RECOVERY_SECONDS,
+    requireDistinctOraclePublishTimes: input.authoritativeCommodityCadence,
+    authoritativeCommodityCadence: input.authoritativeCommodityCadence,
   });
 
   return {

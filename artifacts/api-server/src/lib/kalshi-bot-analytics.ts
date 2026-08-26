@@ -9,6 +9,7 @@ import { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
 
 type BotMode = "paper" | "live";
 type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
+export type BotHistoryKind = "all" | "transactions" | "skips";
 
 // ---------------------------------------------------------------------------
 // History
@@ -88,19 +89,30 @@ export async function getBotTrend(limit = 50, filterMode?: BotMode, resetAt?: st
 // Returns bet-action records for the bot dashboard. Excludes routine warmup-buffer
 // skip rows (one per coin per window — too noisy) but includes gate-skip records
 // so entry-veto reasons (consensus, stale-signal, candle-reversal) appear in history.
-export async function getBotAllHistory(limit = 100, offset = 0, filterMode?: BotMode, resetAt?: string | null): Promise<unknown[]> {
+export async function getBotAllHistory(
+  limit = 100,
+  offset = 0,
+  filterMode?: BotMode,
+  resetAt?: string | null,
+  kind: BotHistoryKind = "all",
+): Promise<unknown[]> {
   try {
     const modeClause = filterMode ? sql` AND ${kalshiBotBetsTable.mode} = ${filterMode}` : sql``;
     const resetClause = resetAt
       ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
       : sql``;
+    const kindClause = kind === "transactions"
+      ? sql` AND ${kalshiBotBetsTable.action} IN ('bet', 'exit', 'late_recovery_exit', 'expired')`
+      : kind === "skips"
+        ? sql` AND ${kalshiBotBetsTable.action} = 'skip'`
+        : sql``;
     return await db
       .select()
       .from(kalshiBotBetsTable)
       .where(sql`
         ${kalshiBotBetsTable.action} NOT IN ('warmup')
         AND NOT (${kalshiBotBetsTable.action} = 'skip' AND ${kalshiBotBetsTable.signals}->>'reason' IN ('warmup-buffer', 'candle-cache-not-warm'))
-        AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}${resetClause}`)
+        AND ${kalshiBotBetsTable.archivedAt} IS NULL${modeClause}${resetClause}${kindClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit)
       .offset(offset);

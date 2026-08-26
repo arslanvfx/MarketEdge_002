@@ -29,7 +29,7 @@ interface CoinSignalBoardProps {
   maxBetMinWindowEntryMinutes?: number | null;
   extremeCautionAborted?: string[];
   /** Per-coin direction block info when the conviction guard is actively blocking entry. Cleared when guard passes. */
-  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
+  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; advisory?: boolean; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; evidenceClass?: "unavailable" | "adverse" | "clear"; reason?: string | null; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
   activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
 }
 
@@ -126,12 +126,14 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
               <th className="text-left px-3 py-2 font-medium"><span className="inline-flex items-center gap-1"><Brain className="w-3 h-3" />Claude</span></th>
               <th className="text-left px-3 py-2 font-medium"><span className="inline-flex items-center gap-1"><Cpu className="w-3 h-3" />ML</span></th>
               <th className="text-left px-3 py-2 font-medium">Agreement</th>
+               <th className="text-left px-3 py-2 font-medium">Live guard</th>
             </tr>
           </thead>
           <tbody>
             {syms.map((sym) => {
               const s = liveSignals[sym];
               const strike = pinnedStrikes.current[sym] ?? null;
+               const guard = convictionDirectionBlocked?.[sym] ?? null;
               return (
                 <tr key={sym} className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
                   <td className="px-5 py-2.5 font-bold text-foreground">{sym}</td>
@@ -148,6 +150,32 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
                   </td>
                   <td className="px-3 py-2.5"><Dir above={s.mlAbove} confidence={s.mlConfidence} /></td>
                   <td className="px-3 py-2.5"><AgreementBadge signals={s} /></td>
+                   <td className="px-3 py-2.5">
+                     {guard ? (
+                       <span
+                         data-testid={`status-regular-guard-${sym}`}
+                         className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                           guard.advisory
+                             ? "bg-blue-500/10 text-blue-300 border-blue-500/25"
+                             : guard.evidenceClass === "unavailable"
+                               ? "bg-slate-500/15 text-slate-300 border-slate-500/25"
+                               : "bg-orange-500/15 text-orange-300 border-orange-500/25"
+                         }`}
+                         title={guard.advisory
+                           ? `Paper advisory: a live entry would be blocked${guard.reason ? ` (${guard.reason})` : ""}; paper entry still proceeds`
+                           : guard.evidenceClass === "unavailable"
+                             ? `Guard unavailable${guard.reason ? ` (${guard.reason})` : ""}; live entry blocked fail-closed`
+                             : `Momentum blocked${guard.reason ? ` (${guard.reason})` : ""}`}
+                       >
+                         <AlertTriangle className="w-2.5 h-2.5" />
+                         {guard.advisory
+                           ? "Would block live"
+                           : guard.evidenceClass === "unavailable" ? "Unavailable" : "Blocked"}
+                       </span>
+                     ) : (
+                       <span className="text-muted-foreground/40 text-xs font-mono">—</span>
+                     )}
+                   </td>
                 </tr>
               );
             })}
@@ -169,7 +197,7 @@ interface MarketConditionsBoardProps {
   trajectoryConfig?: TrajectoryThresholds | null;
   maxBetMinWindowEntryMinutes?: number | null;
   extremeCautionAborted?: string[];
-  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
+  convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; advisory?: boolean; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; evidenceClass?: "unavailable" | "adverse" | "clear"; reason?: string | null; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
   activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
 }
 
@@ -291,14 +319,16 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                         </span>
                       )}
                       {dirBlockInfo != null && (() => {
-                        const { direction: blockedDir, gate, slopePct, effectiveThreshold, lookback, fromPrice, toPrice } = dirBlockInfo;
+                        const { direction: blockedDir, advisory, gate, evidenceClass, reason, slopePct, effectiveThreshold, lookback, fromPrice, toPrice } = dirBlockInfo;
                         const isTickGate = gate === "tick";
                         const isCandleGate = gate === "candle-decline" || gate === "candle-rise";
-                        const isNoDataGate = gate === "no-data";
+                        const isNoDataGate = gate === "no-data" || evidenceClass === "unavailable";
 
                         let tooltipText: string;
-                        if (isNoDataGate) {
-                          tooltipText = "Direction guard: no usable price data (neither live ticks nor candles) — entry blocked until the price feed recovers (fail-closed safety)";
+                        if (advisory) {
+                          tooltipText = `Paper advisory: a live entry would be blocked${reason ? ` (${reason})` : ""}; the paper entry still proceeds`;
+                        } else if (isNoDataGate) {
+                          tooltipText = `Guard unavailable${reason ? ` (${reason})` : ""} — entry blocked until authoritative price evidence recovers (fail-closed safety)`;
                         } else if (isTickGate) {
                           const from = fromPrice != null ? `$${fromPrice.toFixed(2)}` : "?";
                           const to   = toPrice   != null ? `$${toPrice.toFixed(2)}`   : "?";
@@ -313,16 +343,23 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                             : `Candle-trend gate: ${lookback ?? "?"}-candle rising slope ${slope}${thresh} — NO entry held back until trend stabilises`;
                         }
 
-                        const label = isNoDataGate
-                          ? "No data"
+                        const label = advisory
+                          ? "Would block live"
+                          : isNoDataGate
+                          ? "Guard unavailable"
+                          : evidenceClass === "adverse"
+                            ? "Momentum blocked"
                           : isTickGate
                             ? (blockedDir === "yes" ? "Tick ↓" : "Tick ↑")
                             : (blockedDir === "yes" ? "Trend ↓" : "Trend ↑");
 
                         return (
                           <span
+                            data-testid={`status-direction-guard-${sym}`}
                             className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
-                              isNoDataGate
+                              advisory
+                                ? "bg-blue-500/10 text-blue-300 border-blue-500/25"
+                              : isNoDataGate
                                 ? "bg-slate-500/15 text-slate-300 border-slate-500/25"
                                 : isCandleGate
                                   ? "bg-red-500/15 text-red-300 border-red-500/25"

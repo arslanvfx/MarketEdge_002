@@ -301,7 +301,16 @@ export function callConvictionZoneEntry(
 // Used by the direction guard to detect consecutive-seconds adverse movement.
 // Entries are pushed on every poller read and trimmed to the last 30.
 // Cleared on window transition so each window starts with a clean slate.
-export const convictionPriceTicks = new Map<string, Array<{ price: number; ts: number }>>();
+export interface ConvictionPriceTick {
+  price: number;
+  /** Local receipt timestamp used for strict newest-sample freshness. */
+  ts: number;
+  /** Pyth publication timestamp; null/absent for Coinbase. */
+  oraclePublishedAtMs?: number | null;
+  /** Oracle age at local receipt time. */
+  oracleAgeMs?: number | null;
+}
+export const convictionPriceTicks = new Map<string, ConvictionPriceTick[]>();
 // Counts emergency closes (out-of-zone fills) per `sym:windowKey` this window.
 // After MAX_EMERGENCY_CLOSES_PER_WINDOW the coin is locked out for the rest of
 // the window — prevents the buy → emergency-close → re-buy bleed loop
@@ -310,10 +319,16 @@ export const convictionEmergencyCloses = new Map<string, number>();
 
 export interface ConvictionDirectionBlockInfo {
   direction: "yes" | "no";
+  /** Paper-mode verdict only: the simulated entry proceeds, but live would block. */
+  advisory?: boolean;
   /** Which gate fired: 7-second tick slope ("tick"), multi-candle slope
    *  ("candle-decline" | "candle-rise"), or fail-closed data outage ("no-data" —
    *  neither poller ticks nor candles had ≥2 usable points at entry time) */
   gate: "tick" | "candle-decline" | "candle-rise" | "no-data";
+  /** Structured regular-guard outcome for dashboard copy and styling. */
+  evidenceClass?: "unavailable" | "adverse" | "clear";
+  /** Exact machine reason from the final regular freefall decision. */
+  reason?: string | null;
   /** Candle-gate: slope % over the lookback window (positive = rising, negative = falling) */
   slopePct?: number;
   /** Effective threshold used by the gate (may be ATR-scaled) */

@@ -768,29 +768,42 @@ function selectCommodityOracleSamples(
       || !Number.isFinite(sample.oracleAgeMs)
       || (sample.oracleAgeMs as number) < 0
       || (sample.oracleAgeMs as number) > 5_000
-    ) return { ok: false, reason: "adverse_excursion_unavailable_oracle_stale", samplesUsed: 0 };
+    ) return { ok: false, reason: "freefall_unavailable_oracle_stale", samplesUsed: 0 };
     // Repeated polling receipts never become extra cadence observations.
     byPublishTime.set(publishedAt as number, sample);
   }
-  const samples = [...byPublishTime.values()].sort(
+  const receipts = [...byPublishTime.values()].sort(
     (a, b) => a.oraclePublishedAtMs! - b.oraclePublishedAtMs!,
   );
-  if (samples.length < CONTRARIAN_COMMODITY_MIN_DISTINCT_PUBLISHES) {
-    return { ok: false, reason: "adverse_excursion_unavailable_distinct_publishes", samplesUsed: samples.length };
+  if (receipts.length < CONTRARIAN_COMMODITY_MIN_DISTINCT_PUBLISHES) {
+    return { ok: false, reason: "freefall_unavailable_distinct_publishes", samplesUsed: receipts.length };
   }
-  const newest = samples[samples.length - 1];
+  const newest = receipts[receipts.length - 1];
   if (nowMs - newest.oraclePublishedAtMs! > 5_000 || newest.oraclePublishedAtMs! > nowMs + 1_000) {
-    return { ok: false, reason: "adverse_excursion_unavailable_oracle_stale", samplesUsed: samples.length };
+    return { ok: false, reason: "freefall_unavailable_oracle_stale", samplesUsed: receipts.length };
   }
-  for (let index = 1; index < samples.length; index += 1) {
-    const gap = samples[index].oraclePublishedAtMs! - samples[index - 1].oraclePublishedAtMs!;
+  const selected: FreefallSample[] = [newest];
+  for (let index = receipts.length - 2; index >= 0; index -= 1) {
+    const gap = selected[0].oraclePublishedAtMs! - receipts[index].oraclePublishedAtMs!;
     if (gap <= 0 || gap > CONTRARIAN_COMMODITY_MAX_ORACLE_PUBLISH_GAP_MS) {
-      return { ok: false, reason: "adverse_excursion_unavailable_oracle_gap", samplesUsed: samples.length };
+      return { ok: false, reason: "freefall_unavailable_oracle_gap", samplesUsed: selected.length };
     }
+    selected.unshift(receipts[index]);
+    if (
+      selected.length >= CONTRARIAN_COMMODITY_MIN_DISTINCT_PUBLISHES
+      && newest.oraclePublishedAtMs! - selected[0].oraclePublishedAtMs!
+        >= lookbackSeconds * 1_000
+    ) break;
   }
-  if (newest.at - samples[0].at < lookbackSeconds * 1_000) {
-    return { ok: false, reason: "adverse_excursion_unavailable_warming", samplesUsed: samples.length };
+  if (newest.oraclePublishedAtMs! - selected[0].oraclePublishedAtMs! < lookbackSeconds * 1_000) {
+    return { ok: false, reason: "freefall_unavailable_warming", samplesUsed: selected.length };
   }
+  const samples = selected.map((sample) => ({
+    ...sample,
+    // All movement math must use the authoritative publication cadence.
+    // Local receipt freshness is enforced separately before this selector.
+    at: sample.oraclePublishedAtMs!,
+  }));
   return { ok: true, samples };
 }
 
@@ -822,7 +835,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
       : 0,
   );
   const requiredSamples = longestRequiredMoves > 0
-    ? longestRequiredMoves + 1
+    ? input.authoritativeCommodityCadence
+      ? CONTRARIAN_COMMODITY_MIN_DISTINCT_PUBLISHES
+      : longestRequiredMoves + 1
     : 0;
   const unavailable = (reason: string, samplesUsed: number): FreefallGuardResult => ({
     evaluable: false,
@@ -921,7 +936,13 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   );
   const cutoff = Math.max(
     input.eligibilityStartMs,
-    input.nowMs - (maxObservationSeconds + 3) * 1_000,
+    input.nowMs - (
+      maxObservationSeconds * 1_000
+      + (input.authoritativeCommodityCadence
+        ? (CONTRARIAN_COMMODITY_MIN_DISTINCT_PUBLISHES - 1)
+          * CONTRARIAN_COMMODITY_MAX_ORACLE_PUBLISH_GAP_MS
+        : 3_000)
+    ),
   );
   // Only VALID (finite, positive price; sane timestamp after the caller's
   // same-window observation boundary) samples.
@@ -957,7 +978,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   }
 
   const directional = input.directionEnabled
-    ? selectCadencedSamples(relevant, requiredMoves)
+    ? input.authoritativeCommodityCadence
+      ? selectCommodityOracleSamples(relevant, requiredMoves, input.nowMs)
+      : selectCadencedSamples(relevant, requiredMoves)
     : null;
   if (directional && !directional.ok) {
     return unavailable(directional.reason, directional.samplesUsed);
@@ -1130,7 +1153,9 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   let rapidSamples: FreefallSample[] = [];
   let rapidMoveReason: string | null = null;
   if (input.rapidMoveEnabled) {
-    const rapid = selectCadencedSamples(relevant, rapidRequiredMoves);
+    const rapid = input.authoritativeCommodityCadence
+      ? selectCommodityOracleSamples(relevant, rapidRequiredMoves, input.nowMs)
+      : selectCadencedSamples(relevant, rapidRequiredMoves);
     if (!rapid.ok) {
       return unavailable(
         rapid.reason.replace(/^freefall_/, "rapid_move_"),

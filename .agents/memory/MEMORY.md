@@ -134,3 +134,4 @@
 - [Scalper paper/live parity](scalper-paper-live-parity.md) — compare outcomes only with matching entry timing, overrides, and guard toggles; otherwise each mode evaluates different market evidence
 - [Daily trading P&L boundary](daily-trading-pnl-boundary.md) — resets at DST-aware New York midnight; includes only regular bot plus canonical High-Value Scalper settlements
 - [Smart Exit ownership boundary](smart-exit-ownership-boundary.md) — recommendations never own positions; execution requires durable owner delegation and final pre-submit revalidation.
+- [Transaction history row limits](transaction-history-row-limits.md) — filter transactions vs. high-volume skip telemetry in SQL before limiting rows, or real bets disappear from the UI.

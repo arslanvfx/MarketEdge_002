@@ -72,6 +72,7 @@ import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-s
 import { closePosition, persistBetRecord } from "./kalshi-bot-close";
 import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-tick";
 import { getConvictionLivePrice } from "./kalshi-conviction-poller";
+import { clearRegularFreefallTelemetryCoalescing } from "./kalshi-freefall-telemetry";
 import {
   triggerWindowPipeline, runPipelineRecheck, registerPipelineCompleteCallback,
   type PipelineResult,
@@ -599,6 +600,7 @@ export async function runBotLoopTick(): Promise<void> {
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
     tickAbortReasons.clear();
+    clearRegularFreefallTelemetryCoalescing();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
     convictionBoostWindowCoins.clear();

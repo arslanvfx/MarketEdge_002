@@ -1651,13 +1651,16 @@ router.get("/crypto/bot/history", async (req, res) => {
 
 // GET /crypto/bot/all-history?limit=100&offset=0&mode=paper|live (public — all records for dashboard)
 router.get("/crypto/bot/all-history", async (req, res) => {
-  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
+  const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? "100"), 10) || 100));
   const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
   const mode = req.query.mode === "paper" || req.query.mode === "live" ? req.query.mode as BotMode : undefined;
+  const kind = req.query.kind === "transactions" || req.query.kind === "skips"
+    ? req.query.kind
+    : "all";
   const cfg2 = getBotState().config;
   const resetAt = mode === "live" ? (cfg2.liveStatsResetAt ?? null) : mode === "paper" ? (cfg2.paperStatsResetAt ?? null) : null;
   try {
-    const history = await getBotAllHistory(limit, offset, mode, resetAt);
+    const history = await getBotAllHistory(limit, offset, mode, resetAt, kind);
     res.json({ history });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

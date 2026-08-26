@@ -482,21 +482,29 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         if (ege == null) return null;
                         const egeLines = describeEntryGuardEvidence(ege);
                         return (
-                          <div
-                            data-testid={`text-scalper-entry-guard-evidence-${r.id}`}
-                            className="w-full mt-1.5 flex flex-col gap-0.5 text-[10px] font-mono text-amber-200/60"
-                          >
-                            {egeLines.map((line) => (
-                              <span
-                                key={line}
-                                className={line.startsWith("SAFETY CHECKS PASSED")
-                                  ? "font-bold text-emerald-400/80"
-                                  : undefined}
-                              >
-                                {line}
-                              </span>
-                            ))}
-                          </div>
+                          <details className="w-full mt-1.5 text-[10px] font-mono text-amber-200/60">
+                            <summary
+                              data-testid={`button-scalper-entry-guard-evidence-${r.id}`}
+                              className="cursor-pointer select-none font-semibold text-emerald-400/80 hover:text-emerald-300"
+                            >
+                              Safety checks passed · Show details
+                            </summary>
+                            <div
+                              data-testid={`text-scalper-entry-guard-evidence-${r.id}`}
+                              className="mt-1 flex flex-col gap-0.5 border-l border-amber-400/20 pl-2"
+                            >
+                              {egeLines.map((line) => (
+                                <span
+                                  key={line}
+                                  className={line.startsWith("SAFETY CHECKS PASSED")
+                                    ? "font-bold text-emerald-400/80"
+                                    : undefined}
+                                >
+                                  {line}
+                                </span>
+                              ))}
+                            </div>
+                          </details>
                         );
                       })()}
                       {/* Strike-proximity gap — how far the crypto price was from the Kalshi strike when the bet was placed */}
