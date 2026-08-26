@@ -598,6 +598,11 @@ router.get("/crypto/bot/daily-pnl", async (req, res) => {
       ? requestedMode
       : getBotState().mode;
   try {
+    res.set({
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    });
     res.json(await getDailyTradingPnl(mode));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";

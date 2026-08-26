@@ -14,6 +14,7 @@ import {
 export interface DailyTradingPnl {
   mode: BotMode;
   timeZone: "America/New_York";
+  asOf: string;
   dayStartAt: string;
   nextResetAt: string;
   regularPnl: number;
@@ -40,6 +41,7 @@ export async function getDailyTradingPnl(mode: BotMode): Promise<DailyTradingPnl
   return {
     mode,
     timeZone: "America/New_York",
+    asOf: new Date().toISOString(),
     dayStartAt,
     nextResetAt,
     regularPnl,

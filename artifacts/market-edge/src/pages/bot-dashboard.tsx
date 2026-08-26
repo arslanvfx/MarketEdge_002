@@ -259,9 +259,10 @@ export default function BotDashboard() {
     refetchInterval: 30_000,
   });
 
-  const { data: dailyPnlData } = useQuery<{
+  const { data: dailyPnlData, isError: dailyPnlError } = useQuery<{
     mode: "paper" | "live";
     timeZone: "America/New_York";
+    asOf: string;
     dayStartAt: string;
     nextResetAt: string;
     regularPnl: number;
@@ -269,8 +270,20 @@ export default function BotDashboard() {
     totalPnl: number;
   }>({
     queryKey: ["bot-daily-pnl", activeMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/daily-pnl?mode=${activeMode}`).then(r => r.json()),
-    refetchInterval: 5_000,
+    queryFn: async () => {
+      const response = await fetch(`${API_BASE}/crypto/bot/daily-pnl?mode=${activeMode}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body?.error ?? "Unable to load authoritative daily P&L");
+      }
+      return body;
+    },
+    refetchInterval: 3_000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   });
 
   const { data: evalData } = useQuery<{ evaluation: WindowEval[] }>({
@@ -608,6 +621,16 @@ export default function BotDashboard() {
   const regularOpenPosList = status?.openPositions ?? [];
   const openPosList = [...regularOpenPosList, ...normalizedScalps.positions];
   const pnl = dailyPnlData?.totalPnl ?? 0;
+  const pnlUpdatedLabel = dailyPnlData?.asOf
+    ? `Updated ${new Date(dailyPnlData.asOf).toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZone: "America/New_York",
+      })} ET`
+    : dailyPnlError
+      ? "Authoritative total unavailable"
+      : "Loading authoritative total…";
   const winRate = (stats?.totalBets ?? 0) > 0 ? Math.round((stats!.wins / stats!.totalBets) * 100) : 0;
 
   const statusLabel = () => {
@@ -683,7 +706,14 @@ export default function BotDashboard() {
               label: status?.mode === "live" ? "Kalshi Balance" : "Paper Balance",
               value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400",
             },
-            { label: `Today's P&L (${activeMode})`, value: fmt$(pnl), icon: pnl >= 0 ? TrendingUp : TrendingDown, color: pnl >= 0 ? "text-emerald-400" : "text-red-400", bold: true },
+            {
+              label: `Today's P&L (${activeMode})`,
+              value: dailyPnlData ? fmt$(pnl) : dailyPnlError ? "Unavailable" : "Loading…",
+              sub: pnlUpdatedLabel,
+              icon: pnl >= 0 ? TrendingUp : TrendingDown,
+              color: dailyPnlData ? (pnl >= 0 ? "text-emerald-400" : "text-red-400") : "text-amber-400",
+              bold: true,
+            },
             { label: `Win Rate (${activeMode})`, value: `${winRate}%`, icon: Trophy, color: "text-violet-400" },
             { label: `Total Bets (${activeMode})`, value: `${stats?.totalBets ?? 0}`, sub: `${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`, icon: BarChart3, color: "text-amber-400" },
           ].map(({ label, value, sub, icon: Icon, color, bold }) => (
