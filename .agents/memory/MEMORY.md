@@ -67,7 +67,7 @@
 - [Kalshi API type drift](kalshi-api-type-drift.md) — Kalshi progressively converts numeric fields to strings; use Number(x) > 0 not typeof checks; floor_strike and yes_ask both affected
 - [Kalshi GTC time_in_force](kalshi-gtc-tif.md) — Kalshi v2 rejects "good_till_cancelled"; use "gtc"; mapping added in placeOrder body; "fill_or_kill" and "immediate_or_cancel" still accepted as-is
 - [Kalshi RSA key format](kalshi-rsa-key-format.md) — KALSHI_PRIVATE_KEY stored as raw base64 (no headers); getPrivateKey() must wrap it in PKCS#1 PEM before signing
-- [Kalshi routed balances](kalshi-balance-api-fields.md) — balance is cash, but unscoped reads aggregate exchanges; execution guards must query the exact submitted exchange_index
+- [Kalshi routed balances](kalshi-balance-api-fields.md) — check the submitted exchange_index; when routed cash is below budget, downsize the fee-safe IOC instead of dropping the candidate
 - [Bot mode variable naming](bot-mode-variable-name.md) — runBotLoopTick/_runBotTick use module-level botMode; ${mode} throws ReferenceError in those functions
 - [FOK 409 throw/swallow split](fok-retry-split.md) — placeOrder must re-throw fill_or_kill 409 (exits detect kills via throw); only placeOrderWithRetry swallows+retries (Phase1 same-price, Phase2 +1c escalation)
 - [Late-entry hard floor](late-entry-floor.md) — minRemainingMinutes guard is stale (tick-start snapshot); hard 3-min floor re-checked with fresh Date.now() immediately before placeOrderWithRetry — two-layer design

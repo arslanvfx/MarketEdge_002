@@ -3388,11 +3388,62 @@ async function _executeScalpAttempt(
   // ── Size the order STRICTLY within the durable reserved budget ─────────────
   // Principal plus the upward-rounded worst-case taker fee at the band-capped
   // IOC limit is guaranteed to remain within reservedBudget.
-  const sized = sizeOrderWithinReservedBudget(reservedBudget, winningAsk, snapshot.bandMax);
+  //
+  // In live mode, a routed exchange shard can have less immediately usable cash
+  // than the configured budget even when the overall Kalshi account is funded.
+  // Do not throw away an otherwise valid narrow-window candidate in that case:
+  // reserve the one-cent balance buffer up front and size to the largest IOC the
+  // routed cash can actually support. The final balance decision below remains
+  // authoritative and fail-closed.
+  const requestedSized = sizeOrderWithinReservedBudget(
+    reservedBudget,
+    winningAsk,
+    snapshot.bandMax,
+  );
+  const availableBalanceCents =
+    mode === "live"
+    && balanceResult.ok
+    && balanceResult.availableBalance != null
+    && Number.isFinite(balanceResult.availableBalance)
+    && balanceResult.availableBalance >= 0
+      ? Math.floor(balanceResult.availableBalance * 100 + 1e-9)
+      : null;
+  const routedSpendableBudget =
+    availableBalanceCents == null
+      ? reservedBudget
+      : Math.min(
+          reservedBudget,
+          Math.max(0, availableBalanceCents - 1) / 100,
+        );
+  const sized =
+    requestedSized.ok
+    && routedSpendableBudget + 1e-9 < requestedSized.budgetRequired
+      ? sizeOrderWithinReservedBudget(
+          routedSpendableBudget,
+          winningAsk,
+          snapshot.bandMax,
+        )
+      : requestedSized;
   if (!sized.ok) {
-    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", sized.reason ?? "sizing_failed", true, {
+    const sizingReason =
+      mode === "live"
+      && availableBalanceCents != null
+      && requestedSized.ok
+        ? "insufficient_balance_final"
+        : sized.reason ?? "sizing_failed";
+    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", sizingReason, true, {
       ..._timingEvidence(),
+      requestedBudget: reservedBudget,
+      availableBalance: balanceResult.availableBalance,
+      balanceExchangeIndex: balanceResult.exchangeIndex,
     });
+    _rememberReservationOutcome(
+      attemptKey,
+      "skipped",
+      sizingReason,
+      priorSubmittedOrders,
+      runtime.nowMs(),
+    );
     return;
   }
   const {
@@ -3407,6 +3458,7 @@ async function _executeScalpAttempt(
     sized,
   );
   const balanceEvidence = {
+    requestedBudget: reservedBudget,
     availableBalance: balanceResult.availableBalance,
     balanceExchangeIndex: balanceResult.exchangeIndex,
     maxExposure,
@@ -3415,6 +3467,26 @@ async function _executeScalpAttempt(
     safetyMargin: balanceDecision.safetyMarginCents / 100,
     totalRequired: balanceDecision.totalRequiredCents / 100,
   };
+  if (
+    mode === "live"
+    && requestedSized.ok
+    && contractCount < requestedSized.contractCount
+  ) {
+    logger.info(
+      {
+        symbol,
+        balanceExchangeIndex: balanceResult.exchangeIndex,
+        availableBalance: balanceResult.availableBalance,
+        requestedContracts: requestedSized.contractCount,
+        submittedContracts: contractCount,
+        requestedTotalRequired:
+          requestedSized.budgetRequired
+          + balanceDecision.safetyMarginCents / 100,
+        submittedTotalRequired: balanceDecision.totalRequiredCents / 100,
+      },
+      "[kalshi-scalper] routed balance below configured budget — downsizing IOC instead of skipping",
+    );
+  }
 
   // ── FINAL live balance check against ACTUAL worst-case submit exposure ─────
   if (mode === "live") {
