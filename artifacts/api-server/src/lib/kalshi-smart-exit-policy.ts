@@ -23,6 +23,9 @@ export const DEFAULT_SMART_EXIT_CONFIG: SmartExitConfig = Object.freeze({
   hardStopWindowSeconds: 5,
   rapidLossRatio: 0.50,
   minExitEdge: 0.01,
+  deepLossHoldThreshold: 0.80,
+  terminalLossHoldThreshold: 0.90,
+  deepLossRecoveryMinSeconds: 210,
   continuationWeights: Object.freeze({ momentum: 0.34, tradeFlow: 0.33, book: 0.33 }),
   appliedVersions: Object.freeze({}),
 });
@@ -70,6 +73,39 @@ export interface SmartExitCrossingRisk {
   readonly directionalCount: number;
   readonly crossingTrajectoryPlausible: boolean;
   readonly crossingRiskConfirmed: boolean;
+}
+
+export interface SmartExitDeepLossInput {
+  readonly capitalLossFraction: number | null;
+  readonly remainingSeconds: number;
+  readonly recoveryReachable: boolean;
+  readonly deepLossHoldThreshold: number;
+  readonly terminalLossHoldThreshold: number;
+  readonly recoveryMinSeconds: number;
+}
+
+export interface SmartExitDeepLossAssessment {
+  readonly hold: boolean;
+  readonly kind: "none" | "recovery" | "terminal";
+}
+
+/** Shared by live policy and replay so deep-loss handling cannot drift. */
+export function assessSmartExitDeepLossHold(
+  input: SmartExitDeepLossInput,
+): SmartExitDeepLossAssessment {
+  const loss = input.capitalLossFraction;
+  if (loss == null || !Number.isFinite(loss)) return { hold: false, kind: "none" };
+  if (loss + 1e-9 >= input.terminalLossHoldThreshold) {
+    return { hold: true, kind: "terminal" };
+  }
+  if (
+    loss + 1e-9 >= input.deepLossHoldThreshold
+    && input.remainingSeconds + 1e-9 >= input.recoveryMinSeconds
+    && input.recoveryReachable
+  ) {
+    return { hold: true, kind: "recovery" };
+  }
+  return { hold: false, kind: "none" };
 }
 
 /** The sole target-crossing projection used by both live policy and replay. */
@@ -231,6 +267,9 @@ type DecisionMetrics = Omit<SmartExitDecision,
 function emptyMetrics(): DecisionMetrics {
   return {
     marketLossFraction: null,
+    capitalLossFraction: null,
+    deepLossHoldActive: false,
+    deepLossHoldKind: "none",
     highRisk: false,
     underlyingVelocityPerSecond: null,
     adverseVelocityPerSecond: null,
@@ -269,6 +308,9 @@ function evidenceProblem(position: SmartExitPosition, evidence: SmartExitEvidenc
   if (position.underlyingKind === "commodity") return "commodity microstructure is unsupported";
   if (config.totalWindowSeconds <= 0 || config.minVolatilityLogReturnPerSqrtSecond <= 0 ||
       config.fatTailVolatilityMultiplier <= 0 || config.debounceCount < 1 ||
+      config.deepLossHoldThreshold < 0 || config.deepLossHoldThreshold > 1 ||
+      config.terminalLossHoldThreshold < config.deepLossHoldThreshold ||
+      config.terminalLossHoldThreshold > 1 || config.deepLossRecoveryMinSeconds < 0 ||
       config.rapidLossRatio <= 0 || config.rapidLossRatio > 1 || config.minExitEdge < 0) return "configuration is invalid";
   if (now - evidence.observedAtSeconds > config.maxEvidenceAgeSeconds || evidence.observedAtSeconds > now) return "evidence is stale or clock-invalid";
   if (!isFresh(evidence.spotReceivedAtSeconds, now, config.maxEvidenceAgeSeconds)) {
@@ -372,10 +414,17 @@ export function evaluateSmartExit(
     : null;
   const quoteFresh = isFresh(evidence.marketQuoteObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
   const marketBookFresh = isFresh(evidence.marketBookObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
-  const executionEvidenceReady = quoteFresh && marketBookFresh
+  const fullSaleEvidenceReady = quoteFresh && marketBookFresh
     && finite(evidence.marketExecutablePrice) && evidence.marketExecutablePrice > 0
-    && minimumWinningPrice !== null && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice
     && liquidityCoverage !== null && liquidityCoverage >= 1;
+  const executionEvidenceReady = fullSaleEvidenceReady
+    && minimumWinningPrice !== null && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice
+  const capitalLossFraction = fullSaleEvidenceReady
+    && estimatedSaleValue !== null
+    && Number.isFinite(position.entryStake)
+    && position.entryStake > 0
+    ? clamp((position.entryStake - estimatedSaleValue) / position.entryStake, 0, 1)
+    : null;
   const degradedComponents: string[] = [];
   if (!isFresh(evidence.tapeReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)) degradedComponents.push("coinbase_tape");
   if (!isFresh(evidence.bookReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)) degradedComponents.push("coinbase_book");
@@ -390,6 +439,9 @@ export function evaluateSmartExit(
     threshold,
     continuationScore: continuation,
     marketLossFraction,
+    capitalLossFraction,
+    deepLossHoldActive: false,
+    deepLossHoldKind: "none" as const,
     highRisk,
     underlyingVelocityPerSecond: velocity,
     adverseVelocityPerSecond: adverseVelocity,
@@ -439,6 +491,28 @@ export function evaluateSmartExit(
     && executionEvidenceReady;
   const mayExecute = config.mode === "live-exit" && executionEvidenceReady;
   if (exitReady) {
+    const deepLossHold = assessSmartExitDeepLossHold({
+      capitalLossFraction,
+      remainingSeconds: remaining,
+      recoveryReachable: volatilityReachableBeforeExpiry,
+      deepLossHoldThreshold: config.deepLossHoldThreshold,
+      terminalLossHoldThreshold: config.terminalLossHoldThreshold,
+      recoveryMinSeconds: config.deepLossRecoveryMinSeconds,
+    });
+    if (deepLossHold.hold) {
+      return {
+        disposition: "HOLD",
+        reason: deepLossHold.kind === "terminal"
+          ? "90%+ capital loss protection blocked an otherwise eligible exit — leave position to resolve"
+          : "80–90% capital loss protection blocked an otherwise eligible exit — target remains reachable with at least 3:30 remaining",
+        mayExecuteExit: false,
+        riskStage: "hold",
+        nextState: nextBase,
+        ...shared,
+        deepLossHoldActive: true,
+        deepLossHoldKind: deepLossHold.kind,
+      };
+    }
     return {
       disposition: "EXIT_SIGNAL",
       reason: alreadyAcrossTarget

@@ -293,12 +293,22 @@ export function BotSmartExitPanel({ authPost }: Props) {
                     </td>
                     <td className="px-4 py-3 align-middle text-[10px] font-mono tabular-nums">
                       <div className="flex flex-col gap-1 w-full pr-4">
-                        <div className="flex justify-between items-center w-full">
-                           <span className="text-slate-500">Loss</span>
-                           {ev.marketLossFraction != null ? (
-                             <span className={ev.marketLossFraction > 0 ? "text-red-400" : "text-emerald-400"}>{(ev.marketLossFraction * 100).toFixed(1)}%</span>
+                         <div className="flex justify-between items-center w-full">
+                            <span className="text-slate-500">Sale loss</span>
+                            {(ev.capitalLossFraction ?? ev.marketLossFraction) != null ? (
+                              <span className={(ev.capitalLossFraction ?? ev.marketLossFraction ?? 0) > 0 ? "text-red-400" : "text-emerald-400"}>
+                                {((ev.capitalLossFraction ?? ev.marketLossFraction ?? 0) * 100).toFixed(1)}%
+                              </span>
                            ) : <span className="text-slate-600">—</span>}
                         </div>
+                         {ev.deepLossHoldActive && (
+                           <div className="flex justify-between items-center w-full">
+                             <span className="text-amber-300">Guard</span>
+                             <span className="text-amber-300 uppercase">
+                               {ev.deepLossHoldKind === "terminal" ? "90% hold" : "Recovery hold"}
+                             </span>
+                           </div>
+                         )}
                         <div className="flex justify-between items-center w-full">
                            <span className="text-slate-500">Rem</span>
                            {ev.secondsRemaining != null ? (

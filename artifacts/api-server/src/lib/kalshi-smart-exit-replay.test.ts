@@ -109,6 +109,7 @@ const durableEvaluation = (
   executionEvidenceReady: true,
   liquidityCoverage: 1,
   estimatedSaleValue: 0.4,
+  entryStake: 0.8,
   remainingQuantity: 1,
   ...overrides,
 } as SmartExitEvaluationRecord);
@@ -161,6 +162,70 @@ test("durable replay treats a fully executable actual crossing as immediate", ()
   ]);
   assert.equal(replay[0]!.candidateExit?.timestampSeconds, 20);
   assert.match(replay[0]!.candidateExit?.reason ?? "", /actual target crossing/);
+});
+
+test("durable replay applies the same terminal and recoverable deep-loss holds as live policy", () => {
+  const settlement = {
+    owner: "regular" as const,
+    positionId: "p",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 500,
+    entryContractCost: 0.8,
+    quantity: 1,
+    holdToExpiryPnl: 0.2,
+  };
+  const terminal = buildCrossingRiskReplayLifecycles([settlement], [
+    durableEvaluation(100, {
+      secondsRemaining: 400,
+      underlyingPrice: 99,
+      estimatedSaleValue: 0.08,
+    }),
+  ]);
+  assert.equal(terminal[0]!.candidateExit, null);
+
+  const recoverable = buildCrossingRiskReplayLifecycles([settlement], [
+    durableEvaluation(100, {
+      secondsRemaining: 400,
+      underlyingPrice: 99,
+      estimatedSaleValue: 0.12,
+    }),
+  ]);
+  assert.equal(recoverable[0]!.candidateExit, null);
+
+  const tooLate = buildCrossingRiskReplayLifecycles([settlement], [
+    durableEvaluation(291, {
+      secondsRemaining: 209,
+      underlyingPrice: 99,
+      estimatedSaleValue: 0.12,
+    }),
+  ]);
+  assert.equal(tooLate[0]!.candidateExit?.timestampSeconds, 291);
+});
+
+test("durable replay uses the recorded remaining stake after a partial position reduction", () => {
+  const replay = buildCrossingRiskReplayLifecycles([{
+    owner: "regular",
+    positionId: "p",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 500,
+    entryContractCost: 0.8,
+    quantity: 10,
+    holdToExpiryPnl: -8,
+  }], [
+    durableEvaluation(291, {
+      secondsRemaining: 209,
+      underlyingPrice: 99,
+      remainingQuantity: 2,
+      entryStake: 1.6,
+      estimatedSaleValue: 0.16,
+      capitalLossFraction: 0.9,
+    }),
+  ]);
+  assert.equal(replay[0]!.candidateExit, null);
 });
 
 test("durable replay refuses partial liquidity and reports dollars saved versus forfeited", () => {

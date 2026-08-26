@@ -123,6 +123,12 @@ export interface SmartExitConfig {
   readonly rapidLossRatio: number;
   /** Minimum per-contract advantage required for selling over the model hold value. */
   readonly minExitEdge: number;
+  /** Capital-loss fraction where recovery protection starts (default 80%). */
+  readonly deepLossHoldThreshold: number;
+  /** Capital-loss fraction where the position is always left to resolve (default 90%). */
+  readonly terminalLossHoldThreshold: number;
+  /** Minimum time required for the conditional 80–90% recovery hold. */
+  readonly deepLossRecoveryMinSeconds: number;
   readonly continuationWeights: {
     readonly momentum: number;
     readonly tradeFlow: number;
@@ -138,6 +144,15 @@ export interface SmartExitAppliedVersion {
   readonly version: string;
   readonly liveEligible: boolean;
   readonly appliedAt: string;
+  /** Immutable policy values validated for this owner/symbol. */
+  readonly parameters?: {
+    readonly debounceCount: number;
+    readonly confirmationLevel: number;
+    readonly minExitEdge: number;
+    readonly deepLossHoldThreshold: number;
+    readonly terminalLossHoldThreshold: number;
+    readonly deepLossRecoveryMinSeconds: number;
+  };
 }
 
 export interface SmartExitState {
@@ -163,6 +178,10 @@ export interface SmartExitDecision {
   readonly continuationScore: number | null;
   readonly riskStage: SmartExitRiskStage;
   readonly marketLossFraction: number | null;
+  /** Loss on a fresh full-position executable sale versus actual remaining entry stake. */
+  readonly capitalLossFraction: number | null;
+  readonly deepLossHoldActive: boolean;
+  readonly deepLossHoldKind: "none" | "recovery" | "terminal";
   readonly highRisk: boolean;
   readonly underlyingVelocityPerSecond: number | null;
   readonly adverseVelocityPerSecond: number | null;
@@ -222,6 +241,9 @@ export interface SmartExitEvaluationRecord {
   readonly recommendation: "off" | "hold" | "watch" | "prepare_exit" | "exit" | "unavailable";
   readonly riskStage: SmartExitRiskStage;
   readonly marketLossFraction: number | null;
+  readonly capitalLossFraction: number | null;
+  readonly deepLossHoldActive: boolean;
+  readonly deepLossHoldKind: "none" | "recovery" | "terminal";
   readonly highRisk: boolean;
   readonly underlyingVelocityPerSecond: number | null;
   readonly adverseVelocityPerSecond: number | null;
@@ -236,6 +258,8 @@ export interface SmartExitEvaluationRecord {
   readonly marketQuoteAgeMs: number | null;
   readonly marketBookAgeMs: number | null;
   readonly estimatedSaleValue: number | null;
+  /** Actual remaining entry stake at evaluation time. */
+  readonly entryStake: number | null;
   readonly expectedHoldValue: number | null;
   readonly exitEdgePerContract: number | null;
   readonly executableQuantity: number | null;

@@ -6,6 +6,7 @@
 import type { SmartExitEvaluationRecord } from "./kalshi-smart-exit-types.ts";
 import {
   assessSmartExitCrossingRisk,
+  assessSmartExitDeepLossHold,
   SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
 } from "./kalshi-smart-exit-policy.ts";
 
@@ -125,6 +126,9 @@ export interface SmartExitCrossingCandidateOptions {
   readonly maxCrossingReserveSeconds?: number;
   readonly fatTailVolatilityMultiplier?: number;
   readonly minVolatilityLogReturnPerSqrtSecond?: number;
+  readonly deepLossHoldThreshold?: number;
+  readonly terminalLossHoldThreshold?: number;
+  readonly deepLossRecoveryMinSeconds?: number;
   /** Maximum gap between samples that can count as sustained one-second evidence. */
   readonly maxSampleGapSeconds?: number;
 }
@@ -261,6 +265,9 @@ export function buildCrossingRiskReplayLifecycles(
     fatTailVolatilityMultiplier: options.fatTailVolatilityMultiplier ?? 1.25,
     minVolatilityLogReturnPerSqrtSecond:
       options.minVolatilityLogReturnPerSqrtSecond ?? 0.000001,
+    deepLossHoldThreshold: options.deepLossHoldThreshold ?? 0.80,
+    terminalLossHoldThreshold: options.terminalLossHoldThreshold ?? 0.90,
+    deepLossRecoveryMinSeconds: options.deepLossRecoveryMinSeconds ?? 210,
     maxSampleGapSeconds:
       options.maxSampleGapSeconds ?? SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
   };
@@ -275,6 +282,11 @@ export function buildCrossingRiskReplayLifecycles(
       || settings.maxCrossingReserveSeconds < settings.minCrossingReserveSeconds
       || settings.fatTailVolatilityMultiplier <= 0
       || settings.minVolatilityLogReturnPerSqrtSecond <= 0
+      || settings.deepLossHoldThreshold < 0
+      || settings.deepLossHoldThreshold > 1
+      || settings.terminalLossHoldThreshold < settings.deepLossHoldThreshold
+      || settings.terminalLossHoldThreshold > 1
+      || settings.deepLossRecoveryMinSeconds < 0
       || settings.maxSampleGapSeconds <= 0) {
     throw new Error("crossing candidate settings are invalid");
   }
@@ -340,8 +352,26 @@ export function buildCrossingRiskReplayLifecycles(
         && sample.remainingQuantity > 0
         && sample.liquidityCoverage !== null
         && sample.liquidityCoverage >= 1;
+      const entryStake = sample.entryStake ?? (
+        settlement.entryContractCost * sample.remainingQuantity
+      );
+      const capitalLossFraction = sample.capitalLossFraction ?? (
+        sample.estimatedSaleValue !== null
+        && entryStake > 0
+        ? Math.max(0, Math.min(1, (entryStake - sample.estimatedSaleValue) / entryStake))
+        : null
+      );
+      const deepLossHold = assessSmartExitDeepLossHold({
+        capitalLossFraction,
+        remainingSeconds: sample.secondsRemaining,
+        recoveryReachable: crossing?.volatilityReachableBeforeExpiry ?? false,
+        deepLossHoldThreshold: settings.deepLossHoldThreshold,
+        terminalLossHoldThreshold: settings.terminalLossHoldThreshold,
+        recoveryMinSeconds: settings.deepLossRecoveryMinSeconds,
+      });
       if (
         crossing?.crossingRiskConfirmed
+        && !deepLossHold.hold
         && (
           crossing.targetAlreadyCrossed
           || (

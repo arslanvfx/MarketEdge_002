@@ -9,6 +9,10 @@ Every executable signal still requires fresh underlying, quote, and order-book e
 
 Live policy and durable replay must use the same pure crossing-risk state transition and cadence continuity rule. Calibration uses authoritative exchange settlement, chronological holdout, and slippage sensitivity; it optimizes total P&L and remains advisory until explicitly applied by an operator.
 
-**Why:** The user wants to stop Smart Exit from selling winners early when Kalshi reprices or the underlying makes ordinary noise, without losing protection when the target is genuinely likely to cross.
+Deep-loss protection is based on fresh full-position executable sale proceeds versus the actual remaining entry stake. A loss below 80% preserves ordinary policy. From 80% to below 90%, an otherwise valid exit is blocked only when at least 210 seconds remain and volatility-based target recovery is reachable. At 90% or worse, an otherwise valid exit is always blocked so the position resolves. This protection may veto an exit but never create one.
 
-**How to apply:** Route all future live and replay exit paths through the shared crossing assessment. Treat repricing as confirmation only, preserve fail-closed execution evidence, and never auto-activate a replay recommendation.
+Live authorization is per owner and symbol. Any applied version used for execution must carry the immutable parameter snapshot that replay validated; label-only legacy versions fail closed. Different symbols may be approved or rejected independently, but do not introduce a global target-cross delay from sparse outcomes.
+
+**Why:** The user wants to stop Smart Exit from selling winners early when Kalshi reprices or the underlying makes ordinary noise, without losing protection when the target is genuinely likely to cross. Recent settled triggers showed immediate crossings helped BTC/ETH but shallow ZEC/XRP crossings recovered, so symbol-specific validation is safer than one universal delay.
+
+**How to apply:** Route all future live and replay exit paths through the shared crossing and deep-loss assessments. Treat repricing as confirmation only, preserve fail-closed full-position evidence, use actual remaining stake, and never auto-activate or execute an incomplete replay recommendation.

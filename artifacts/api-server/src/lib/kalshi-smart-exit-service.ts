@@ -49,6 +49,7 @@ import { fetchKalshiMarketResult } from "./kalshi-trader.ts";
 import { requestSmartExitFromOwner } from "./kalshi-smart-exit-owners.ts";
 import {
   authorizeSmartExitExecution,
+  hasCompleteSmartExitParameterSnapshot,
   smartExitVersionKey,
 } from "./kalshi-smart-exit-execution.ts";
 import type {
@@ -368,6 +369,24 @@ function currentVersion(position: SmartExitPosition): SmartExitAppliedVersion | 
   return config.appliedVersions[smartExitVersionKey(position.owner.kind, position.symbol)] ?? null;
 }
 
+function effectiveConfigForPosition(position: SmartExitPosition): SmartExitConfig {
+  const applied = currentVersion(position);
+  if (applied == null) return config;
+  if (!hasCompleteSmartExitParameterSnapshot(applied)) {
+    return { ...config, mode: "shadow" };
+  }
+  const parameters = applied.parameters;
+  return {
+    ...config,
+    debounceCount: parameters.debounceCount,
+    confirmationLevel: parameters.confirmationLevel,
+    minExitEdge: parameters.minExitEdge,
+    deepLossHoldThreshold: parameters.deepLossHoldThreshold,
+    terminalLossHoldThreshold: parameters.terminalLossHoldThreshold,
+    deepLossRecoveryMinSeconds: parameters.deepLossRecoveryMinSeconds,
+  };
+}
+
 function positionVersionAuthorized(
   position: SmartExitPosition,
   version: string,
@@ -624,11 +643,12 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
   const nowMs = Date.now();
   const nowSeconds = nowMs / 1_000;
   const key = identityKey(position.owner.kind, position.positionId);
+  const effectiveConfig = effectiveConfigForPosition(position);
   const decision = evaluateSmartExit(
     position,
     evidence,
     states.get(key) ?? INITIAL_SMART_EXIT_STATE,
-    config,
+    effectiveConfig,
     nowSeconds,
   );
   states.set(key, decision.nextState);
@@ -678,6 +698,9 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     continuationScore: decision.continuationScore,
     riskStage: decision.riskStage,
     marketLossFraction: decision.marketLossFraction,
+    capitalLossFraction: decision.capitalLossFraction,
+    deepLossHoldActive: decision.deepLossHoldActive,
+    deepLossHoldKind: decision.deepLossHoldKind,
     highRisk: decision.highRisk,
     underlyingVelocityPerSecond: decision.underlyingVelocityPerSecond,
     adverseVelocityPerSecond: decision.adverseVelocityPerSecond,
@@ -692,6 +715,7 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     marketQuoteAgeMs: evidence.marketQuoteObservedAtSeconds == null ? null : nowMs - evidence.marketQuoteObservedAtSeconds * 1_000,
     marketBookAgeMs: evidence.marketBookObservedAtSeconds == null ? null : nowMs - evidence.marketBookObservedAtSeconds * 1_000,
     estimatedSaleValue: decision.estimatedSaleValue,
+    entryStake: Number.isFinite(position.entryStake) ? position.entryStake : null,
     expectedHoldValue: decision.expectedHoldValue,
     exitEdgePerContract: decision.exitEdgePerContract,
     executableQuantity: evidence.marketExecutableQuantity,
@@ -714,7 +738,7 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     reasonCode: reasonCode(decision.disposition, decision.reason),
     reason: decision.reason,
     debounceProgress: decision.nextState.adverseSampleCount,
-    debounceTarget: config.debounceCount,
+    debounceTarget: effectiveConfig.debounceCount,
     hysteresisUntil: decision.nextState.holdUntilSeconds > nowSeconds
       ? new Date(decision.nextState.holdUntilSeconds * 1_000).toISOString()
       : null,
@@ -921,6 +945,7 @@ export async function updateSmartExitConfig(patch: Record<string, unknown>): Pro
     "hysteresisSeconds", "hardStopProbabilityDrop", "hardStopWindowSeconds",
     "maxEvidenceAgeSeconds", "minVolatilityLogReturnPerSqrtSecond",
     "fatTailVolatilityMultiplier", "probabilityShrinkage", "rapidLossRatio", "minExitEdge",
+    "deepLossHoldThreshold", "terminalLossHoldThreshold", "deepLossRecoveryMinSeconds",
   ]);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`unsupported config field: ${key}`);
   const next: SmartExitConfig = { ...config };
@@ -942,11 +967,17 @@ export async function updateSmartExitConfig(patch: Record<string, unknown>): Pro
     probabilityShrinkage: [0, 0.9],
     rapidLossRatio: [0.1, 0.9],
     minExitEdge: [0, 0.25],
+    deepLossHoldThreshold: [0, 1],
+    terminalLossHoldThreshold: [0, 1],
+    deepLossRecoveryMinSeconds: [0, 900],
   };
   for (const [name, range] of Object.entries(ranges)) {
     if (patch[name] !== undefined) Object.assign(next, { [name]: boundedNumber(patch[name], range[0], range[1], name) });
   }
   if (patch.debounceCount !== undefined) Object.assign(next, { debounceCount: Math.floor(next.debounceCount) });
+  if (next.terminalLossHoldThreshold < next.deepLossHoldThreshold) {
+    throw new Error("terminalLossHoldThreshold must be greater than or equal to deepLossHoldThreshold");
+  }
   await saveSmartExitConfig(next);
   config = next;
   if (next.enabled) startScheduler(); else stopScheduler();
@@ -1207,6 +1238,9 @@ export async function calibrateSmartExitFromDurableHistory(params: {
       crossingReserveFraction: 0.2,
       minCrossingReserveSeconds: 5,
       maxCrossingReserveSeconds: 30,
+      deepLossHoldThreshold: config.deepLossHoldThreshold,
+      terminalLossHoldThreshold: config.terminalLossHoldThreshold,
+      deepLossRecoveryMinSeconds: config.deepLossRecoveryMinSeconds,
     } as const;
     const lifecycles = buildCrossingRiskReplayLifecycles(
       settlements,
@@ -1223,6 +1257,9 @@ export async function calibrateSmartExitFromDurableHistory(params: {
       `d${candidateParameters.debounceCount}`,
       `c${candidateParameters.confirmationLevel.toFixed(2)}`,
       `m${candidateParameters.minMarketLossFraction.toFixed(2)}`,
+      `dl${candidateParameters.deepLossHoldThreshold.toFixed(2)}`,
+      `tl${candidateParameters.terminalLossHoldThreshold.toFixed(2)}`,
+      `r${candidateParameters.deepLossRecoveryMinSeconds}`,
     ].join("-");
     const payload = {
       totalEvaluated: lifecycles.length,
@@ -1276,12 +1313,32 @@ export async function applySmartExitParameterVersion(params: {
   if (!holdoutPassed || !slippagePassed) {
     throw new Error("validated report lacks required holdout and slippage evidence");
   }
+  const reportParameters = payload.parameters as Partial<NonNullable<SmartExitAppliedVersion["parameters"]>> | undefined;
+  if (
+    reportParameters == null
+    || !Number.isFinite(reportParameters.debounceCount)
+    || !Number.isFinite(reportParameters.confirmationLevel)
+    || !Number.isFinite(reportParameters.minExitEdge)
+    || !Number.isFinite(reportParameters.deepLossHoldThreshold)
+    || !Number.isFinite(reportParameters.terminalLossHoldThreshold)
+    || !Number.isFinite(reportParameters.deepLossRecoveryMinSeconds)
+  ) {
+    throw new Error("validated report lacks a complete immutable parameter snapshot");
+  }
   const applied: SmartExitAppliedVersion = {
     owner: params.owner,
     symbol,
     version: params.version,
     liveEligible: payload.liveEligible === true,
     appliedAt: new Date().toISOString(),
+    parameters: {
+      debounceCount: Math.floor(reportParameters.debounceCount!),
+      confirmationLevel: reportParameters.confirmationLevel!,
+      minExitEdge: reportParameters.minExitEdge!,
+      deepLossHoldThreshold: reportParameters.deepLossHoldThreshold!,
+      terminalLossHoldThreshold: reportParameters.terminalLossHoldThreshold!,
+      deepLossRecoveryMinSeconds: reportParameters.deepLossRecoveryMinSeconds!,
+    },
   };
   const next: SmartExitConfig = {
     ...config,

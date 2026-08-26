@@ -1341,6 +1341,9 @@ export interface SmartExitConfig {
   enabled: boolean;
   mode: "off" | "shadow" | "paper-exit" | "live-exit";
   appliedVersions?: Record<string, { owner: string; symbol: string; version: string; liveEligible: boolean; appliedAt: string }>;
+  deepLossHoldThreshold?: number;
+  terminalLossHoldThreshold?: number;
+  deepLossRecoveryMinSeconds?: number;
 }
 
 export interface SmartExitComponentHealth {
@@ -1366,6 +1369,9 @@ export interface SmartExitEvaluation {
   confidence: number | null;
   reason: string;
   marketLossFraction?: number | null;
+  capitalLossFraction?: number | null;
+  deepLossHoldActive?: boolean;
+  deepLossHoldKind?: "none" | "recovery" | "terminal";
   secondsRemaining?: number | null;
   projectedCrossingSeconds?: number | null;
   projectedCrossBeforeExpiry?: boolean | null;

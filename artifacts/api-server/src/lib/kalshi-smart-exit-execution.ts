@@ -80,6 +80,28 @@ export type SmartExitExecutionAuthorization =
   | { authorized: true; parameterVersion: string }
   | { authorized: false; reason: string };
 
+export function hasCompleteSmartExitParameterSnapshot(
+  appliedVersion: SmartExitAppliedVersion,
+): appliedVersion is SmartExitAppliedVersion & {
+  parameters: NonNullable<SmartExitAppliedVersion["parameters"]>;
+} {
+  const parameters = appliedVersion.parameters;
+  return parameters != null
+    && Number.isInteger(parameters.debounceCount)
+    && parameters.debounceCount >= 1
+    && Number.isFinite(parameters.confirmationLevel)
+    && Number.isFinite(parameters.minExitEdge)
+    && parameters.minExitEdge >= 0
+    && Number.isFinite(parameters.deepLossHoldThreshold)
+    && parameters.deepLossHoldThreshold >= 0
+    && parameters.deepLossHoldThreshold <= 1
+    && Number.isFinite(parameters.terminalLossHoldThreshold)
+    && parameters.terminalLossHoldThreshold >= parameters.deepLossHoldThreshold
+    && parameters.terminalLossHoldThreshold <= 1
+    && Number.isFinite(parameters.deepLossRecoveryMinSeconds)
+    && parameters.deepLossRecoveryMinSeconds >= 0;
+}
+
 /**
  * The only policy gate allowed to cross from recommendation to owner request.
  * It is intentionally pure so off/shadow/non-matching behavior can be proven
@@ -96,6 +118,9 @@ export function authorizeSmartExitExecution(params: {
   if (config.mode === "shadow") return { authorized: false, reason: "shadow mode never executes" };
   if (recommendation !== "exit") return { authorized: false, reason: "no exit recommendation" };
   if (!appliedVersion) return { authorized: false, reason: "no operator-applied parameter version" };
+  if (!hasCompleteSmartExitParameterSnapshot(appliedVersion)) {
+    return { authorized: false, reason: "parameter version lacks an immutable policy snapshot" };
+  }
   if (
     appliedVersion.owner !== position.owner.kind
     || appliedVersion.symbol.toUpperCase() !== position.symbol.toUpperCase()

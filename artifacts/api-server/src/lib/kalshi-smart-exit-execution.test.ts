@@ -37,6 +37,14 @@ const version: SmartExitAppliedVersion = {
   version: "validated-v1",
   liveEligible: true,
   appliedAt: "2026-08-26T12:00:00.000Z",
+  parameters: {
+    debounceCount: DEFAULT_SMART_EXIT_CONFIG.debounceCount,
+    confirmationLevel: DEFAULT_SMART_EXIT_CONFIG.confirmationLevel,
+    minExitEdge: DEFAULT_SMART_EXIT_CONFIG.minExitEdge,
+    deepLossHoldThreshold: DEFAULT_SMART_EXIT_CONFIG.deepLossHoldThreshold,
+    terminalLossHoldThreshold: DEFAULT_SMART_EXIT_CONFIG.terminalLossHoldThreshold,
+    deepLossRecoveryMinSeconds: DEFAULT_SMART_EXIT_CONFIG.deepLossRecoveryMinSeconds,
+  },
 };
 
 function configured(mode: SmartExitConfig["mode"]): SmartExitConfig {
@@ -66,6 +74,11 @@ test("live execution requires exact scope and live-eligible applied version", ()
   assert.equal(authorizeSmartExitExecution({
     config: configured("live-exit"), position, recommendation: "exit",
     appliedVersion: { ...version, liveEligible: false },
+  }).authorized, false);
+  const { parameters: _parameters, ...legacyVersion } = version;
+  assert.equal(authorizeSmartExitExecution({
+    config: configured("live-exit"), position, recommendation: "exit",
+    appliedVersion: legacyVersion,
   }).authorized, false);
 });
 

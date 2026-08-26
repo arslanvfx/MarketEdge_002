@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_SMART_EXIT_CONFIG, INITIAL_SMART_EXIT_STATE, adverseContinuationScore,
+  assessSmartExitDeepLossHold,
   evaluateSmartExit, modelWinProbability, probabilityDropThreshold,
 } from "./kalshi-smart-exit-policy.ts";
 import type { SmartExitEvidence, SmartExitPosition } from "./kalshi-smart-exit-types.ts";
@@ -228,6 +229,86 @@ test("actual target crossing does not wait for a 25-percent Kalshi repricing", (
   assert.equal(decision.targetAlreadyCrossed, true);
   assert.equal(decision.disposition, "EXIT_SIGNAL");
   assert.equal(decision.mayExecuteExit, true);
+});
+
+test("deep-loss recovery protection uses the exact 80/90 percent and 3:30 boundaries", () => {
+  const base = {
+    remainingSeconds: 210,
+    recoveryReachable: true,
+    deepLossHoldThreshold: 0.8,
+    terminalLossHoldThreshold: 0.9,
+    recoveryMinSeconds: 210,
+  };
+  assert.deepEqual(
+    assessSmartExitDeepLossHold({ ...base, capitalLossFraction: 0.799 }),
+    { hold: false, kind: "none" },
+  );
+  assert.deepEqual(
+    assessSmartExitDeepLossHold({ ...base, capitalLossFraction: 0.8 }),
+    { hold: true, kind: "recovery" },
+  );
+  assert.deepEqual(
+    assessSmartExitDeepLossHold({ ...base, capitalLossFraction: 0.899, remainingSeconds: 209 }),
+    { hold: false, kind: "none" },
+  );
+  assert.deepEqual(
+    assessSmartExitDeepLossHold({ ...base, capitalLossFraction: 0.899, recoveryReachable: false }),
+    { hold: false, kind: "none" },
+  );
+  assert.deepEqual(
+    assessSmartExitDeepLossHold({
+      ...base,
+      capitalLossFraction: 0.9,
+      remainingSeconds: 1,
+      recoveryReachable: false,
+    }),
+    { hold: true, kind: "terminal" },
+  );
+});
+
+test("90-percent executable capital loss always blocks a live exit signal", () => {
+  const decision = evaluateSmartExit(
+    { ...position, entryStake: 1 },
+    evidence({ underlyingPrice: 1, marketExecutablePrice: 0.1, marketExecutableQuantity: 1 }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(decision.capitalLossFraction, 0.9);
+  assert.equal(decision.deepLossHoldActive, true);
+  assert.equal(decision.deepLossHoldKind, "terminal");
+  assert.equal(decision.disposition, "HOLD");
+  assert.equal(decision.mayExecuteExit, false);
+});
+
+test("deep-loss protection ignores partial and stale executable evidence", () => {
+  const partial = evaluateSmartExit(
+    { ...position, entryStake: 1 },
+    evidence({ underlyingPrice: 1, marketExecutablePrice: 0.05, marketExecutableQuantity: 0.5 }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(partial.capitalLossFraction, null);
+  assert.equal(partial.deepLossHoldActive, false);
+  assert.equal(partial.disposition, "PREPARE_EXIT");
+
+  const stale = evaluateSmartExit(
+    { ...position, entryStake: 1 },
+    evidence({
+      underlyingPrice: 1,
+      marketExecutablePrice: 0.05,
+      marketExecutableQuantity: 1,
+      marketQuoteObservedAtSeconds: 1,
+      marketBookObservedAtSeconds: 1,
+    }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(stale.capitalLossFraction, null);
+  assert.equal(stale.deepLossHoldActive, false);
+  assert.notEqual(stale.disposition, "HOLD");
 });
 
 test("quiet tape degrades confidence without erasing the shadow decision", () => {
