@@ -3,7 +3,7 @@ import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Shield, AlertTriangle, PowerOff } from "lucide-react";
 import { API_BASE, fmt$, fmtDateTime } from "./utils";
-import type { SmartExitStatus, SmartExitEvaluation, SmartExitReplayReport, SmartExitCapability, SmartExitConfig, SmartExitComponentHealth } from "./types";
+import type { SmartExitStatus, SmartExitEvaluation, SmartExitReplayReport, SmartExitCapability, SmartExitConfig, SmartExitComponentHealth, SmartExitLifecycleLedger } from "./types";
 
 const fmtConf = (n: number | undefined | null) => n != null ? `${(n * 100).toFixed(1)}%` : "—";
 const fmtTime = (iso: string) => {
@@ -102,9 +102,9 @@ export function BotSmartExitPanel({ authPost }: Props) {
     refetchInterval: 1000,
   });
 
-  const { data: history } = useQuery<{ evaluations: SmartExitEvaluation[] }>({
-    queryKey: ["smart-exit-history"],
-    queryFn: () => fetch(`${API_BASE}/crypto/smart-exit/history?limit=50`).then(r => r.json()),
+  const { data: lifecycle } = useQuery<SmartExitLifecycleLedger>({
+    queryKey: ["smart-exit-lifecycle"],
+    queryFn: () => fetch(`${API_BASE}/crypto/smart-exit/lifecycle?limit=100`).then(r => r.json()),
     refetchInterval: 15000,
   });
 
@@ -218,12 +218,12 @@ export function BotSmartExitPanel({ authPost }: Props) {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-white/10">
+      <div className="flex flex-col divide-y divide-white/10">
         
-        {/* Left Column: Active & History */}
+        {/* Full-width active area */}
         <div className="flex flex-col h-full bg-[#0d1017]">
           <SectionHeader title="Current Evaluations" />
-          <div className="overflow-x-auto min-h-[168px]">
+          <div className="overflow-x-auto overflow-y-auto min-h-[252px] max-h-[704px]">
             <table className="w-full min-w-[760px] table-fixed text-left text-xs whitespace-nowrap">
               <thead>
                 <tr className="border-b border-white/5 text-[9px] text-slate-500 uppercase tracking-wider">
@@ -354,36 +354,58 @@ export function BotSmartExitPanel({ authPost }: Props) {
             </table>
           </div>
 
-          <SectionHeader title="Recent History" />
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(420px,1fr)] divide-y xl:divide-y-0 xl:divide-x divide-white/10">
+        <div className="flex flex-col h-full bg-[#0d1017]">
+          <SectionHeader title={`Exit Lifecycle & Effectiveness · ${lifecycle?.summary.triggered ?? 0} triggered · ${lifecycle?.summary.sold ?? 0} sold · ${lifecycle?.summary.settled ?? 0} settled`} />
           <div className="overflow-x-auto overflow-y-auto max-h-[300px]">
-            <table className="w-full min-w-[500px] table-fixed text-left text-xs whitespace-nowrap">
+            <table className="w-full min-w-[780px] table-fixed text-left text-xs whitespace-nowrap">
               <thead>
                 <tr className="border-b border-white/5 text-[9px] text-slate-500 uppercase tracking-wider">
-                  <th className="w-[100px] px-4 py-2 font-medium">Time</th>
-                  <th className="w-[100px] px-4 py-2 font-medium">Market</th>
-                  <th className="w-[140px] px-4 py-2 font-medium">Action</th>
-                  <th className="w-auto px-4 py-2 font-medium">Reason</th>
+                  <th className="w-[105px] px-4 py-2 font-medium">Triggered</th>
+                  <th className="w-[90px] px-4 py-2 font-medium">Market</th>
+                  <th className="w-[110px] px-4 py-2 font-medium">Sold</th>
+                  <th className="w-[110px] px-4 py-2 font-medium">Execution</th>
+                  <th className="w-[120px] px-4 py-2 font-medium">Settlement</th>
+                  <th className="w-[130px] px-4 py-2 font-medium">Effect</th>
+                  <th className="w-auto px-4 py-2 font-medium text-right">Value Saved</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {history?.evaluations?.map(ev => (
-                  <tr key={ev.id || `${ev.symbol}-${ev.timestamp}`} className="hover:bg-white/[0.02] transition-colors h-12">
+                {lifecycle?.records?.map(item => (
+                  <tr key={item.id} className="hover:bg-white/[0.02] transition-colors h-12">
                     <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-500 tabular-nums">
-                      {fmtTime(ev.timestamp)}
+                      {fmtTime(item.triggeredAt)}
                     </td>
                     <td className="px-4 py-2 align-middle font-bold text-slate-200 text-xs">
-                      {ev.symbol}
+                      {item.symbol} <span className="text-[9px] text-slate-500">{item.side.toUpperCase()}</span>
                     </td>
-                    <td className="px-4 py-2 align-middle">
-                      <RecBadge ev={ev} mode={mode} />
+                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-400">
+                      {item.soldAt ? fmtTime(item.soldAt) : "—"}
                     </td>
-                    <td className="px-4 py-2 align-middle text-[10px] text-slate-400 font-mono truncate max-w-[200px]" title={ev.reason || ""}>
-                      {ev.reason || "—"}
+                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300">
+                      {item.advisoryOnly ? "SHADOW" : item.executionStatus.toUpperCase()}
+                    </td>
+                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300">
+                      {item.settlementResult ? `${item.settlementResult.toUpperCase()} settled` : "Pending"}
+                    </td>
+                    <td className={`px-4 py-2 align-middle text-[10px] font-bold uppercase ${
+                      item.verdict === "saved_loss" ? "text-emerald-400" :
+                      item.verdict === "missed_win" || item.verdict === "reduced_profit" ? "text-red-400" :
+                      "text-slate-500"
+                    }`}>
+                      {item.verdict.replaceAll("_", " ")}
+                    </td>
+                    <td className={`px-4 py-2 align-middle text-right text-[10px] font-mono tabular-nums ${
+                      (item.valueSaved ?? 0) > 0 ? "text-emerald-400" : (item.valueSaved ?? 0) < 0 ? "text-red-400" : "text-slate-500"
+                    }`}>
+                      {item.valueSaved == null ? "—" : `${item.valueSaved > 0 ? "+" : ""}${fmt$(item.valueSaved)}`}
                     </td>
                   </tr>
                 ))}
-                {!history?.evaluations?.length && (
-                  <tr><td colSpan={4} className="px-4 py-4 text-center text-slate-600 text-[10px] font-mono italic h-12 align-middle">No recent history</td></tr>
+                {!lifecycle?.records?.length && (
+                  <tr><td colSpan={7} className="px-4 py-4 text-center text-slate-600 text-[10px] font-mono italic h-12 align-middle">No Smart Exit triggers recorded yet</td></tr>
                 )}
               </tbody>
             </table>
@@ -491,6 +513,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
             </table>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

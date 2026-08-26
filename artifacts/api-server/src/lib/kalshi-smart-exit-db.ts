@@ -8,6 +8,7 @@ import type {
   SmartExitEvaluationRecord,
   SmartExitEvidence,
   SmartExitOwnerKind,
+  SmartExitLifecycleRecord,
   SmartExitState,
 } from "./kalshi-smart-exit-types.ts";
 
@@ -148,6 +149,25 @@ export async function runSmartExitMigrations(): Promise<void> {
       )`);
     await client.query(`CREATE INDEX IF NOT EXISTS smart_exit_recovery_position
       ON kalshi_smart_exit_recovery_studies (owner, position_id, observed_at DESC)`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kalshi_smart_exit_lifecycles (
+        id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL CHECK (owner IN ('regular','scalper')),
+        position_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        ticker TEXT NOT NULL,
+        triggered_at TIMESTAMPTZ NOT NULL,
+        settled_at TIMESTAMPTZ,
+        payload JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (owner, position_id)
+      )`);
+    await client.query(`ALTER TABLE kalshi_smart_exit_lifecycles
+      ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ`);
+    await client.query(`CREATE INDEX IF NOT EXISTS smart_exit_lifecycles_recent
+      ON kalshi_smart_exit_lifecycles (triggered_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS smart_exit_lifecycles_unsettled
+      ON kalshi_smart_exit_lifecycles (triggered_at ASC) WHERE settled_at IS NULL`);
     migrated = true;
     logger.info("[kalshi-smart-exit] DB migrations complete");
   } finally {
@@ -379,4 +399,46 @@ export async function listOpenScalperPositions(): Promise<Array<Record<string, u
     WHERE status = 'filled' AND settlement_result IS NULL AND filled_count > 0
     ORDER BY created_at ASC`);
   return result.rows;
+}
+
+export async function upsertSmartExitLifecycle(record: SmartExitLifecycleRecord): Promise<void> {
+  await ensureMigrated();
+  await pool.query(`
+    INSERT INTO kalshi_smart_exit_lifecycles
+      (id,owner,position_id,symbol,ticker,triggered_at,settled_at,payload,updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+    ON CONFLICT (owner,position_id) DO UPDATE SET
+      settled_at=EXCLUDED.settled_at, payload=EXCLUDED.payload, updated_at=NOW()`,
+  [record.id, record.owner, record.positionId, record.symbol, record.ticker,
+    record.triggeredAt, record.settledAt, record]);
+}
+
+export async function getSmartExitLifecycle(
+  owner: SmartExitOwnerKind, positionId: string,
+): Promise<SmartExitLifecycleRecord | null> {
+  await ensureMigrated();
+  const result = await pool.query(
+    `SELECT payload FROM kalshi_smart_exit_lifecycles WHERE owner=$1 AND position_id=$2`,
+    [owner, positionId],
+  );
+  return (result.rows[0]?.payload as SmartExitLifecycleRecord | undefined) ?? null;
+}
+
+export async function listSmartExitLifecycles(limit = 100): Promise<SmartExitLifecycleRecord[]> {
+  await ensureMigrated();
+  const result = await pool.query(
+    `SELECT payload FROM kalshi_smart_exit_lifecycles ORDER BY triggered_at DESC LIMIT $1`,
+    [Math.min(500, Math.max(1, limit))],
+  );
+  return result.rows.map((row: { payload: SmartExitLifecycleRecord }) => row.payload);
+}
+
+export async function listUnsettledSmartExitLifecycles(limit = 25): Promise<SmartExitLifecycleRecord[]> {
+  await ensureMigrated();
+  const result = await pool.query(
+    `SELECT payload FROM kalshi_smart_exit_lifecycles
+     WHERE settled_at IS NULL ORDER BY triggered_at ASC LIMIT $1`,
+    [Math.min(100, Math.max(1, limit))],
+  );
+  return result.rows.map((row: { payload: SmartExitLifecycleRecord }) => row.payload);
 }

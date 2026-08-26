@@ -18,6 +18,7 @@ import {
   applyValidatedSmartExitParameterVersion,
   claimSmartExitRequest,
   getValidatedSmartExitParameterReport,
+  getSmartExitLifecycle,
   insertSmartExitEvaluation,
   insertSmartExitEvidence,
   insertSmartExitRecoveryStudy,
@@ -26,13 +27,17 @@ import {
   listSmartExitPositionStates,
   listSmartExitEvaluations,
   listSmartExitReplayReports,
+  listSmartExitLifecycles,
+  listUnsettledSmartExitLifecycles,
   loadSmartExitConfig,
   markSmartExitRequestUnknown,
   resolveSmartExitRequest,
   runSmartExitMigrations,
   saveSmartExitConfig,
   upsertSmartExitPositionState,
+  upsertSmartExitLifecycle,
 } from "./kalshi-smart-exit-db.ts";
+import { fetchKalshiMarketResult } from "./kalshi-trader.ts";
 import { requestSmartExitFromOwner } from "./kalshi-smart-exit-owners.ts";
 import {
   authorizeSmartExitExecution,
@@ -47,9 +52,10 @@ import type {
   SmartExitMode,
   SmartExitOwnerKind,
   SmartExitPosition,
+  SmartExitLifecycleRecord,
   SmartExitState,
 } from "./kalshi-smart-exit-types.ts";
-import { normalizeSmartExitComponentHealth } from "./kalshi-smart-exit-types.ts";
+import { computeSmartExitEffectiveness, normalizeSmartExitComponentHealth } from "./kalshi-smart-exit-types.ts";
 
 const SCHEDULER_MS = 1_000;
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
@@ -64,6 +70,7 @@ let lastError: string | null = null;
 let lastCycleDurationMs: number | null = null;
 let schedulerOverruns = 0;
 let prewarmCursor = 0;
+let lifecycleReconcileInterval: ReturnType<typeof setInterval> | null = null;
 const states = new Map<string, SmartExitState>();
 const modelEntryBaselines = new Map<string, number | null>();
 const latestEvaluations = new Map<string, SmartExitEvaluationRecord>();
@@ -362,6 +369,10 @@ async function executeAuthorizedExit(
     appliedVersion: applied,
   });
   if (!authorization.authorized) {
+    const lifecycle = await getSmartExitLifecycle(position.owner.kind, position.positionId);
+    if (lifecycle) await upsertSmartExitLifecycle({
+      ...lifecycle, executionStatus: "blocked", reason: authorization.reason,
+    });
     return { ...evaluation, executionStatus: "blocked" };
   }
   const requestId = randomUUID();
@@ -384,7 +395,17 @@ async function executeAuthorizedExit(
       maximumExecutionEvidenceAgeSeconds: evaluation.maximumExecutionEvidenceAgeSeconds,
     },
   });
-  if (!claim.claimed) return { ...evaluation, executionStatus: "blocked" };
+  if (!claim.claimed) {
+    const existing = await getSmartExitLifecycle(position.owner.kind, position.positionId);
+    if (existing) await upsertSmartExitLifecycle({
+      ...existing, executionStatus: "blocked", reason: claim.reason ?? "execution request already claimed",
+    });
+    return { ...evaluation, executionStatus: "blocked" };
+  }
+  const lifecycle = await getSmartExitLifecycle(position.owner.kind, position.positionId);
+  if (lifecycle) await upsertSmartExitLifecycle({
+    ...lifecycle, requestId, executionStatus: "requested",
+  });
   if (
     evaluation.minimumWinningPrice == null
     || evaluation.marketBookAgeMs == null
@@ -394,6 +415,10 @@ async function executeAuthorizedExit(
     await resolveSmartExitRequest({
       id: requestId,
       status: "blocked",
+      reason: "immutable economic execution constraint unavailable",
+    });
+    if (lifecycle) await upsertSmartExitLifecycle({
+      ...lifecycle, requestId, executionStatus: "blocked",
       reason: "immutable economic execution constraint unavailable",
     });
     return { ...evaluation, executionStatus: "blocked" };
@@ -412,14 +437,97 @@ async function executeAuthorizedExit(
   });
   if (result.outcome === "filled") {
     await resolveSmartExitRequest({ id: requestId, status: "filled", reason: result.reason });
+    if (lifecycle) {
+      const effectiveness = computeSmartExitEffectiveness({
+        side: lifecycle.side, quantity: result.quantity,
+        entryWinningPrice: lifecycle.entryWinningPrice,
+        winningFillPrice: result.winningFillPrice, settlementResult: lifecycle.settlementResult,
+      });
+      await upsertSmartExitLifecycle({
+        ...lifecycle, requestId, executionStatus: "filled", soldAt: result.soldAt,
+        winningFillPrice: result.winningFillPrice, reason: result.reason, ...effectiveness,
+      });
+    }
     return { ...evaluation, executed: true, executionStatus: "filled" };
   }
   if (result.outcome === "blocked") {
     await resolveSmartExitRequest({ id: requestId, status: "blocked", reason: result.reason });
+    if (lifecycle) await upsertSmartExitLifecycle({
+      ...lifecycle, requestId, executionStatus: "blocked", reason: result.reason,
+    });
     return { ...evaluation, executionStatus: "blocked" };
   }
+  if (result.outcome === "zero_fill") {
+    await resolveSmartExitRequest({ id: requestId, status: "zero_fill", reason: result.reason });
+    if (lifecycle) await upsertSmartExitLifecycle({
+      ...lifecycle, requestId, executionStatus: "zero_fill", reason: result.reason,
+    });
+    return { ...evaluation, executionStatus: "zero_fill" };
+  }
   await markSmartExitRequestUnknown(requestId, result.reason);
+  if (lifecycle) await upsertSmartExitLifecycle({
+    ...lifecycle, requestId, executionStatus: "unknown", reason: result.reason, verdict: "unknown",
+  });
   return { ...evaluation, executionStatus: "unknown" };
+}
+
+async function recordLifecycleTrigger(
+  position: SmartExitPosition,
+  evaluation: SmartExitEvaluationRecord,
+): Promise<void> {
+  if (await getSmartExitLifecycle(position.owner.kind, position.positionId)) return;
+  const advisoryOnly = config.mode === "shadow";
+  await upsertSmartExitLifecycle({
+    id: randomUUID(),
+    owner: position.owner.kind,
+    positionId: position.positionId,
+    symbol: position.symbol,
+    windowKey: position.windowKey,
+    ticker: position.ticker,
+    side: position.side,
+    tradingMode: position.owner.tradingMode,
+    quantity: position.remainingQuantity,
+    entryWinningPrice: position.marketAtEntry.winProbability,
+    triggerEvaluationId: evaluation.id,
+    triggeredAt: evaluation.timestamp,
+    advisoryOnly,
+    executionStatus: advisoryOnly ? "advisory" : "requested",
+    requestId: null,
+    soldAt: null,
+    winningFillPrice: null,
+    saleProceeds: null,
+    actualExitPnl: null,
+    settlementResult: null,
+    settledAt: null,
+    holdValue: null,
+    holdPnl: null,
+    valueSaved: null,
+    verdict: "pending",
+    reason: evaluation.reason,
+  });
+}
+
+async function reconcileSmartExitLifecycles(): Promise<void> {
+  const records = await listUnsettledSmartExitLifecycles(25);
+  for (const record of records) {
+    const result = await fetchKalshiMarketResult(record.ticker);
+    if (result.result == null) continue;
+    const settlementResult = result.result;
+    const effectiveness = record.executionStatus === "filled"
+      ? computeSmartExitEffectiveness({
+          side: record.side, quantity: record.quantity,
+          entryWinningPrice: record.entryWinningPrice,
+          winningFillPrice: record.winningFillPrice, settlementResult,
+        })
+      : { saleProceeds: record.saleProceeds, actualExitPnl: record.actualExitPnl,
+          holdValue: settlementResult === record.side ? record.quantity : 0,
+          holdPnl: (settlementResult === record.side ? record.quantity : 0)
+            - record.entryWinningPrice * record.quantity,
+          valueSaved: null, verdict: record.advisoryOnly ? "pending" as const : record.verdict };
+    await upsertSmartExitLifecycle({
+      ...record, settlementResult, settledAt: new Date().toISOString(), ...effectiveness,
+    });
+  }
 }
 
 function recoveryStudy(
@@ -550,7 +658,10 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     && (config.mode === "paper-exit" || config.mode === "live-exit")
     && (config.mode === "paper-exit" || decision.mayExecuteExit)
   ) {
+    await recordLifecycleTrigger(position, record);
     record = await executeAuthorizedExit(position, { ...record, executionStatus: "requested" });
+  } else if (decision.disposition === "EXIT_SIGNAL") {
+    await recordLifecycleTrigger(position, record);
   }
   latestEvaluations.set(key, record);
   if (record.recommendation !== "unavailable") latestValidEvaluations.set(key, record);
@@ -695,6 +806,15 @@ export async function initSmartExit(): Promise<void> {
     if (evaluation.recommendation !== "unavailable") latestValidEvaluations.set(key, evaluation);
   }
   startScheduler();
+  if (!lifecycleReconcileInterval) {
+    lifecycleReconcileInterval = setInterval(() => {
+      void reconcileSmartExitLifecycles().catch((error) =>
+        logger.warn({ error }, "[kalshi-smart-exit] lifecycle reconciliation failed (non-fatal)"));
+    }, 30_000);
+    lifecycleReconcileInterval.unref?.();
+    void reconcileSmartExitLifecycles().catch((error) =>
+      logger.warn({ error }, "[kalshi-smart-exit] initial lifecycle reconciliation failed (non-fatal)"));
+  }
   logger.info(
     { enabled: config.enabled, mode: config.mode },
     "[kalshi-smart-exit] initialized",
@@ -834,6 +954,24 @@ export function getSmartExitStatus(): {
 
 export async function getSmartExitHistory(limit = 50): Promise<SmartExitEvaluationRecord[]> {
   return listSmartExitEvaluations({ limit: Math.min(500, Math.max(1, limit)) });
+}
+
+export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
+  records: SmartExitLifecycleRecord[];
+  summary: { triggered: number; sold: number; settled: number; helped: number; harmed: number; totalValueSaved: number };
+}> {
+  const records = await listSmartExitLifecycles(limit);
+  return {
+    records,
+    summary: {
+      triggered: records.length,
+      sold: records.filter((r) => r.executionStatus === "filled").length,
+      settled: records.filter((r) => r.settlementResult != null).length,
+      helped: records.filter((r) => r.verdict === "saved_loss").length,
+      harmed: records.filter((r) => r.verdict === "missed_win" || r.verdict === "reduced_profit").length,
+      totalValueSaved: records.reduce((sum, r) => sum + (r.valueSaved ?? 0), 0),
+    },
+  };
 }
 
 export async function getSmartExitReplayReports(): Promise<Array<Record<string, unknown>>> {

@@ -17,7 +17,8 @@ import {
 } from "./kalshi-smart-exit-execution.ts";
 
 export type SmartExitOwnerCloseResult =
-  | { outcome: "filled"; reason: string }
+  | { outcome: "filled"; reason: string; soldAt: string; winningFillPrice: number; quantity: number; pnl: number }
+  | { outcome: "zero_fill"; reason: string }
   | { outcome: "blocked"; reason: string }
   | { outcome: "unknown"; reason: string };
 
@@ -125,7 +126,7 @@ export async function requestSmartExitFromOwner(params: {
         && latestMarket.at != null
         && Date.now() - latestMarket.at <= constraint.maximumEvidenceAgeSeconds * 1_000;
     };
-    await closePosition(
+    const closeResult = await closePosition(
       current,
       market.yesPrice,
       market.value,
@@ -139,10 +140,27 @@ export async function requestSmartExitFromOwner(params: {
         },
       },
     );
+    if (closeResult.winningFillPrice == null) {
+      return { outcome: "unknown", reason: "owner close completed without a confirmed fill price" };
+    }
+    const after = openPositions.get(symbol);
+    if (after?.id === current.id) openPositions.delete(symbol);
+    else if (after != null) return { outcome: "unknown", reason: "position registry changed after confirmed owner close" };
+    return {
+      outcome: "filled",
+      reason: "canonical regular close completed",
+      soldAt: closeResult.soldAt,
+      winningFillPrice: closeResult.winningFillPrice,
+      quantity: closeResult.quantity,
+      pnl: closeResult.pnl,
+    };
   } catch (error) {
     const message = String((error as Error)?.message ?? error);
     if (message.includes("owner pre-submit authorization revoked")) {
       return { outcome: "blocked", reason: "final owner identity or authorization changed before submit" };
+    }
+    if (message.includes("confirmed zero fill") || message.includes("definite exit rejection")) {
+      return { outcome: "zero_fill", reason: message.slice(0, 180) };
     }
     return {
       outcome: "unknown",
@@ -150,13 +168,5 @@ export async function requestSmartExitFromOwner(params: {
     };
   }
 
-  const after = openPositions.get(symbol);
-  if (after?.id === current.id) {
-    // Registry ownership remains with the regular adapter. Delete only the
-    // exact object whose canonical close completed.
-    openPositions.delete(symbol);
-  } else if (after != null) {
-    return { outcome: "unknown", reason: "position registry changed after confirmed owner close" };
-  }
-  return { outcome: "filled", reason: "canonical regular close completed" };
+  return { outcome: "unknown", reason: "owner close exited unexpectedly" };
 }

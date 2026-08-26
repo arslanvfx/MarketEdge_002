@@ -270,3 +270,61 @@ export interface SmartExitHealth {
     readonly observedAt: string | null;
   }>>;
 }
+
+export type SmartExitEffectivenessVerdict =
+  | "saved_loss" | "reduced_profit" | "missed_win" | "no_difference" | "pending" | "unknown";
+
+export interface SmartExitLifecycleRecord {
+  readonly id: string;
+  readonly owner: SmartExitOwnerKind;
+  readonly positionId: string;
+  readonly symbol: string;
+  readonly windowKey: string;
+  readonly ticker: string;
+  readonly side: BinarySide;
+  readonly tradingMode: SmartExitTradingMode;
+  readonly quantity: number;
+  readonly entryWinningPrice: number;
+  readonly triggerEvaluationId: string;
+  readonly triggeredAt: string;
+  readonly advisoryOnly: boolean;
+  readonly executionStatus: "advisory" | "requested" | "filled" | "zero_fill" | "blocked" | "unknown";
+  readonly requestId: string | null;
+  readonly soldAt: string | null;
+  readonly winningFillPrice: number | null;
+  readonly saleProceeds: number | null;
+  readonly actualExitPnl: number | null;
+  readonly settlementResult: BinarySide | null;
+  readonly settledAt: string | null;
+  readonly holdValue: number | null;
+  readonly holdPnl: number | null;
+  readonly valueSaved: number | null;
+  readonly verdict: SmartExitEffectivenessVerdict;
+  readonly reason: string | null;
+}
+
+export function computeSmartExitEffectiveness(params: {
+  side: BinarySide;
+  quantity: number;
+  entryWinningPrice: number;
+  winningFillPrice: number | null;
+  settlementResult: BinarySide | null;
+}): Pick<SmartExitLifecycleRecord, "saleProceeds" | "actualExitPnl" | "holdValue" | "holdPnl" | "valueSaved" | "verdict"> {
+  const saleProceeds = params.winningFillPrice == null ? null : params.winningFillPrice * params.quantity;
+  const actualExitPnl = saleProceeds == null ? null
+    : saleProceeds - params.entryWinningPrice * params.quantity;
+  if (params.settlementResult == null || saleProceeds == null || actualExitPnl == null) {
+    return { saleProceeds, actualExitPnl, holdValue: null, holdPnl: null, valueSaved: null, verdict: "pending" };
+  }
+  const won = params.settlementResult === params.side;
+  const holdValue = won ? params.quantity : 0;
+  const holdPnl = holdValue - params.entryWinningPrice * params.quantity;
+  const valueSaved = actualExitPnl - holdPnl;
+  const epsilon = 0.005;
+  const verdict: SmartExitEffectivenessVerdict = Math.abs(valueSaved) < epsilon
+    ? "no_difference"
+    : valueSaved > 0
+      ? won ? "reduced_profit" : "saved_loss"
+      : won ? "missed_win" : "reduced_profit";
+  return { saleProceeds, actualExitPnl, holdValue, holdPnl, valueSaved, verdict };
+}

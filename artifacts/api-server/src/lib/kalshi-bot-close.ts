@@ -63,6 +63,14 @@ import {
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 
+export interface ClosePositionResult {
+  fillYesPrice: number | null;
+  winningFillPrice: number | null;
+  quantity: number;
+  pnl: number;
+  soldAt: string;
+}
+
 export async function closePosition(
   pos: OpenPosition,
   currentYesPrice: number | null,
@@ -87,7 +95,7 @@ export async function closePosition(
       minimumWinningPrice: number;
     };
   },
-): Promise<void> {
+): Promise<ClosePositionResult> {
   const isExpiry = reason === "window_expired";
 
   // When the window expires, currentYesPrice belongs to the NEW window — never
@@ -422,6 +430,13 @@ export async function closePosition(
     { sym: pos.symbol, pnl, reason, isLateRecovery, dailyPnl: S.dailyPnl },
     "[kalshi-bot] position closed",
   );
+  return {
+    fillYesPrice: fillPrice,
+    winningFillPrice: fillPrice == null ? null : pos.direction === "yes" ? fillPrice : 1 - fillPrice,
+    quantity: pos.contractCount,
+    pnl,
+    soldAt: new Date().toISOString(),
+  };
 }
 
 // ---------------------------------------------------------------------------

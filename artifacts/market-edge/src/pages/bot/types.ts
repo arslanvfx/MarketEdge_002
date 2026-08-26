@@ -1408,6 +1408,42 @@ export interface SmartExitHistory {
   evaluations: SmartExitEvaluation[];
 }
 
+export interface SmartExitLifecycleRecord {
+  id: string;
+  owner: string;
+  positionId: string;
+  symbol: string;
+  ticker: string;
+  side: "yes" | "no";
+  tradingMode: "paper" | "live";
+  quantity: number;
+  triggeredAt: string;
+  advisoryOnly: boolean;
+  executionStatus: "advisory" | "requested" | "filled" | "zero_fill" | "blocked" | "unknown";
+  soldAt: string | null;
+  winningFillPrice: number | null;
+  saleProceeds: number | null;
+  actualExitPnl: number | null;
+  settlementResult: "yes" | "no" | null;
+  settledAt: string | null;
+  holdPnl: number | null;
+  valueSaved: number | null;
+  verdict: "saved_loss" | "reduced_profit" | "missed_win" | "no_difference" | "pending" | "unknown";
+  reason: string | null;
+}
+
+export interface SmartExitLifecycleLedger {
+  records: SmartExitLifecycleRecord[];
+  summary: {
+    triggered: number;
+    sold: number;
+    settled: number;
+    helped: number;
+    harmed: number;
+    totalValueSaved: number;
+  };
+}
+
 export interface SmartExitReplayReport {
   id?: string;
   symbol: string;

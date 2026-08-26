@@ -5,6 +5,7 @@ import {
   applySmartExitParameterVersion,
   emergencyDisableSmartExit,
   getSmartExitHistory,
+  getSmartExitLifecycleLedger,
   getSmartExitReplayReports,
   getSmartExitStatus,
   updateSmartExitConfig,
@@ -71,6 +72,16 @@ router.get("/crypto/smart-exit/history", async (req, res): Promise<void> => {
   } catch (error) {
     req.log.error({ error }, "Failed to fetch Smart Exit history");
     res.status(500).json({ error: "Failed to fetch Smart Exit history" });
+  }
+});
+
+router.get("/crypto/smart-exit/lifecycle", async (req, res): Promise<void> => {
+  try {
+    const limit = Number(req.query.limit);
+    res.json(await getSmartExitLifecycleLedger(Number.isFinite(limit) ? limit : 100));
+  } catch (error) {
+    req.log.error({ error }, "Failed to fetch Smart Exit lifecycle ledger");
+    res.status(500).json({ error: "Failed to fetch Smart Exit lifecycle ledger" });
   }
 });
 
