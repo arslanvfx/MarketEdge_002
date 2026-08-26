@@ -22,6 +22,21 @@ const fmtTime = (iso: string) => {
     return iso;
   }
 };
+const fmtEasternDate = (iso: string) => {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString("en-US", {
+      timeZone: "America/New_York",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+};
 
 function HealthDot({ label, health }: { label: string; health?: SmartExitComponentHealth }) {
   const safeHealth = health ?? {
@@ -405,7 +420,10 @@ export function BotSmartExitPanel({ authPost }: Props) {
                 {lifecycle?.records?.map(item => (
                   <tr key={item.id} className="hover:bg-white/[0.02] transition-colors h-12">
                     <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-500 tabular-nums">
-                      {fmtTime(item.triggeredAt)}
+                      <div>{fmtTime(item.triggeredAt)}</div>
+                      <div className="mt-0.5 text-[8px] text-slate-400">
+                        {fmtEasternDate(item.triggeredAt)}
+                      </div>
                     </td>
                     <td className="px-4 py-2 align-middle font-bold text-slate-200 text-xs">
                       {item.symbol}{" "}
