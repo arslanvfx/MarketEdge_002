@@ -1336,3 +1336,66 @@ export interface ScalperContrarianReport {
   recentIncidents: ScalperContrarianIncident[];
   disclaimer: string;
 }
+
+export interface SmartExitConfig {
+  enabled: boolean;
+  mode: "off" | "shadow" | "paper-exit" | "live-exit";
+  appliedVersions?: Record<string, { owner: string; symbol: string; version: string; liveEligible: boolean; appliedAt: string }>;
+}
+
+export interface SmartExitEvaluation {
+  id?: string;
+  symbol: string;
+  windowKey?: string;
+  recommendation: "off" | "hold" | "exit" | "unavailable";
+  confidence: number | null;
+  reason: string;
+  debounceProgress?: number;
+  debounceTarget?: number;
+  timestamp: string;
+  microstructureAvailable: boolean;
+  version: string;
+  owner?: string;
+  executed?: boolean;
+  executionStatus?: "not_requested" | "requested" | "filled" | "blocked" | "unknown";
+}
+
+export interface SmartExitHealth {
+  dataReadiness: "ready" | "degraded" | "unavailable";
+  lastCycleAt?: string | null;
+  activeEvaluations?: number;
+  schedulerActive?: boolean;
+  lastError?: string | null;
+}
+
+export interface SmartExitStatus {
+  config: SmartExitConfig;
+  health: SmartExitHealth;
+  evaluations: SmartExitEvaluation[];
+}
+
+export interface SmartExitHistory {
+  evaluations: SmartExitEvaluation[];
+}
+
+export interface SmartExitReplayReport {
+  id?: string;
+  symbol: string;
+  owner: string;
+  version: string;
+  totalEvaluated: number;
+  exitsRecommended: number;
+  hypotheticalPnlSaved: number;
+  calibrationScore: number;
+  createdAt: string;
+}
+
+export interface SmartExitReplay {
+  reports: SmartExitReplayReport[];
+}
+
+export interface SmartExitCapability {
+  canManage: boolean;
+  reason: string;
+  message: string | null;
+}

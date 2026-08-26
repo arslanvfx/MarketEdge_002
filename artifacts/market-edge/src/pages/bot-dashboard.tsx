@@ -32,6 +32,7 @@ import { KalshiLiveTickerPanel } from "./bot/kalshi-live-ticker-panel";
 import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 import { GapAnalyticsPanel } from "./bot/gap-analytics-panel";
 import { BotScalperPanel } from "./bot/bot-scalper-panel";
+import { BotSmartExitPanel } from "./bot/bot-smart-exit-panel";
 import { BotRegularIntentPanel } from "./bot/bot-regular-intent-panel";
 import { PnlWhatIfCalculator } from "./bot/pnl-what-if-calculator";
 import { normalizeScalpOrders } from "./bot/scalper-ledger";
@@ -839,6 +840,7 @@ export default function BotDashboard() {
         <WindowEvalTable evaluation={evaluation} openPosList={regularOpenPosList} openManualOrder={openManualOrder} />
         <BotRegularIntentPanel authPost={authPost} getToken={getToken} />
         <BotScalperPanel authPost={scalperAuthPost} />
+        <BotSmartExitPanel authPost={authPost} />
         <BotConfigSection
           cfg={cfg}
           merged={merged}

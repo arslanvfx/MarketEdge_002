@@ -1,0 +1,667 @@
+import { randomUUID } from "node:crypto";
+import { logger } from "./logger.ts";
+import { CRYPTO_COINS } from "./market-defs.ts";
+import { getKalshiCachedData } from "./crypto-kalshi.ts";
+import { openPositions, type OpenPosition } from "./kalshi-bot-state.ts";
+import {
+  DEFAULT_SMART_EXIT_CONFIG,
+  INITIAL_SMART_EXIT_STATE,
+  evaluateSmartExit,
+  modelWinProbability,
+} from "./kalshi-smart-exit-policy.ts";
+import { KalshiSmartExitEvidenceCollector } from "./kalshi-smart-exit-evidence.ts";
+import {
+  applyValidatedSmartExitParameterVersion,
+  claimSmartExitRequest,
+  getValidatedSmartExitParameterReport,
+  insertSmartExitEvaluation,
+  insertSmartExitEvidence,
+  insertSmartExitRecoveryStudy,
+  listLatestSmartExitEvaluationsPerPosition,
+  listOpenScalperPositions,
+  listSmartExitPositionStates,
+  listSmartExitEvaluations,
+  listSmartExitReplayReports,
+  loadSmartExitConfig,
+  markSmartExitRequestUnknown,
+  resolveSmartExitRequest,
+  runSmartExitMigrations,
+  saveSmartExitConfig,
+  upsertSmartExitPositionState,
+} from "./kalshi-smart-exit-db.ts";
+import { requestSmartExitFromOwner } from "./kalshi-smart-exit-owners.ts";
+import {
+  authorizeSmartExitExecution,
+  smartExitVersionKey,
+} from "./kalshi-smart-exit-execution.ts";
+import type {
+  SmartExitAppliedVersion,
+  SmartExitConfig,
+  SmartExitEvaluationRecord,
+  SmartExitEvidence,
+  SmartExitHealth,
+  SmartExitMode,
+  SmartExitOwnerKind,
+  SmartExitPosition,
+  SmartExitState,
+} from "./kalshi-smart-exit-types.ts";
+
+const SCHEDULER_MS = 1_500;
+const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
+const collector = new KalshiSmartExitEvidenceCollector();
+
+let config: SmartExitConfig = { ...DEFAULT_SMART_EXIT_CONFIG };
+let interval: ReturnType<typeof setInterval> | null = null;
+let cycleInFlight = false;
+let lastCycleAt: string | null = null;
+let lastError: string | null = null;
+let prewarmCursor = 0;
+const states = new Map<string, SmartExitState>();
+const modelEntryBaselines = new Map<string, number | null>();
+const latestEvaluations = new Map<string, SmartExitEvaluationRecord>();
+const lastEvidencePersistenceMs = new Map<string, number>();
+
+function identityKey(owner: SmartExitOwnerKind, positionId: string): string {
+  return `${owner}:${positionId}`;
+}
+
+function windowExpirySeconds(windowKey: string): number {
+  const start = Date.parse(`${windowKey}:00Z`);
+  return Number.isFinite(start) ? (start + 15 * 60_000) / 1_000 : 0;
+}
+
+function marketProbabilityForSide(
+  side: "yes" | "no",
+  yesProbability: number | null | undefined,
+): number | null {
+  return yesProbability != null && Number.isFinite(yesProbability)
+    ? side === "yes" ? yesProbability : 1 - yesProbability
+    : null;
+}
+
+function exactMarket(
+  symbol: string,
+  ticker: string,
+  windowKey: string,
+): ReturnType<typeof getKalshiCachedData> {
+  const current = getKalshiCachedData(symbol);
+  if (!current || current.ticker !== ticker) return null;
+  const expiry = current.closeTime ? Date.parse(current.closeTime) : NaN;
+  const expected = windowExpirySeconds(windowKey) * 1_000;
+  if (Number.isFinite(expiry) && expected > 0 && Math.abs(expiry - expected) > 5_000) return null;
+  return current;
+}
+
+function regularSnapshot(position: OpenPosition, evidence: SmartExitEvidence): SmartExitPosition {
+  const symbol = position.symbol.toUpperCase();
+  const market = exactMarket(symbol, position.ticker, position.windowKey);
+  const key = identityKey("regular", position.id);
+  const expirySeconds = windowExpirySeconds(position.windowKey);
+  const baseline = modelEntryBaselines.get(key) ?? null;
+  return {
+    positionId: position.id,
+    owner: { kind: "regular", tradingMode: position.entryMode },
+    symbol,
+    windowKey: position.windowKey,
+    ticker: position.ticker,
+    side: position.direction,
+    underlyingKind: PRODUCT_BY_SYMBOL.get(symbol)?.category === "commodity" ? "commodity" : "crypto",
+    remainingQuantity: position.contractCount,
+    exchangeIndex: market?.exchangeIndex ?? null,
+    strikePrice: position.kalshiTarget,
+    expirySeconds,
+    openedAtSeconds: position.openedAt / 1_000,
+    modelAtEntry: { winProbability: baseline ?? null, observedAtSeconds: position.openedAt / 1_000 },
+    marketAtEntry: {
+      winProbability: marketProbabilityForSide(position.direction, position.entryYesPrice) ?? 0,
+      observedAtSeconds: position.openedAt / 1_000,
+    },
+  };
+}
+
+/**
+ * Narrow fill notification from the regular owner. Disabled/off is a true
+ * no-op. The independent collector captures the entry model once and persists
+ * it; later evaluations never reconstruct entry probability from current vol.
+ */
+export function captureSmartExitRegularEntry(position: OpenPosition): void {
+  if (!config.enabled || config.mode === "off") return;
+  void (async () => {
+    const symbol = position.symbol.toUpperCase();
+    const definition = PRODUCT_BY_SYMBOL.get(symbol);
+    if (!definition || definition.category === "commodity" || position.cryptoPriceAtEntry == null) return;
+    const market = exactMarket(symbol, position.ticker, position.windowKey);
+    const evidence = await collector.collect(
+      symbol,
+      definition.product,
+      marketProbabilityForSide(position.direction, position.entryYesPrice),
+    );
+    const provisional = regularSnapshot(position, evidence);
+    const baseline = modelWinProbability(
+      provisional,
+      { ...evidence, underlyingPrice: position.cryptoPriceAtEntry },
+      config,
+      position.openedAt / 1_000,
+    );
+    const key = identityKey("regular", position.id);
+    modelEntryBaselines.set(key, baseline);
+    await upsertSmartExitPositionState({
+      owner: "regular",
+      positionId: position.id,
+      symbol,
+      modelAtEntryProbability: baseline,
+      state: INITIAL_SMART_EXIT_STATE,
+    });
+  })().catch((error) =>
+    logger.warn({ error, symbol: position.symbol }, "[kalshi-smart-exit] entry capture failed (non-fatal)"),
+  );
+}
+
+function numeric(row: Record<string, unknown>, key: string): number | null {
+  const value = Number(row[key]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function scalperSnapshot(
+  row: Record<string, unknown>,
+  evidence: SmartExitEvidence,
+): SmartExitPosition {
+  const symbol = String(row.symbol ?? "").toUpperCase();
+  const positionId = String(row.id ?? "");
+  const ticker = String(row.ticker ?? "");
+  const windowKey = String(row.window_key ?? "");
+  const side = row.side === "no" ? "no" : "yes";
+  const market = exactMarket(symbol, ticker, windowKey);
+  const openedAt = new Date(String(row.created_at ?? "")).getTime() / 1_000;
+  const entryYesPrice = numeric(row, "entry_yes_price");
+  const guard = row.entry_guard_evidence && typeof row.entry_guard_evidence === "object"
+    ? row.entry_guard_evidence as Record<string, unknown>
+    : {};
+  const entrySpot = Number(guard.underlyingPrice);
+  const key = identityKey("scalper", positionId);
+  let baseline = modelEntryBaselines.get(key);
+  const provisional: SmartExitPosition = {
+    positionId,
+    owner: { kind: "scalper", tradingMode: row.mode === "live" ? "live" : "paper" },
+    symbol,
+    windowKey,
+    ticker,
+    side,
+    underlyingKind: PRODUCT_BY_SYMBOL.get(symbol)?.category === "commodity" ? "commodity" : "crypto",
+    remainingQuantity: numeric(row, "filled_count") ?? 0,
+    exchangeIndex: market?.exchangeIndex ?? null,
+    strikePrice: market?.value ?? 0,
+    expirySeconds: windowExpirySeconds(windowKey),
+    openedAtSeconds: Number.isFinite(openedAt) ? openedAt : 0,
+    modelAtEntry: { winProbability: null, observedAtSeconds: openedAt },
+    marketAtEntry: {
+      winProbability: marketProbabilityForSide(side, entryYesPrice) ?? 0,
+      observedAtSeconds: openedAt,
+    },
+  };
+  if (!modelEntryBaselines.has(key)) {
+    baseline = Number.isFinite(entrySpot) && entrySpot > 0
+      ? modelWinProbability(
+          provisional,
+          { ...evidence, underlyingPrice: entrySpot },
+          config,
+          provisional.openedAtSeconds,
+        )
+      : null;
+    modelEntryBaselines.set(key, baseline ?? null);
+  }
+  return { ...provisional, modelAtEntry: { winProbability: baseline ?? null, observedAtSeconds: openedAt } };
+}
+
+function reasonCode(disposition: string, reason: string): string {
+  if (disposition === "OFF") return "disabled";
+  if (disposition === "UNAVAILABLE") {
+    if (reason.includes("commodity")) return "commodity_microstructure_unavailable";
+    if (reason.includes("entry")) return "entry_baseline_unavailable";
+    if (reason.includes("stale")) return "stale_evidence";
+    return "incomplete_evidence";
+  }
+  if (reason.includes("catastrophic")) return "catastrophic_probability_drop";
+  if (reason.includes("debounce")) return "debounce_pending";
+  if (disposition === "EXIT_SIGNAL") return "confirmed_probability_decay";
+  return "hold";
+}
+
+function currentVersion(position: SmartExitPosition): SmartExitAppliedVersion | null {
+  return config.appliedVersions[smartExitVersionKey(position.owner.kind, position.symbol)] ?? null;
+}
+
+function positionVersionAuthorized(
+  position: SmartExitPosition,
+  version: string,
+): boolean {
+  const applied = currentVersion(position);
+  const authorization = authorizeSmartExitExecution({
+    config,
+    position,
+    recommendation: "exit",
+    appliedVersion: applied,
+  });
+  return authorization.authorized && authorization.parameterVersion === version;
+}
+
+async function executeAuthorizedExit(
+  position: SmartExitPosition,
+  evaluation: SmartExitEvaluationRecord,
+): Promise<SmartExitEvaluationRecord> {
+  const applied = currentVersion(position);
+  const authorization = authorizeSmartExitExecution({
+    config,
+    position,
+    recommendation: evaluation.recommendation,
+    appliedVersion: applied,
+  });
+  if (!authorization.authorized) {
+    return { ...evaluation, executionStatus: "blocked" };
+  }
+  const requestId = randomUUID();
+  const claim = await claimSmartExitRequest({
+    id: requestId,
+    owner: position.owner.kind,
+    positionId: position.positionId,
+    symbol: position.symbol,
+    payload: {
+      evaluationId: evaluation.id,
+      ticker: position.ticker,
+      windowKey: position.windowKey,
+      side: position.side,
+      remainingQuantity: position.remainingQuantity,
+      tradingMode: position.owner.tradingMode,
+      exchangeIndex: position.exchangeIndex,
+      parameterVersion: authorization.parameterVersion,
+    },
+  });
+  if (!claim.claimed) return { ...evaluation, executionStatus: "blocked" };
+
+  const result = await requestSmartExitFromOwner({
+    position,
+    parameterVersion: authorization.parameterVersion,
+    isVersionStillAuthorized: positionVersionAuthorized,
+  });
+  if (result.outcome === "filled") {
+    await resolveSmartExitRequest({ id: requestId, status: "filled", reason: result.reason });
+    return { ...evaluation, executed: true, executionStatus: "filled" };
+  }
+  if (result.outcome === "blocked") {
+    await resolveSmartExitRequest({ id: requestId, status: "blocked", reason: result.reason });
+    return { ...evaluation, executionStatus: "blocked" };
+  }
+  await markSmartExitRequestUnknown(requestId, result.reason);
+  return { ...evaluation, executionStatus: "unknown" };
+}
+
+function recoveryStudy(
+  decisionProbability: number | null,
+  marketWinProbability: number | null,
+): SmartExitEvaluationRecord["recoveryStudy"] {
+  if (decisionProbability == null || marketWinProbability == null) return null;
+  const oppositeProbability = 1 - decisionProbability;
+  const oppositeMarket = 1 - marketWinProbability;
+  const edgeAfterCosts = oppositeProbability - oppositeMarket - 0.02;
+  const qualifies = oppositeProbability >= 0.95 && edgeAfterCosts >= 0.01;
+  return {
+    observedOnly: true,
+    oppositeSideProbability: oppositeProbability,
+    marketEdgeAfterCosts: edgeAfterCosts,
+    qualifies,
+    reason: qualifies
+      ? "observational recovery candidate; submission prohibited"
+      : "independent recovery edge requirements not met",
+  };
+}
+
+async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvidence): Promise<void> {
+  const nowMs = Date.now();
+  const nowSeconds = nowMs / 1_000;
+  const key = identityKey(position.owner.kind, position.positionId);
+  const decision = evaluateSmartExit(
+    position,
+    evidence,
+    states.get(key) ?? INITIAL_SMART_EXIT_STATE,
+    config,
+    nowSeconds,
+  );
+  states.set(key, decision.nextState);
+  await upsertSmartExitPositionState({
+    owner: position.owner.kind,
+    positionId: position.positionId,
+    symbol: position.symbol,
+    modelAtEntryProbability: position.modelAtEntry.winProbability,
+    state: decision.nextState,
+  });
+  const market = exactMarket(position.symbol, position.ticker, position.windowKey);
+  const marketWinProbability = marketProbabilityForSide(position.side, market?.yesPrice);
+  let record: SmartExitEvaluationRecord = {
+    id: `${key}:${nowMs}`,
+    positionId: position.positionId,
+    owner: position.owner.kind,
+    tradingMode: position.owner.tradingMode,
+    symbol: position.symbol,
+    windowKey: position.windowKey,
+    ticker: position.ticker,
+    side: position.side,
+    exchangeIndex: position.exchangeIndex,
+    remainingQuantity: position.remainingQuantity,
+    strikePrice: position.strikePrice,
+    secondsRemaining: Math.max(0, position.expirySeconds - nowSeconds),
+    timestamp: new Date(nowMs).toISOString(),
+    source: evidence.source,
+    evidenceAgeMs: Number.isFinite(evidence.observedAtSeconds) ? nowMs - evidence.observedAtSeconds * 1_000 : null,
+    spotAgeMs: evidence.spotObservedAtSeconds == null ? null : nowMs - evidence.spotObservedAtSeconds * 1_000,
+    tapeAgeMs: evidence.tapeObservedAtSeconds == null ? null : nowMs - evidence.tapeObservedAtSeconds * 1_000,
+    bookAgeMs: evidence.bookObservedAtSeconds == null ? null : nowMs - evidence.bookObservedAtSeconds * 1_000,
+    underlyingPrice: evidence.underlyingPrice,
+    marketWinProbability,
+    marketAtEntryProbability: position.marketAtEntry.winProbability,
+    modelWinProbability: decision.modelWinProbability,
+    modelAtEntryProbability: position.modelAtEntry.winProbability,
+    probabilityDrop: decision.probabilityDropFromEntry,
+    threshold: decision.threshold,
+    volatilityLogReturnPerSqrtSecond: evidence.volatilityLogReturnPerSqrtSecond,
+    momentumLogReturn: evidence.momentumLogReturn,
+    tradeFlowImbalance: evidence.tradeFlowImbalance,
+    bookImbalance: evidence.bookImbalance,
+    continuationScore: decision.continuationScore,
+    recommendation: decision.disposition === "EXIT_SIGNAL"
+      ? "exit"
+      : decision.disposition === "UNAVAILABLE"
+        ? "unavailable"
+        : decision.disposition === "OFF" ? "off" : "hold",
+    reasonCode: reasonCode(decision.disposition, decision.reason),
+    reason: decision.reason,
+    debounceProgress: decision.nextState.adverseSampleCount,
+    debounceTarget: config.debounceCount,
+    hysteresisUntil: decision.nextState.holdUntilSeconds > nowSeconds
+      ? new Date(decision.nextState.holdUntilSeconds * 1_000).toISOString()
+      : null,
+    parameterVersion: currentVersion(position)?.version ?? null,
+    executed: false,
+    executionStatus: "not_requested",
+    recoveryStudy: decision.disposition === "EXIT_SIGNAL"
+      ? recoveryStudy(decision.modelWinProbability, marketWinProbability)
+      : null,
+  };
+
+  if (
+    decision.disposition === "EXIT_SIGNAL"
+    && (config.mode === "paper-exit" || config.mode === "live-exit")
+  ) {
+    record = await executeAuthorizedExit(position, { ...record, executionStatus: "requested" });
+  }
+  latestEvaluations.set(key, record);
+  await insertSmartExitEvaluation(record);
+  if (record.recoveryStudy) {
+    await insertSmartExitRecoveryStudy({
+      id: record.id,
+      owner: record.owner,
+      positionId: record.positionId,
+      symbol: record.symbol,
+      payload: record.recoveryStudy,
+      observedAt: record.timestamp,
+    });
+  }
+}
+
+async function runCycle(): Promise<void> {
+  if (cycleInFlight || !config.enabled || config.mode === "off") return;
+  cycleInFlight = true;
+  try {
+    const regular = [...openPositions.values()];
+    const scalper = await listOpenScalperPositions();
+    const prewarmable = CRYPTO_COINS.filter((coin) => coin.category !== "commodity");
+    if (prewarmable.length > 0) {
+      const coin = prewarmable[prewarmCursor % prewarmable.length]!;
+      prewarmCursor += 1;
+      await collector.collect(coin.symbol, coin.product, null);
+    }
+    const entries = [
+      ...regular.map((position) => ({ owner: "regular" as const, symbol: position.symbol.toUpperCase(), value: position })),
+      ...scalper.map((position) => ({ owner: "scalper" as const, symbol: String(position.symbol ?? "").toUpperCase(), value: position })),
+    ];
+    const activeKeys = new Set(entries.map((entry) =>
+      identityKey(entry.owner, String(entry.owner === "regular" ? (entry.value as OpenPosition).id : (entry.value as Record<string, unknown>).id)),
+    ));
+    for (const key of latestEvaluations.keys()) if (!activeKeys.has(key)) latestEvaluations.delete(key);
+    for (const key of states.keys()) if (!activeKeys.has(key)) states.delete(key);
+
+    await Promise.all(entries.map(async (entry) => {
+      const definition = PRODUCT_BY_SYMBOL.get(entry.symbol);
+      if (!definition) return;
+      const raw = entry.value;
+      const side = entry.owner === "regular"
+        ? (raw as OpenPosition).direction
+        : (raw as Record<string, unknown>).side === "no" ? "no" : "yes";
+      const ticker = entry.owner === "regular"
+        ? (raw as OpenPosition).ticker
+        : String((raw as Record<string, unknown>).ticker ?? "");
+      const windowKey = entry.owner === "regular"
+        ? (raw as OpenPosition).windowKey
+        : String((raw as Record<string, unknown>).window_key ?? "");
+      const market = exactMarket(entry.symbol, ticker, windowKey);
+      const evidence = await collector.collect(
+        entry.symbol,
+        definition.product,
+        marketProbabilityForSide(side, market?.yesPrice),
+      );
+      const evidencePersistenceKey = `${entry.owner}:${entry.symbol}`;
+      const nowMs = Date.now();
+      if (nowMs - (lastEvidencePersistenceMs.get(evidencePersistenceKey) ?? 0) >= 5_000) {
+        await insertSmartExitEvidence({ owner: entry.owner, symbol: entry.symbol, evidence });
+        lastEvidencePersistenceMs.set(evidencePersistenceKey, nowMs);
+      }
+      const snapshot = entry.owner === "regular"
+        ? regularSnapshot(raw as OpenPosition, evidence)
+        : scalperSnapshot(raw as Record<string, unknown>, evidence);
+      await evaluateOne(snapshot, evidence);
+    }));
+    lastCycleAt = new Date().toISOString();
+    lastError = null;
+  } catch (error) {
+    lastError = String((error as Error)?.message ?? error).slice(0, 240);
+    logger.warn({ error }, "[kalshi-smart-exit] evaluation cycle failed (non-fatal)");
+  } finally {
+    cycleInFlight = false;
+  }
+}
+
+function stopScheduler(): void {
+  if (interval) clearInterval(interval);
+  interval = null;
+  collector.stop();
+}
+
+function startScheduler(): void {
+  if (!config.enabled || config.mode === "off") {
+    stopScheduler();
+    return;
+  }
+  if (interval) return;
+  interval = setInterval(() => void runCycle(), SCHEDULER_MS);
+  interval.unref?.();
+  void runCycle();
+}
+
+export async function initSmartExit(): Promise<void> {
+  await runSmartExitMigrations();
+  config = { ...DEFAULT_SMART_EXIT_CONFIG, ...(await loadSmartExitConfig()) };
+  const persistedStates = await listSmartExitPositionStates();
+  for (const persisted of persistedStates) {
+    modelEntryBaselines.set(
+      identityKey(persisted.owner, persisted.positionId),
+      persisted.modelAtEntryProbability,
+    );
+    states.set(identityKey(persisted.owner, persisted.positionId), persisted.state);
+  }
+  const prior = await listLatestSmartExitEvaluationsPerPosition({ limit: 1_000 });
+  for (const evaluation of prior) latestEvaluations.set(
+    identityKey(evaluation.owner, evaluation.positionId),
+    evaluation,
+  );
+  startScheduler();
+  logger.info(
+    { enabled: config.enabled, mode: config.mode },
+    "[kalshi-smart-exit] initialized",
+  );
+}
+
+export function getSmartExitConfig(): SmartExitConfig {
+  return {
+    ...config,
+    continuationWeights: { ...config.continuationWeights },
+    appliedVersions: { ...config.appliedVersions },
+  };
+}
+
+function boundedNumber(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+export async function updateSmartExitConfig(patch: Record<string, unknown>): Promise<SmartExitConfig> {
+  const allowed = new Set([
+    "mode", "baseProbabilityDropThreshold", "confirmationLevel", "debounceCount",
+    "hysteresisSeconds", "hardStopProbabilityDrop", "hardStopWindowSeconds",
+    "maxEvidenceAgeSeconds", "minVolatilityLogReturnPerSqrtSecond",
+    "fatTailVolatilityMultiplier", "probabilityShrinkage",
+  ]);
+  for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`unsupported config field: ${key}`);
+  const next: SmartExitConfig = { ...config };
+  if (patch.mode !== undefined) {
+    const mode = patch.mode;
+    if (!["off", "shadow", "paper-exit", "live-exit"].includes(String(mode))) throw new Error("invalid mode");
+    Object.assign(next, { mode: mode as SmartExitMode, enabled: mode !== "off" });
+  }
+  const ranges: Record<string, [number, number]> = {
+    baseProbabilityDropThreshold: [0.01, 0.8],
+    confirmationLevel: [0, 5],
+    debounceCount: [1, 20],
+    hysteresisSeconds: [0, 60],
+    hardStopProbabilityDrop: [0.05, 0.9],
+    hardStopWindowSeconds: [1, 60],
+    maxEvidenceAgeSeconds: [1, 15],
+    minVolatilityLogReturnPerSqrtSecond: [0.00000001, 0.01],
+    fatTailVolatilityMultiplier: [1, 5],
+    probabilityShrinkage: [0, 0.9],
+  };
+  for (const [name, range] of Object.entries(ranges)) {
+    if (patch[name] !== undefined) Object.assign(next, { [name]: boundedNumber(patch[name], range[0], range[1], name) });
+  }
+  if (patch.debounceCount !== undefined) Object.assign(next, { debounceCount: Math.floor(next.debounceCount) });
+  await saveSmartExitConfig(next);
+  config = next;
+  if (next.enabled) startScheduler(); else stopScheduler();
+  return getSmartExitConfig();
+}
+
+export async function emergencyDisableSmartExit(): Promise<SmartExitConfig> {
+  const next = { ...config, enabled: false, mode: "off" as const };
+  await saveSmartExitConfig(next);
+  config = next;
+  stopScheduler();
+  return getSmartExitConfig();
+}
+
+export function getSmartExitHealth(): SmartExitHealth {
+  const evidence = collector.health();
+  const evidenceBySymbol: SmartExitHealth["evidenceBySymbol"] = Object.fromEntries(
+    Object.entries(evidence.latestBySymbol).map(([symbol, item]) => [symbol, {
+      source: item.source,
+      ready: item.ready,
+      reason: item.ready ? null : item.source === "unsupported"
+        ? "qualifying futures tape/L2 provider unavailable"
+        : "spot/tape/L2 evidence warming or incomplete",
+      observedAt: Number.isFinite(item.observedAtSeconds)
+        ? new Date(item.observedAtSeconds * 1_000).toISOString()
+        : null,
+    }]),
+  );
+  const readinessValues = Object.values(evidenceBySymbol);
+  const dataReadiness = readinessValues.length === 0
+    ? "unavailable"
+    : readinessValues.every((item) => item.ready)
+      ? "ready"
+      : readinessValues.some((item) => item.ready) ? "degraded" : "unavailable";
+  return {
+    running: interval != null,
+    schedulerActive: interval != null,
+    mode: config.mode,
+    dataReadiness,
+    activeEvaluations: latestEvaluations.size,
+    lastCycleAt,
+    lastError,
+    evidenceBySymbol,
+  };
+}
+
+export function getSmartExitStatus(): {
+  config: SmartExitConfig;
+  health: SmartExitHealth;
+  evaluations: SmartExitEvaluationRecord[];
+} {
+  return {
+    config: getSmartExitConfig(),
+    health: getSmartExitHealth(),
+    evaluations: [...latestEvaluations.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)),
+  };
+}
+
+export async function getSmartExitHistory(limit = 50): Promise<SmartExitEvaluationRecord[]> {
+  return listSmartExitEvaluations({ limit: Math.min(500, Math.max(1, limit)) });
+}
+
+export async function getSmartExitReplayReports(): Promise<Array<Record<string, unknown>>> {
+  const reports = await listSmartExitReplayReports({ limit: 100 });
+  return reports.map((report) => ({ id: report.id, owner: report.owner, symbol: report.symbol,
+    version: report.version, status: report.status, createdAt: report.createdAt, ...report.payload }));
+}
+
+export async function applySmartExitParameterVersion(params: {
+  owner: SmartExitOwnerKind;
+  symbol: string;
+  version: string;
+}): Promise<SmartExitConfig> {
+  const symbol = params.symbol.toUpperCase();
+  const report = await getValidatedSmartExitParameterReport(params.owner, symbol);
+  if (!report || report.version !== params.version) {
+    throw new Error("parameter version is not validated for this owner and symbol");
+  }
+  const payload = report.payload;
+  const holdoutPassed = payload.chronologicalHoldoutPassed === true;
+  const slippagePassed = payload.slippageSensitivityPassed === true;
+  if (!holdoutPassed || !slippagePassed) {
+    throw new Error("validated report lacks required holdout and slippage evidence");
+  }
+  const applied: SmartExitAppliedVersion = {
+    owner: params.owner,
+    symbol,
+    version: params.version,
+    liveEligible: payload.liveEligible === true,
+    appliedAt: new Date().toISOString(),
+  };
+  const next: SmartExitConfig = {
+    ...config,
+    appliedVersions: { ...config.appliedVersions, [smartExitVersionKey(params.owner, symbol)]: applied },
+  };
+  const success = await applyValidatedSmartExitParameterVersion({
+    owner: params.owner,
+    symbol,
+    version: params.version,
+    config: next,
+  });
+  if (!success) throw new Error("parameter version changed before application");
+  config = next;
+  return getSmartExitConfig();
+}

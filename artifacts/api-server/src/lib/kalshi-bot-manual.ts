@@ -55,6 +55,7 @@ import {
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 import { closePosition, persistBetRecord, BetRecordArgs } from "./kalshi-bot-close";
+import { captureSmartExitRegularEntry } from "./kalshi-smart-exit-service";
 
 // ---------------------------------------------------------------------------
 // Manual order — triggered by the dashboard "Place Order" button
@@ -238,6 +239,7 @@ export async function placeManualOrder(opts: {
     source: "manual",
   };
   openPositions.set(sym, newPosition);
+  captureSmartExitRegularEntry(newPosition);
 
   await persistBetRecord({
     symbol: sym,

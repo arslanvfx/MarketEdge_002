@@ -73,6 +73,11 @@ export async function closePosition(
     // Retained for call-site compatibility. Additional fallback submissions are
     // intentionally disabled: every live close is exactly one durable FOK POST.
     gtcFallback?: boolean;
+    /**
+     * Optional owner-controlled final authorization, evaluated after the
+     * durable claim and immediately before the one broker submission.
+     */
+    preSubmitGuard?: () => boolean;
   },
 ): Promise<void> {
   const isExpiry = reason === "window_expired";
@@ -106,6 +111,15 @@ export async function closePosition(
     }
 
     try {
+      if (_options?.preSubmitGuard && !_options.preSubmitGuard()) {
+        await resolveRegularExitIntent({
+          clientOrderId: exitClientOrderId,
+          status: "zero_fill",
+          reason: "owner pre-submit authorization revoked",
+          filledCount: 0,
+        });
+        throw new Error("live exit blocked: owner pre-submit authorization revoked");
+      }
       const result = pos.direction === "yes"
         ? await sellYes(pos.ticker, pos.contractCount, exitClientOrderId)
         : await sellNo(pos.ticker, pos.contractCount, exitClientOrderId);

@@ -7,6 +7,7 @@ import cryptoRouter from "./crypto";
 import kalshiBotRouter from "./kalshi-bot";
 import stocksRouter from "./stocks";
 import kalshiScalperRouter from "./kalshi-scalper";
+import kalshiSmartExitRouter from "./kalshi-smart-exit";
 
 const router: IRouter = Router();
 
@@ -18,5 +19,6 @@ router.use(cryptoRouter);
 router.use(kalshiBotRouter);
 router.use(stocksRouter);
 router.use(kalshiScalperRouter);
+router.use(kalshiSmartExitRouter);
 
 export default router;

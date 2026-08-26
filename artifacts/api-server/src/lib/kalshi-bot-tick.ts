@@ -101,6 +101,7 @@ import {
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 import { closePosition, persistBetRecord, BetRecordArgs } from "./kalshi-bot-close";
+import { captureSmartExitRegularEntry } from "./kalshi-smart-exit-service";
 import { getTimingAccuracy } from "./kalshi-bot-db";
 import { writeBotEntryTimingSnapshot } from "./kalshi-bot-entry-timing";
 
@@ -3094,6 +3095,7 @@ async function _runBotTick(
     },
   };
   openPositions.set(sym, newPosition);
+  captureSmartExitRegularEntry(newPosition);
 
   // Enrich signals with effectiveConfidence (the composite score that gated this bet)
   // so analytics can build accurate confidence-band win-rate breakdowns without relying
