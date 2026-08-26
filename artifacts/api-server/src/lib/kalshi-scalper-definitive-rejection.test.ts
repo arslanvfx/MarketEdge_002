@@ -9,7 +9,7 @@ import fs from "node:fs";
 import { generateKeyPairSync } from "node:crypto";
 
 describe("definitive Scalper order rejections", () => {
-  it("sends both shard 2 and shard 0 in the CreateOrderV2 body", async () => {
+  it("matches the regular path by sending the final observed shard", async () => {
     const previousKeyId = process.env["KALSHI_API_KEY_ID"];
     const previousPrivateKey = process.env["KALSHI_PRIVATE_KEY"];
     const previousFetch = globalThis.fetch;

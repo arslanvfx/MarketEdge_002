@@ -59,6 +59,7 @@ import {
 } from "./kalshi-scalper-policy.ts";
 import {
   buildKalshiBalancePath,
+  buildKalshiShardTransferBody,
   parseKalshiBalanceResponse,
   planKalshiShardRebalance,
 } from "./kalshi-trader.ts";
@@ -3065,16 +3066,17 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(svc, /classifyPlaceOrderResult\(\{\s*filledCount,\s*avgFillPrice,\s*requestedCount: contractCount\s*\}\)/);
   });
 
-  it("exchange module does NOT import or call placeOrder from the trader", () => {
-    assert.ok(!/from\s*"\.\/kalshi-trader/.test(exch), "exchange must not import from kalshi-trader");
+  it("exchange module reuses the regular authenticated transport without calling its strategy lifecycle", () => {
+    assert.match(exch, /import \{ submitKalshiCreateOrderV2 \} from "\.\/kalshi-trader\.ts"/);
     // Strip line + block comments so prose mentioning placeOrder() isn't miscounted.
     const code = exch.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
     assert.ok(!/\bplaceOrder\s*\(/.test(code), "exchange must not call placeOrder(");
+    assert.match(code, /submitKalshiCreateOrderV2\(body, timeoutMs\)/);
   });
 
-  it("exchange module submits POST /portfolio/events/orders with the fixed scalper semantics", () => {
-    assert.match(exch, /\/portfolio\/events\/orders/);
-    assert.match(exch, /action:\s*"buy"/);
+  it("exchange module uses the regular request shape with fixed scalper IOC semantics", () => {
+    assert.match(exch, /exchange_index:\s*exchangeIndex/);
+    assert.ok(!/action:\s*"buy"/.test(exch));
     assert.match(exch, /side === "yes" \? "bid" : "ask"/);
     assert.match(exch, /time_in_force:\s*"immediate_or_cancel"/);
     assert.match(exch, /self_trade_prevention_type:\s*"taker_at_cross"/);
@@ -3082,11 +3084,19 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(exch, /parseScalpOrderResponse\(raw, count\)/);
   });
 
-  it("exchange module throws on auth absence and non-2xx / invalid JSON / transport failure", () => {
-    assert.match(exch, /KALSHI_API_KEY_ID \/ KALSHI_PRIVATE_KEY not configured/);
-    assert.match(exch, /if \(!res\.ok\)[\s\S]*?throw new Error/);
-    assert.match(exch, /invalid JSON response/);
-    assert.match(exch, /transport error/);
+  it("shared transport owns auth/HTTP failures while the Scalper preserves definitive rejection typing", () => {
+    const trader = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "kalshi-trader.ts"),
+      "utf8",
+    );
+    const sharedStart = trader.indexOf("export async function submitKalshiCreateOrderV2");
+    const sharedEnd = trader.indexOf("// Strict regular-order response parsing", sharedStart);
+    const shared = trader.slice(sharedStart, sharedEnd);
+    assert.match(shared, /KALSHI_API_KEY_ID \/ KALSHI_PRIVATE_KEY not configured/);
+    assert.match(shared, /kalshiFetch<unknown>\(\s*"POST",\s*"\/portfolio\/events\/orders"/);
+    assert.match(exch, /parseDefinitiveScalpOrderRejection\(err\)/);
+    assert.match(exch, /throw new DefinitiveScalpOrderRejectionError\(definitive\)/);
+    assert.match(exch, /throw err/);
   });
 
   it("thrown strict submit is handled as UNKNOWN (retain budget, incident, breaker)", () => {
@@ -3136,6 +3146,18 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(
       preflight,
       /rebalanceKalshiCashToShard\(\s*exchangeIndex,\s*0\.90,/,
+    );
+    assert.match(
+      preflight,
+      /const cryptoTargets = targets\.filter\([\s\S]*?!target\.product\.startsWith\("PYTH:"\)/,
+    );
+    assert.match(
+      preflight,
+      /const fundingDeadlineMs = cryptoTargets\.length > 0[\s\S]*?\.\.\.cryptoTargets\.map\(/,
+    );
+    assert.match(
+      preflight,
+      /cryptoTargets\.flatMap\([\s\S]*?validatedRoutes\.get\(target\.symbol\)/,
     );
     assert.match(preflight, /const aggregate = await getBalance\(\s*undefined,/);
     assert.match(preflight, /_collectPriceSample\([\s\S]*?"authoritative"/);
@@ -3635,6 +3657,25 @@ describe("exchange-scoped Kalshi balance path", () => {
         destinationExchangeIndex: 2,
         amountCenticents: 2_257_370,
       }],
+    );
+  });
+
+  it("posts the documented centicent transfer amount for the $251.93 allocation", () => {
+    assert.deepEqual(
+      buildKalshiShardTransferBody({
+        sourceExchangeIndex: 0,
+        destinationExchangeIndex: 2,
+        amountCenticents: 2_257_370,
+      }),
+      {
+        source: "event_contract",
+        destination: "event_contract",
+        amount: 2_257_370,
+        source_exchange_shard: 0,
+        destination_exchange_shard: 2,
+        source_subaccount: 0,
+        destination_subaccount: 0,
+      },
     );
   });
 

@@ -1,88 +1,18 @@
 // ---------------------------------------------------------------------------
-// kalshi-scalper-exchange.ts — SCALPER-OWNED exchange boundary.
+// kalshi-scalper-exchange.ts — Scalper-specific order parsing and reconciliation.
 //
-// This is a deliberately isolated, minimal duplicate of the Kalshi Trade API v2
-// RSA-PSS signing + POST /portfolio/events/orders submission path. It exists so
-// the scalper NEVER imports or calls the protected regular-bot placeOrder()
-// (which coerces a malformed fill_count to zero). The regular bot's trader stays
-// read-only from the scalper's perspective.
-//
-// This module ONLY submits (write). Balance/settlement READS are still sourced
-// from the protected kalshi-trader.ts by the service. Nothing here is imported
-// by any regular-bot file.
-//
-// Auth (identical protocol to the regular client, intentionally re-derived):
-//   KALSHI-ACCESS-KEY        — the API key ID
-//   KALSHI-ACCESS-TIMESTAMP  — current ms timestamp string
-//   KALSHI-ACCESS-SIGNATURE  — base64(RSA-PSS-SHA256(timestamp + METHOD + path))
+// Submission uses the same authenticated CreateOrderV2 transport as regular
+// bets. The Scalper still owns its IOC body, strict response parser, definitive
+// rejection typing, and durable unknown-exposure lifecycle.
 // ---------------------------------------------------------------------------
 
-import crypto from "crypto";
 import { logger } from "./logger.ts";
 import { parseScalpOrderResponse, type ParsedScalpFill } from "./kalshi-scalper-policy.ts";
-
-const KALSHI_TRADE_BASE = "https://api.elections.kalshi.com/trade-api/v2";
-const ORDERS_PATH = "/portfolio/events/orders";
-
-function getKeyId(): string | null {
-  return process.env["KALSHI_API_KEY_ID"] ?? null;
-}
-
-function getPrivateKey(): string | null {
-  const raw = process.env["KALSHI_PRIVATE_KEY"] ?? null;
-  if (!raw) return null;
-
-  // If the key already has a PEM header, normalise newlines and return as-is.
-  if (raw.includes("-----BEGIN")) {
-    return raw.includes("\\n") ? raw.replace(/\\n/g, "\n") : raw;
-  }
-
-  // Raw base64 without PEM headers → reconstruct a PKCS#1 RSA PEM.
-  const b64 = raw.replace(/\s+/g, "");
-  const lines = b64.match(/.{1,64}/g) ?? [];
-  return [
-    "-----BEGIN RSA PRIVATE KEY-----",
-    ...lines,
-    "-----END RSA PRIVATE KEY-----",
-  ].join("\n");
-}
-
-/**
- * Build the signed headers for a request. THROWS if auth material is absent —
- * the scalper must never submit unsigned (fail closed).
- */
-function makeSignedHeaders(method: string, path: string): Record<string, string> {
-  const keyId = getKeyId();
-  const privateKeyPem = getPrivateKey();
-  if (!keyId || !privateKeyPem) {
-    throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
-  }
-
-  const timestampMs = Date.now().toString();
-  // Signature message: timestamp + METHOD + /trade-api/v2 + path (no query).
-  const pathWithoutQuery = path.split("?")[0];
-  const message = timestampMs + method.toUpperCase() + "/trade-api/v2" + pathWithoutQuery;
-
-  const sign = crypto.createSign("SHA256");
-  sign.update(message);
-  sign.end();
-  const signature = sign.sign(
-    { key: privateKeyPem, padding: crypto.constants.RSA_PKCS1_PSS_PADDING },
-    "base64",
-  );
-
-  return {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    "KALSHI-ACCESS-KEY": keyId,
-    "KALSHI-ACCESS-TIMESTAMP": timestampMs,
-    "KALSHI-ACCESS-SIGNATURE": signature,
-  };
-}
+import { submitKalshiCreateOrderV2 } from "./kalshi-trader.ts";
 
 export interface ScalpSubmitParams {
   ticker: string;
-  /** Authoritative CreateOrderV2 market shard routing index. */
+  /** Authoritative market shard observed during final identity validation. */
   exchangeIndex: number;
   side: "yes" | "no";
   // Hard YES-side IOC boundary as a fraction (0.01–0.99). The caller derives it
@@ -181,11 +111,6 @@ export function isDefinitiveScalpOrderRejection(
 export async function placeScalpOrderStrict(
   params: ScalpSubmitParams,
 ): Promise<ParsedScalpFill> {
-  // Fail closed on missing auth BEFORE any network work.
-  if (!getKeyId() || !getPrivateKey()) {
-    throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
-  }
-
   const { ticker, exchangeIndex, side, limitPrice, count, clientOrderId } = params;
 
   // Validate the request locally — the strict parser also enforces this, but a
@@ -213,9 +138,10 @@ export async function placeScalpOrderStrict(
   const body: Record<string, unknown> = {
     client_order_id: clientOrderId,
     ticker,
+    // Match the proven regular-bet path: submit the explicit exchange index
+    // from the final force-refreshed market identity.
     exchange_index: exchangeIndex,
     side: bookSide, // "bid" | "ask"
-    action: "buy",
     count: String(count), // FixedPointCount string
     price, // YES-side FixedPointDollars string (cent resolution)
     time_in_force: "immediate_or_cancel",
@@ -223,42 +149,15 @@ export async function placeScalpOrderStrict(
   };
 
   const timeoutMs = params.timeoutMs ?? 10_000;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-
-  let res: Response;
+  let raw: unknown;
   try {
-    res = await fetch(`${KALSHI_TRADE_BASE}${ORDERS_PATH}`, {
-      method: "POST",
-      headers: makeSignedHeaders("POST", ORDERS_PATH),
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
+    raw = await submitKalshiCreateOrderV2(body, timeoutMs);
   } catch (err) {
-    // Transport failure or timeout/abort — indeterminate; the service treats a
-    // thrown submit as UNKNOWN (never a zero fill).
-    clearTimeout(timer);
-    throw new Error(`scalp submit transport error: ${String(err)}`);
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    const error = new Error(`Kalshi POST ${ORDERS_PATH} → ${res.status}: ${text}`);
-    const definitive = parseDefinitiveScalpOrderRejection(error);
+    const definitive = parseDefinitiveScalpOrderRejection(err);
     if (definitive) {
       throw new DefinitiveScalpOrderRejectionError(definitive);
     }
-    throw error;
-  }
-
-  // Invalid JSON on a 2xx is indeterminate → THROW (caught as unknown).
-  let raw: unknown;
-  try {
-    raw = await res.json();
-  } catch (err) {
-    throw new Error(`scalp submit invalid JSON response: ${String(err)}`);
+    throw err;
   }
 
   // HTTP succeeded → STRICTLY parse. Never coerce a malformed fill to zero.

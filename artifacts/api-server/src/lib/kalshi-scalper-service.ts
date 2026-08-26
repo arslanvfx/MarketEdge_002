@@ -1442,14 +1442,22 @@ async function _runPreflight(
   startsInSeconds: number,
 ): Promise<void> {
   const mode = _config.mode;
-  const fundingDeadlineMs = Math.min(
-    ...targets.map(
+  // The shared scanner registry also includes Pyth commodities on shard 0.
+  // Treasury routing and its deadline must use the exact same crypto-only set;
+  // otherwise an earlier commodity window can suppress shard-2 funding.
+  const cryptoTargets = targets.filter(
+    (target) => !target.product.startsWith("PYTH:"),
+  );
+  const fundingDeadlineMs = cryptoTargets.length > 0
+    ? Math.min(
+      ...cryptoTargets.map(
       (target) =>
         Date.parse(target.closeTime)
         - target.params.finalWindowSeconds * 1_000
         - 5_000,
-    ),
-  );
+      ),
+    )
+    : null;
   const validatedRoutes = new Map<string, number>();
   _warmRegularPositionReadView(mode, windowKey);
   const accountPromise = getScalpCommittedTotals(mode, windowKey);
@@ -1490,9 +1498,20 @@ async function _runPreflight(
     }
   });
 
-  if (mode === "live" && Date.now() < fundingDeadlineMs) {
+  if (
+    mode === "live"
+    && fundingDeadlineMs != null
+    && Date.now() < fundingDeadlineMs
+  ) {
     const routeIndexes = [
-      ...new Set(validatedRoutes.values()),
+      ...new Set(
+        cryptoTargets.flatMap((target) => {
+          const exchangeIndex = validatedRoutes.get(target.symbol);
+          return Number.isInteger(exchangeIndex) && exchangeIndex! >= 0
+            ? [exchangeIndex!]
+            : [];
+        }),
+      ),
     ];
     if (routeIndexes.length === 1) {
       const exchangeIndex = routeIndexes[0]!;
@@ -1571,9 +1590,13 @@ async function _runPreflight(
         _preflightRoutedBalanceReady.set(`${windowKey}:${target.symbol}`, {
           exchangeIndex: exchangeIndex!,
           availableBalance: routedAvailable,
-          targetAvailableBalance: Math.floor(
-            aggregate.availableBalance * 0.90 * 10_000,
-          ) / 10_000,
+          // The 90% treasury target applies only to crypto shard 2. Commodity
+          // markets remain independently executable on shard 0 and must not
+          // make crypto funding look invalid merely because they share this
+          // scanner's broad market registry.
+          targetAvailableBalance: target.product.startsWith("PYTH:")
+            ? 0
+            : Math.floor(aggregate.availableBalance * 0.90 * 10_000) / 10_000,
           checkedAt: Date.now(),
         });
       }

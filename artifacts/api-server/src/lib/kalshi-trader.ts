@@ -460,6 +460,26 @@ export function planKalshiShardRebalance(
   return transfers;
 }
 
+export function buildKalshiShardTransferBody(
+  transfer: KalshiShardTransferPlan,
+): Record<string, unknown> {
+  if (
+    !Number.isSafeInteger(transfer.amountCenticents)
+    || transfer.amountCenticents <= 0
+  ) {
+    throw new Error("Kalshi shard transfer amount must be positive integer centicents");
+  }
+  return {
+    source: "event_contract",
+    destination: "event_contract",
+    amount: transfer.amountCenticents,
+    source_exchange_shard: transfer.sourceExchangeIndex,
+    destination_exchange_shard: transfer.destinationExchangeIndex,
+    source_subaccount: 0,
+    destination_subaccount: 0,
+  };
+}
+
 export async function rebalanceKalshiCashToShard(
   destinationExchangeIndex: number,
   targetFraction: number,
@@ -508,15 +528,7 @@ export async function rebalanceKalshiCashToShard(
     const raw = await kalshiFetch<Record<string, unknown>>(
       "POST",
       "/portfolio/intra_exchange_instance_transfer",
-      {
-        source: "event_contract",
-        destination: "event_contract",
-        amount: transfer.amountCenticents,
-        source_exchange_shard: transfer.sourceExchangeIndex,
-        destination_exchange_shard: transfer.destinationExchangeIndex,
-        source_subaccount: 0,
-        destination_subaccount: 0,
-      },
+      buildKalshiShardTransferBody(transfer),
       transferTimeoutMs,
     );
     const transferId = raw["transfer_id"];
@@ -685,6 +697,26 @@ export interface PlaceOrderResult {
   status: string;
   filledCount: number;
   avgPrice: number | null; // in fraction (0-1)
+}
+
+/**
+ * Shared authenticated CreateOrderV2 transport used by every Kalshi strategy.
+ * Strategy-specific modules own sizing, TIF, parsing, and durable lifecycle,
+ * but must not duplicate signing, endpoint selection, or HTTP behavior.
+ */
+export async function submitKalshiCreateOrderV2(
+  body: Record<string, unknown>,
+  timeoutMs = 10_000,
+): Promise<unknown> {
+  if (!getKeyId() || !getPrivateKey()) {
+    throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
+  }
+  return kalshiFetch<unknown>(
+    "POST",
+    "/portfolio/events/orders",
+    body,
+    timeoutMs,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,7 +1075,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   // and filled, so it is AMBIGUOUS and must surface as UNKNOWN LIVE EXPOSURE.
   let raw: unknown;
   try {
-    raw = await kalshiFetch<unknown>("POST", "/portfolio/events/orders", body);
+    raw = await submitKalshiCreateOrderV2(body);
   } catch (err) {
     const msg = String((err as Error)?.message ?? err);
     if (isUncertainOrderError(err)) throw err;
