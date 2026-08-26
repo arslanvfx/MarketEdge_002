@@ -33,6 +33,7 @@ import { ConvictionThresholdPanel } from "./bot/conviction-threshold-panel";
 import { GapAnalyticsPanel } from "./bot/gap-analytics-panel";
 import { BotScalperPanel } from "./bot/bot-scalper-panel";
 import { BotRegularIntentPanel } from "./bot/bot-regular-intent-panel";
+import { PnlWhatIfCalculator } from "./bot/pnl-what-if-calculator";
 import { normalizeScalpOrders } from "./bot/scalper-ledger";
 import { readApiResponse } from "./bot/api-response";
 import type { GapAnalyticsResult } from "./bot/types";
@@ -752,6 +753,10 @@ export default function BotDashboard() {
           </div>
         )}
 
+        <PnlWhatIfCalculator
+          mode={activeMode}
+          isProduction={status?.isProductionEnv ?? false}
+        />
         <ConditionsPanel
           conditions={conditionsData}
           evaluation={evalData?.evaluation ?? []}

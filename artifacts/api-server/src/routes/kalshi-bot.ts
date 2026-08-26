@@ -48,7 +48,7 @@ import {
   reconcileRegularIntent,
 } from "../lib/kalshi-regular-order-reconcile";
 import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
-import { getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
+import { getDailyPnlSimulation, getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -599,6 +599,37 @@ router.get("/crypto/bot/daily-pnl", async (req, res) => {
       : getBotState().mode;
   try {
     res.json(await getDailyTradingPnl(mode));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/daily-pnl-simulation — read-only settlement-level stake model.
+router.get("/crypto/bot/daily-pnl-simulation", async (req, res) => {
+  const requestedMode = req.query.mode;
+  if (requestedMode !== undefined && requestedMode !== "paper" && requestedMode !== "live") {
+    res.status(400).json({ error: "mode must be paper or live" });
+    return;
+  }
+  const mode: BotMode =
+    requestedMode === "paper" || requestedMode === "live"
+      ? requestedMode
+      : getBotState().mode;
+  const regularStake = Number(req.query.regularStake);
+  const scalperStake = Number(req.query.scalperStake);
+  const validStake = (value: number) =>
+    Number.isFinite(value) && value >= 0.01 && value <= 10_000;
+
+  if (!validStake(regularStake) || !validStake(scalperStake)) {
+    res.status(400).json({
+      error: "regularStake and scalperStake must each be between $0.01 and $10,000",
+    });
+    return;
+  }
+
+  try {
+    res.json(await getDailyPnlSimulation(mode, regularStake, scalperStake));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
