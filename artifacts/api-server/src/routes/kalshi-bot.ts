@@ -48,6 +48,7 @@ import {
   reconcileRegularIntent,
 } from "../lib/kalshi-regular-order-reconcile";
 import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
+import { getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -582,6 +583,22 @@ router.get("/crypto/bot/status", (_req, res) => {
       minRequired: 30,
     };
     res.json({ ...getBotState(), mlStatus, coinStability: Object.fromEntries(coinStabilityCache), coinTrajectory: Object.fromEntries(coinTrajectoryCache) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/daily-pnl?mode=paper|live — realized regular + Scalper P&L
+// since midnight America/New_York. This is independent of manual stats resets.
+router.get("/crypto/bot/daily-pnl", async (req, res) => {
+  const requestedMode = req.query.mode;
+  const mode: BotMode =
+    requestedMode === "paper" || requestedMode === "live"
+      ? requestedMode
+      : getBotState().mode;
+  try {
+    res.json(await getDailyTradingPnl(mode));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

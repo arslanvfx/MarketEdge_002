@@ -11,6 +11,7 @@ import {
   type BotDecision,
   type PriceRegime,
 } from "./kalshi-bot-engine";
+import { todayEastern } from "./eastern-time.ts";
 import { type ExitState, type GuardStates } from "./kalshi-bot-exit";
 import { type TrendStability } from "./crypto";
 import { type PerformanceReport } from "./kalshi-bot-performance";
@@ -135,9 +136,10 @@ export interface ParoleState {
 // Simple helpers used by state accessors and DB functions
 // ---------------------------------------------------------------------------
 
-export function todayUTC(): string {
-  return new Date().toISOString().slice(0, 10);
-}
+export { todayEastern } from "./eastern-time.ts";
+
+/** @deprecated Use todayEastern. Retained for split-module import compatibility. */
+export const todayUTC = todayEastern;
 
 /** Returns the currently active bot decision mode (e.g. "conviction", "classic"). */
 export function getBotDecisionMode(): string {
@@ -168,7 +170,7 @@ export const S = {
   dailyPnl: 0,
   dailyLossCount: 0,
   dailySpendAmount: 0,
-  dailyDate: new Date().toISOString().slice(0, 10),
+  dailyDate: todayEastern(),
   accountBalance: null as number | null,
   cbState: { consecutiveLosses: 0, circuitBreakerWindowsRemaining: 0 } as CircuitBreakerState,
   lastCircuitBreakerWindowKey: "",
@@ -475,7 +477,7 @@ export async function probeDb(): Promise<boolean> {
 }
 
 export function resetDailyIfNeeded(): void {
-  const today = todayUTC();
+  const today = todayEastern();
   if (today !== S.dailyDate) {
     S.dailyDate = today;
     S.dailyPnl = 0;

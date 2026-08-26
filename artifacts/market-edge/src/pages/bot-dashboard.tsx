@@ -258,6 +258,20 @@ export default function BotDashboard() {
     refetchInterval: 30_000,
   });
 
+  const { data: dailyPnlData } = useQuery<{
+    mode: "paper" | "live";
+    timeZone: "America/New_York";
+    dayStartAt: string;
+    nextResetAt: string;
+    regularPnl: number;
+    scalperPnl: number;
+    totalPnl: number;
+  }>({
+    queryKey: ["bot-daily-pnl", activeMode],
+    queryFn: () => fetch(`${API_BASE}/crypto/bot/daily-pnl?mode=${activeMode}`).then(r => r.json()),
+    refetchInterval: 5_000,
+  });
+
   const { data: evalData } = useQuery<{ evaluation: WindowEval[] }>({
     queryKey: ["bot-window-eval"],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/window-eval`).then(r => r.json()),
@@ -592,7 +606,7 @@ export default function BotDashboard() {
   const stats = statsData;
   const regularOpenPosList = status?.openPositions ?? [];
   const openPosList = [...regularOpenPosList, ...normalizedScalps.positions];
-  const pnl = status?.dailyPnl ?? 0;
+  const pnl = dailyPnlData?.totalPnl ?? 0;
   const winRate = (stats?.totalBets ?? 0) > 0 ? Math.round((stats!.wins / stats!.totalBets) * 100) : 0;
 
   const statusLabel = () => {
