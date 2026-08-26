@@ -142,7 +142,7 @@ export async function runSmartExitMigrations(): Promise<void> {
         position_id TEXT NOT NULL,
         symbol TEXT NOT NULL,
         payload JSONB NOT NULL,
-        observed_only BOOLEAN NOT NULL DEFAULT TRUE CHECK (observed_only),
+        observed_only BOOLEAN NOT NULL DEFAULT TRUE CHECK (observed_only = TRUE),
         submitted_order BOOLEAN NOT NULL DEFAULT FALSE CHECK (NOT submitted_order),
         observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
