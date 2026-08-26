@@ -1417,6 +1417,12 @@ export interface SmartExitLifecycleRecord {
   side: "yes" | "no";
   tradingMode: "paper" | "live";
   quantity: number;
+  requestedQuantity?: number;
+  entryWinningPrice: number;
+  entryPriceCents?: number;
+  entryStake?: number;
+  simulatedExitProceeds?: number | null;
+  simulatedExitPnl?: number | null;
   triggeredAt: string;
   advisoryOnly: boolean;
   executionStatus: "advisory" | "requested" | "filled" | "zero_fill" | "blocked" | "unknown";
@@ -1432,8 +1438,23 @@ export interface SmartExitLifecycleRecord {
   reason: string | null;
 }
 
+export interface SmartExitCoverageRecord {
+  owner: string;
+  positionId: string;
+  symbol: string;
+  side: "yes" | "no";
+  evaluatedAt: string;
+  status: "triggered" | "evaluated" | "unavailable";
+  reasonCode: string;
+  reason: string;
+  entryPriceCents: number | null;
+  contractCount: number;
+  entryStake: number | null;
+}
+
 export interface SmartExitLifecycleLedger {
   records: SmartExitLifecycleRecord[];
+  coverage: SmartExitCoverageRecord[];
   summary: {
     triggered: number;
     sold: number;

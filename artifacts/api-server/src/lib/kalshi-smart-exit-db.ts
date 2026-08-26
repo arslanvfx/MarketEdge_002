@@ -97,6 +97,8 @@ export async function runSmartExitMigrations(): Promise<void> {
       ON kalshi_smart_exit_evaluations (owner, position_id, evaluated_at DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS smart_exit_evaluations_symbol_latest
       ON kalshi_smart_exit_evaluations (owner, symbol, evaluated_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS smart_exit_evaluations_recent
+      ON kalshi_smart_exit_evaluations (evaluated_at DESC)`);
     await client.query(`
       CREATE TABLE IF NOT EXISTS kalshi_smart_exit_position_state (
         owner TEXT NOT NULL CHECK (owner IN ('regular','scalper')),
@@ -280,6 +282,47 @@ export async function listLatestSmartExitEvaluationsPerPosition(params: {
     ) latest ORDER BY evaluated_at DESC LIMIT $3`,
   [params.owner ?? null, params.symbol ?? null, Math.max(1, params.limit ?? 100)]);
   return result.rows.map((row: { payload: SmartExitEvaluationRecord }) => row.payload);
+}
+
+export async function getSmartExitEvaluationsByIds(
+  ids: readonly string[],
+): Promise<SmartExitEvaluationRecord[]> {
+  await ensureMigrated();
+  if (ids.length === 0) return [];
+  const result = await pool.query(
+    `SELECT payload FROM kalshi_smart_exit_evaluations WHERE id = ANY($1::text[])`,
+    [ids],
+  );
+  return result.rows.map((row: { payload: SmartExitEvaluationRecord }) => row.payload);
+}
+
+/**
+ * Returns the latest informative decision for each position. A healthy HOLD is
+ * more useful for trigger coverage than the synthetic unavailable sample often
+ * written as the market expires; unavailable is retained when it is all we saw.
+ */
+export async function listSmartExitCoverageEvaluations(params: {
+  limit?: number;
+} = {}): Promise<SmartExitEvaluationRecord[]> {
+  await ensureMigrated();
+  const positionLimit = Math.max(1, params.limit ?? 100);
+  const sampleLimit = Math.min(10_000, Math.max(1_000, positionLimit * 50));
+  const result = await pool.query(`
+    SELECT payload FROM kalshi_smart_exit_evaluations
+    ORDER BY evaluated_at DESC LIMIT $1`,
+  [sampleLimit]);
+  const selected = new Map<string, SmartExitEvaluationRecord>();
+  for (const row of result.rows as Array<{ payload: SmartExitEvaluationRecord }>) {
+    const evaluation = row.payload;
+    const key = `${evaluation.owner}:${evaluation.positionId}`;
+    const current = selected.get(key);
+    if (!current || (current.recommendation === "unavailable" && evaluation.recommendation !== "unavailable")) {
+      selected.set(key, evaluation);
+    }
+  }
+  return [...selected.values()]
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+    .slice(0, positionLimit);
 }
 
 export async function listSmartExitReplayReports(params: {

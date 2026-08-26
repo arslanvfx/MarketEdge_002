@@ -359,17 +359,19 @@ export function BotSmartExitPanel({ authPost }: Props) {
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(420px,1fr)] divide-y xl:divide-y-0 xl:divide-x divide-white/10">
         <div className="flex flex-col h-full bg-[#0d1017]">
           <SectionHeader title={`Exit Lifecycle & Effectiveness · ${lifecycle?.summary.triggered ?? 0} triggered · ${lifecycle?.summary.sold ?? 0} sold · ${lifecycle?.summary.settled ?? 0} settled`} />
-          <div className="overflow-x-auto overflow-y-auto max-h-[300px]">
-            <table className="w-full min-w-[780px] table-fixed text-left text-xs whitespace-nowrap">
+          <div className="overflow-x-auto overflow-y-auto max-h-[360px]">
+            <table className="w-full min-w-[1080px] table-fixed text-left text-xs whitespace-nowrap">
               <thead>
                 <tr className="border-b border-white/5 text-[9px] text-slate-500 uppercase tracking-wider">
                   <th className="w-[105px] px-4 py-2 font-medium">Triggered</th>
                   <th className="w-[90px] px-4 py-2 font-medium">Market</th>
-                  <th className="w-[110px] px-4 py-2 font-medium">Sold</th>
-                  <th className="w-[110px] px-4 py-2 font-medium">Execution</th>
-                  <th className="w-[120px] px-4 py-2 font-medium">Settlement</th>
-                  <th className="w-[130px] px-4 py-2 font-medium">Effect</th>
-                  <th className="w-auto px-4 py-2 font-medium text-right">Value Saved</th>
+                  <th className="w-[110px] px-4 py-2 font-medium">Entry</th>
+                  <th className="w-[100px] px-4 py-2 font-medium text-right">Stake</th>
+                  <th className="w-[120px] px-4 py-2 font-medium text-right">Exit P&amp;L</th>
+                  <th className="w-[120px] px-4 py-2 font-medium text-right">Hold P&amp;L</th>
+                  <th className="w-[120px] px-4 py-2 font-medium text-right">Saved</th>
+                  <th className="w-[120px] px-4 py-2 font-medium">Outcome</th>
+                  <th className="w-auto px-4 py-2 font-medium">Effect</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
@@ -381,31 +383,84 @@ export function BotSmartExitPanel({ authPost }: Props) {
                     <td className="px-4 py-2 align-middle font-bold text-slate-200 text-xs">
                       {item.symbol} <span className="text-[9px] text-slate-500">{item.side.toUpperCase()}</span>
                     </td>
-                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-400">
-                      {item.soldAt ? fmtTime(item.soldAt) : "—"}
+                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300 tabular-nums">
+                      <div>{item.entryPriceCents != null ? `${item.entryPriceCents.toFixed(1)}¢` : "—"}</div>
+                      <div className="text-[9px] text-slate-600">
+                        {item.requestedQuantity != null && item.requestedQuantity !== item.quantity
+                          ? `${item.quantity}/${item.requestedQuantity} filled`
+                          : `${item.quantity} contracts`}
+                      </div>
                     </td>
-                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300">
-                      {item.advisoryOnly ? "SHADOW" : item.executionStatus.toUpperCase()}
-                    </td>
-                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300">
-                      {item.settlementResult ? `${item.settlementResult.toUpperCase()} settled` : "Pending"}
-                    </td>
-                    <td className={`px-4 py-2 align-middle text-[10px] font-bold uppercase ${
-                      item.verdict === "saved_loss" ? "text-emerald-400" :
-                      item.verdict === "missed_win" || item.verdict === "reduced_profit" ? "text-red-400" :
-                      "text-slate-500"
-                    }`}>
-                      {item.verdict.replaceAll("_", " ")}
+                    <td className="px-4 py-2 align-middle text-right text-[10px] font-mono text-slate-300 tabular-nums">
+                      {item.entryStake != null ? fmt$(item.entryStake) : "—"}
                     </td>
                     <td className={`px-4 py-2 align-middle text-right text-[10px] font-mono tabular-nums ${
+                      (item.actualExitPnl ?? item.simulatedExitPnl ?? 0) < 0 ? "text-red-400" : "text-emerald-400"
+                    }`}>
+                      {(item.actualExitPnl ?? item.simulatedExitPnl) == null
+                        ? "—"
+                        : fmt$(item.actualExitPnl ?? item.simulatedExitPnl ?? 0)}
+                    </td>
+                    <td className={`px-4 py-2 align-middle text-right text-[10px] font-mono tabular-nums ${
+                      (item.holdPnl ?? 0) < 0 ? "text-red-400" : "text-emerald-400"
+                    }`}>
+                      {item.holdPnl == null ? "Pending" : fmt$(item.holdPnl)}
+                    </td>
+                    <td className={`px-4 py-2 align-middle text-right text-[10px] font-bold font-mono tabular-nums ${
                       (item.valueSaved ?? 0) > 0 ? "text-emerald-400" : (item.valueSaved ?? 0) < 0 ? "text-red-400" : "text-slate-500"
                     }`}>
                       {item.valueSaved == null ? "—" : `${item.valueSaved > 0 ? "+" : ""}${fmt$(item.valueSaved)}`}
                     </td>
+                    <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-300">
+                      <div>{item.advisoryOnly ? "SHADOW" : item.executionStatus.toUpperCase()}</div>
+                      <div className="text-[9px] text-slate-600">
+                        {item.settlementResult ? `${item.settlementResult.toUpperCase()} settled` : "Pending"}
+                      </div>
+                    </td>
+                    <td className={`px-4 py-2 align-middle text-[10px] font-bold uppercase truncate ${
+                      item.verdict === "saved_loss" ? "text-emerald-400" :
+                      item.verdict === "missed_win" || item.verdict === "reduced_profit" ? "text-red-400" :
+                      "text-slate-500"
+                    }`} title={item.reason ?? ""}>
+                      {item.verdict.replaceAll("_", " ")}
+                    </td>
                   </tr>
                 ))}
                 {!lifecycle?.records?.length && (
-                  <tr><td colSpan={7} className="px-4 py-4 text-center text-slate-600 text-[10px] font-mono italic h-12 align-middle">No Smart Exit triggers recorded yet</td></tr>
+                  <tr><td colSpan={9} className="px-4 py-4 text-center text-slate-600 text-[10px] font-mono italic h-12 align-middle">No Smart Exit triggers recorded yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <SectionHeader title="Position Coverage · Why a coin did or did not trigger" />
+          <div className="overflow-x-auto overflow-y-auto max-h-[220px]">
+            <table className="w-full min-w-[720px] table-fixed text-left text-xs whitespace-nowrap">
+              <thead>
+                <tr className="border-b border-white/5 text-[9px] text-slate-500 uppercase tracking-wider">
+                  <th className="w-[105px] px-4 py-2 font-medium">Evaluated</th>
+                  <th className="w-[90px] px-4 py-2 font-medium">Market</th>
+                  <th className="w-[110px] px-4 py-2 font-medium">Entry</th>
+                  <th className="w-[110px] px-4 py-2 font-medium">Status</th>
+                  <th className="w-auto px-4 py-2 font-medium">Reason</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {lifecycle?.coverage?.map(item => (
+                  <tr key={`${item.owner}:${item.positionId}`} className="h-11 hover:bg-white/[0.02]">
+                    <td className="px-4 py-2 text-[10px] font-mono text-slate-500 tabular-nums">{fmtTime(item.evaluatedAt)}</td>
+                    <td className="px-4 py-2 font-bold text-slate-200">{item.symbol} <span className="text-[9px] text-slate-500">{item.side.toUpperCase()}</span></td>
+                    <td className="px-4 py-2 text-[10px] font-mono text-slate-300 tabular-nums">
+                      {item.entryPriceCents == null ? "—" : `${item.entryPriceCents.toFixed(1)}¢`} · {item.contractCount}
+                    </td>
+                    <td className={`px-4 py-2 text-[10px] font-bold uppercase ${
+                      item.status === "triggered" ? "text-indigo-400" :
+                      item.status === "unavailable" ? "text-amber-400" : "text-slate-400"
+                    }`}>{item.status}</td>
+                    <td className="px-4 py-2 text-[10px] font-mono text-slate-400 truncate" title={item.reason}>{item.reason}</td>
+                  </tr>
+                ))}
+                {!lifecycle?.coverage?.length && (
+                  <tr><td colSpan={5} className="h-11 px-4 text-center text-[10px] font-mono italic text-slate-600">No evaluated positions recorded yet</td></tr>
                 )}
               </tbody>
             </table>

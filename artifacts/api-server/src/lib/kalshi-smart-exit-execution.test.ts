@@ -22,6 +22,8 @@ const position: SmartExitPosition = {
   side: "yes",
   underlyingKind: "crypto",
   remainingQuantity: 4,
+  requestedQuantity: 4,
+  entryStake: 3,
   exchangeIndex: 0,
   strikePrice: 64_000,
   expirySeconds: 1_800_000_900,

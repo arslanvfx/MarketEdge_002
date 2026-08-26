@@ -19,10 +19,12 @@ import {
   claimSmartExitRequest,
   getValidatedSmartExitParameterReport,
   getSmartExitLifecycle,
+  getSmartExitEvaluationsByIds,
   insertSmartExitEvaluation,
   insertSmartExitEvidence,
   insertSmartExitRecoveryStudy,
   listLatestSmartExitEvaluationsPerPosition,
+  listSmartExitCoverageEvaluations,
   listOpenScalperPositions,
   listSmartExitPositionStates,
   listSmartExitEvaluations,
@@ -53,9 +55,14 @@ import type {
   SmartExitOwnerKind,
   SmartExitPosition,
   SmartExitLifecycleRecord,
+  SmartExitCoverageRecord,
   SmartExitState,
 } from "./kalshi-smart-exit-types.ts";
-import { computeSmartExitEffectiveness, normalizeSmartExitComponentHealth } from "./kalshi-smart-exit-types.ts";
+import {
+  computeSmartExitEffectivenessFromProceeds,
+  getSmartExitShadowProceeds,
+  normalizeSmartExitComponentHealth,
+} from "./kalshi-smart-exit-types.ts";
 
 const SCHEDULER_MS = 1_000;
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
@@ -217,6 +224,8 @@ function regularSnapshot(position: OpenPosition, evidence: SmartExitEvidence): S
     side: position.direction,
     underlyingKind: PRODUCT_BY_SYMBOL.get(symbol)?.category === "commodity" ? "commodity" : "crypto",
     remainingQuantity: position.contractCount,
+    requestedQuantity: position.contractCount,
+    entryStake: position.betAmount,
     exchangeIndex: market?.exchangeIndex ?? null,
     strikePrice: position.kalshiTarget,
     expirySeconds,
@@ -284,6 +293,14 @@ function scalperSnapshot(
   const market = exactMarket(symbol, ticker, windowKey);
   const openedAt = new Date(String(row.created_at ?? "")).getTime() / 1_000;
   const entryYesPrice = numeric(row, "entry_yes_price");
+  const filledQuantity = numeric(row, "filled_count") ?? 0;
+  const requestedQuantity = numeric(row, "contract_count") ?? filledQuantity;
+  const winningContractCost = numeric(row, "winning_contract_cost");
+  const avgFillPrice = numeric(row, "avg_fill_price");
+  const exactWinningPrice = winningContractCost
+    ?? marketProbabilityForSide(side, avgFillPrice)
+    ?? marketProbabilityForSide(side, entryYesPrice)
+    ?? 0;
   const guard = row.entry_guard_evidence && typeof row.entry_guard_evidence === "object"
     ? row.entry_guard_evidence as Record<string, unknown>
     : {};
@@ -298,14 +315,16 @@ function scalperSnapshot(
     ticker,
     side,
     underlyingKind: PRODUCT_BY_SYMBOL.get(symbol)?.category === "commodity" ? "commodity" : "crypto",
-    remainingQuantity: numeric(row, "filled_count") ?? 0,
+    remainingQuantity: filledQuantity,
+    requestedQuantity,
+    entryStake: exactWinningPrice * filledQuantity,
     exchangeIndex: market?.exchangeIndex ?? null,
     strikePrice: market?.value ?? 0,
     expirySeconds: windowExpirySeconds(windowKey),
     openedAtSeconds: Number.isFinite(openedAt) ? openedAt : 0,
     modelAtEntry: { winProbability: null, observedAtSeconds: openedAt },
     marketAtEntry: {
-      winProbability: marketProbabilityForSide(side, entryYesPrice) ?? 0,
+      winProbability: exactWinningPrice,
       observedAtSeconds: openedAt,
     },
   };
@@ -438,10 +457,13 @@ async function executeAuthorizedExit(
   if (result.outcome === "filled") {
     await resolveSmartExitRequest({ id: requestId, status: "filled", reason: result.reason });
     if (lifecycle) {
-      const effectiveness = computeSmartExitEffectiveness({
-        side: lifecycle.side, quantity: result.quantity,
-        entryWinningPrice: lifecycle.entryWinningPrice,
-        winningFillPrice: result.winningFillPrice, settlementResult: lifecycle.settlementResult,
+      const effectiveness = computeSmartExitEffectivenessFromProceeds({
+        side: lifecycle.side,
+        quantity: result.quantity,
+        entryStake: lifecycle.entryStake
+          ?? lifecycle.entryWinningPrice * result.quantity,
+        exitProceeds: result.winningFillPrice * result.quantity,
+        settlementResult: lifecycle.settlementResult,
       });
       await upsertSmartExitLifecycle({
         ...lifecycle, requestId, executionStatus: "filled", soldAt: result.soldAt,
@@ -477,6 +499,9 @@ async function recordLifecycleTrigger(
 ): Promise<void> {
   if (await getSmartExitLifecycle(position.owner.kind, position.positionId)) return;
   const advisoryOnly = config.mode === "shadow";
+  const simulatedExitProceeds = advisoryOnly
+    ? getSmartExitShadowProceeds(evaluation)
+    : null;
   await upsertSmartExitLifecycle({
     id: randomUUID(),
     owner: position.owner.kind,
@@ -487,7 +512,14 @@ async function recordLifecycleTrigger(
     side: position.side,
     tradingMode: position.owner.tradingMode,
     quantity: position.remainingQuantity,
+    requestedQuantity: position.requestedQuantity,
     entryWinningPrice: position.marketAtEntry.winProbability,
+    entryPriceCents: position.marketAtEntry.winProbability * 100,
+    entryStake: position.entryStake,
+    simulatedExitProceeds,
+    simulatedExitPnl: simulatedExitProceeds != null
+      ? simulatedExitProceeds - position.entryStake
+      : null,
     triggerEvaluationId: evaluation.id,
     triggeredAt: evaluation.timestamp,
     advisoryOnly,
@@ -509,23 +541,55 @@ async function recordLifecycleTrigger(
 
 async function reconcileSmartExitLifecycles(): Promise<void> {
   const records = await listUnsettledSmartExitLifecycles(25);
+  const recoveredEvaluations = await getSmartExitEvaluationsByIds(
+    records
+      .filter((record) => record.advisoryOnly && record.simulatedExitProceeds == null)
+      .map((record) => record.triggerEvaluationId),
+  );
+  const recoveredById = new Map(recoveredEvaluations.map((evaluation) => [evaluation.id, evaluation]));
   for (const record of records) {
     const result = await fetchKalshiMarketResult(record.ticker);
     if (result.result == null) continue;
     const settlementResult = result.result;
+    const entryStake = record.entryStake
+      ?? record.entryWinningPrice * record.quantity;
+    const simulatedExitProceeds = record.simulatedExitProceeds
+      ?? getSmartExitShadowProceeds(recoveredById.get(record.triggerEvaluationId) ?? {
+        executionEvidenceReady: false,
+        estimatedSaleValue: null,
+      });
     const effectiveness = record.executionStatus === "filled"
-      ? computeSmartExitEffectiveness({
-          side: record.side, quantity: record.quantity,
-          entryWinningPrice: record.entryWinningPrice,
-          winningFillPrice: record.winningFillPrice, settlementResult,
+      ? computeSmartExitEffectivenessFromProceeds({
+          side: record.side,
+          quantity: record.quantity,
+          entryStake,
+          exitProceeds: record.winningFillPrice == null
+            ? record.saleProceeds
+            : record.winningFillPrice * record.quantity,
+          settlementResult,
         })
-      : { saleProceeds: record.saleProceeds, actualExitPnl: record.actualExitPnl,
-          holdValue: settlementResult === record.side ? record.quantity : 0,
-          holdPnl: (settlementResult === record.side ? record.quantity : 0)
-            - record.entryWinningPrice * record.quantity,
-          valueSaved: null, verdict: record.advisoryOnly ? "pending" as const : record.verdict };
+      : record.advisoryOnly
+        ? computeSmartExitEffectivenessFromProceeds({
+            side: record.side,
+            quantity: record.quantity,
+            entryStake,
+            exitProceeds: simulatedExitProceeds,
+            settlementResult,
+          })
+        : { saleProceeds: record.saleProceeds, actualExitPnl: record.actualExitPnl,
+            holdValue: settlementResult === record.side ? record.quantity : 0,
+            holdPnl: (settlementResult === record.side ? record.quantity : 0) - entryStake,
+            valueSaved: null, verdict: record.verdict };
     await upsertSmartExitLifecycle({
-      ...record, settlementResult, settledAt: new Date().toISOString(), ...effectiveness,
+      ...record,
+      entryPriceCents: record.entryPriceCents ?? record.entryWinningPrice * 100,
+      entryStake,
+      requestedQuantity: record.requestedQuantity ?? record.quantity,
+      simulatedExitProceeds,
+      simulatedExitPnl: simulatedExitProceeds == null ? null : simulatedExitProceeds - entryStake,
+      settlementResult,
+      settledAt: new Date().toISOString(),
+      ...effectiveness,
     });
   }
 }
@@ -958,11 +1022,94 @@ export async function getSmartExitHistory(limit = 50): Promise<SmartExitEvaluati
 
 export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
   records: SmartExitLifecycleRecord[];
+  coverage: SmartExitCoverageRecord[];
   summary: { triggered: number; sold: number; settled: number; helped: number; harmed: number; totalValueSaved: number };
 }> {
-  const records = await listSmartExitLifecycles(limit);
+  const [rawRecords, evaluations] = await Promise.all([
+    listSmartExitLifecycles(limit),
+    listSmartExitCoverageEvaluations({ limit: Math.min(1_000, Math.max(100, limit * 4)) }),
+  ]);
+  const missingTriggerIds = rawRecords
+    .filter((record) => record.advisoryOnly && record.simulatedExitProceeds == null)
+    .map((record) => record.triggerEvaluationId);
+  const triggerEvaluations = await getSmartExitEvaluationsByIds(missingTriggerIds);
+  const triggerById = new Map(triggerEvaluations.map((evaluation) => [evaluation.id, evaluation]));
+  const records = rawRecords.map((record) => {
+    const trigger = triggerById.get(record.triggerEvaluationId);
+    const entryStake = record.entryStake
+      ?? record.entryWinningPrice * record.quantity;
+    const simulatedExitProceeds = record.simulatedExitProceeds
+      ?? (record.advisoryOnly
+        ? getSmartExitShadowProceeds(trigger ?? {
+            executionEvidenceReady: false,
+            estimatedSaleValue: null,
+          })
+        : null);
+    const simulatedExitPnl = record.simulatedExitPnl
+      ?? (simulatedExitProceeds == null ? null : simulatedExitProceeds - entryStake);
+    const effectiveness = record.advisoryOnly
+      && record.settlementResult != null
+      && simulatedExitProceeds != null
+      && record.valueSaved == null
+      ? computeSmartExitEffectivenessFromProceeds({
+          side: record.side,
+          quantity: record.quantity,
+          entryStake,
+          exitProceeds: simulatedExitProceeds,
+          settlementResult: record.settlementResult,
+        })
+      : {};
+    return {
+      ...record,
+      entryPriceCents: record.entryPriceCents ?? record.entryWinningPrice * 100,
+      entryStake,
+      requestedQuantity: record.requestedQuantity ?? record.quantity,
+      simulatedExitProceeds,
+      simulatedExitPnl,
+      ...effectiveness,
+    };
+  });
+  const legacyBackfills = records.filter((record, index) => {
+    const original = rawRecords[index]!;
+    return original.advisoryOnly
+      && original.simulatedExitProceeds == null
+      && record.simulatedExitProceeds != null;
+  });
+  if (legacyBackfills.length > 0) {
+    await Promise.all(legacyBackfills.map((record) => upsertSmartExitLifecycle(record)));
+  }
+  const triggeredKeys = new Set(records.map((record) => identityKey(record.owner, record.positionId)));
+  const lifecycleByKey = new Map(records.map((record) => [
+    identityKey(record.owner, record.positionId),
+    record,
+  ]));
+  const coverage: SmartExitCoverageRecord[] = evaluations.map((evaluation) => {
+    const key = identityKey(evaluation.owner, evaluation.positionId);
+    const lifecycle = lifecycleByKey.get(key);
+    const entryStake = evaluation.marketAtEntryProbability > 0
+      ? evaluation.marketAtEntryProbability * evaluation.remainingQuantity
+      : null;
+    return {
+      owner: evaluation.owner,
+      positionId: evaluation.positionId,
+      symbol: evaluation.symbol,
+      side: evaluation.side,
+      evaluatedAt: lifecycle?.triggeredAt ?? evaluation.timestamp,
+      status: triggeredKeys.has(key)
+        ? "triggered"
+        : evaluation.recommendation === "unavailable" ? "unavailable" : "evaluated",
+      reasonCode: lifecycle ? "exit_triggered" : evaluation.reasonCode,
+      reason: lifecycle?.reason ?? evaluation.reason,
+      entryPriceCents: evaluation.marketAtEntryProbability > 0
+        ? evaluation.marketAtEntryProbability * 100
+        : null,
+      contractCount: evaluation.remainingQuantity,
+      entryStake,
+    };
+  });
   return {
     records,
+    coverage,
     summary: {
       triggered: records.length,
       sold: records.filter((r) => r.executionStatus === "filled").length,

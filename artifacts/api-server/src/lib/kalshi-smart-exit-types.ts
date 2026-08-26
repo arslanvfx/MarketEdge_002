@@ -51,6 +51,10 @@ export interface SmartExitPosition {
   readonly side: BinarySide;
   readonly underlyingKind: UnderlyingKind;
   readonly remainingQuantity: number;
+  /** Original requested quantity; may exceed the filled/remaining quantity. */
+  readonly requestedQuantity: number;
+  /** Actual dollars paid for the remaining contracts at entry. */
+  readonly entryStake: number;
   readonly exchangeIndex: number | null;
   readonly strikePrice: number;
   readonly expirySeconds: number;
@@ -284,7 +288,13 @@ export interface SmartExitLifecycleRecord {
   readonly side: BinarySide;
   readonly tradingMode: SmartExitTradingMode;
   readonly quantity: number;
+  readonly requestedQuantity?: number;
   readonly entryWinningPrice: number;
+  readonly entryPriceCents?: number;
+  readonly entryStake?: number;
+  /** Frozen executable proceeds observed at a shadow trigger. */
+  readonly simulatedExitProceeds?: number | null;
+  readonly simulatedExitPnl?: number | null;
   readonly triggerEvaluationId: string;
   readonly triggeredAt: string;
   readonly advisoryOnly: boolean;
@@ -303,22 +313,47 @@ export interface SmartExitLifecycleRecord {
   readonly reason: string | null;
 }
 
-export function computeSmartExitEffectiveness(params: {
+export interface SmartExitCoverageRecord {
+  readonly owner: SmartExitOwnerKind;
+  readonly positionId: string;
+  readonly symbol: string;
+  readonly side: BinarySide;
+  readonly evaluatedAt: string;
+  readonly status: "triggered" | "evaluated" | "unavailable";
+  readonly reasonCode: string;
+  readonly reason: string;
+  readonly entryPriceCents: number | null;
+  readonly contractCount: number;
+  readonly entryStake: number | null;
+}
+
+/** A shadow exit is economically scoreable only when the full position was executable. */
+export function getSmartExitShadowProceeds(
+  evaluation: Pick<SmartExitEvaluationRecord, "executionEvidenceReady" | "estimatedSaleValue">,
+): number | null {
+  return evaluation.executionEvidenceReady
+    && evaluation.estimatedSaleValue != null
+    && Number.isFinite(evaluation.estimatedSaleValue)
+    && evaluation.estimatedSaleValue >= 0
+    ? evaluation.estimatedSaleValue
+    : null;
+}
+
+export function computeSmartExitEffectivenessFromProceeds(params: {
   side: BinarySide;
   quantity: number;
-  entryWinningPrice: number;
-  winningFillPrice: number | null;
+  entryStake: number;
+  exitProceeds: number | null;
   settlementResult: BinarySide | null;
 }): Pick<SmartExitLifecycleRecord, "saleProceeds" | "actualExitPnl" | "holdValue" | "holdPnl" | "valueSaved" | "verdict"> {
-  const saleProceeds = params.winningFillPrice == null ? null : params.winningFillPrice * params.quantity;
-  const actualExitPnl = saleProceeds == null ? null
-    : saleProceeds - params.entryWinningPrice * params.quantity;
+  const saleProceeds = params.exitProceeds;
+  const actualExitPnl = saleProceeds == null ? null : saleProceeds - params.entryStake;
   if (params.settlementResult == null || saleProceeds == null || actualExitPnl == null) {
     return { saleProceeds, actualExitPnl, holdValue: null, holdPnl: null, valueSaved: null, verdict: "pending" };
   }
   const won = params.settlementResult === params.side;
   const holdValue = won ? params.quantity : 0;
-  const holdPnl = holdValue - params.entryWinningPrice * params.quantity;
+  const holdPnl = holdValue - params.entryStake;
   const valueSaved = actualExitPnl - holdPnl;
   const epsilon = 0.005;
   const verdict: SmartExitEffectivenessVerdict = Math.abs(valueSaved) < epsilon
@@ -327,4 +362,20 @@ export function computeSmartExitEffectiveness(params: {
       ? won ? "reduced_profit" : "saved_loss"
       : won ? "missed_win" : "reduced_profit";
   return { saleProceeds, actualExitPnl, holdValue, holdPnl, valueSaved, verdict };
+}
+
+export function computeSmartExitEffectiveness(params: {
+  side: BinarySide;
+  quantity: number;
+  entryWinningPrice: number;
+  winningFillPrice: number | null;
+  settlementResult: BinarySide | null;
+}): Pick<SmartExitLifecycleRecord, "saleProceeds" | "actualExitPnl" | "holdValue" | "holdPnl" | "valueSaved" | "verdict"> {
+  return computeSmartExitEffectivenessFromProceeds({
+    side: params.side,
+    quantity: params.quantity,
+    entryStake: params.entryWinningPrice * params.quantity,
+    exitProceeds: params.winningFillPrice == null ? null : params.winningFillPrice * params.quantity,
+    settlementResult: params.settlementResult,
+  });
 }

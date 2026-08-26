@@ -9,6 +9,7 @@ import type { SmartExitEvidence, SmartExitPosition } from "./kalshi-smart-exit-t
 const position: SmartExitPosition = {
   positionId: "p", owner: { kind: "regular", tradingMode: "paper" }, symbol: "BTC",
   windowKey: "1970-01-01T00:00", ticker: "KXBTC15M-TEST", remainingQuantity: 1,
+  requestedQuantity: 1, entryStake: 0.72,
   exchangeIndex: null, side: "yes", underlyingKind: "crypto",
   strikePrice: 100, expirySeconds: 900, openedAtSeconds: 0,
   modelAtEntry: { winProbability: 0.8, observedAtSeconds: 0 },

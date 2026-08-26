@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeSmartExitEffectiveness } from "./kalshi-smart-exit-types.ts";
+import {
+  computeSmartExitEffectiveness,
+  computeSmartExitEffectivenessFromProceeds,
+  getSmartExitShadowProceeds,
+} from "./kalshi-smart-exit-types.ts";
 
 test("Smart Exit records loss saved for a losing YES exit", () => {
   const result = computeSmartExitEffectiveness({
@@ -29,4 +33,37 @@ test("Smart Exit effectiveness stays pending without settlement or fill", () => 
     side: "yes", quantity: 2, entryWinningPrice: 0.6,
     winningFillPrice: null, settlementResult: "no",
   }).verdict, "pending");
+});
+
+test("shadow exit compares frozen simulated proceeds with a full losing settlement", () => {
+  const result = computeSmartExitEffectivenessFromProceeds({
+    side: "yes", quantity: 20, entryStake: 16,
+    exitProceeds: 7, settlementResult: "no",
+  });
+  assert.equal(result.actualExitPnl, -9);
+  assert.equal(result.holdPnl, -16);
+  assert.equal(result.valueSaved, 7);
+  assert.equal(result.verdict, "saved_loss");
+});
+
+test("shadow exit reports forfeited profit when the position ultimately wins", () => {
+  const result = computeSmartExitEffectivenessFromProceeds({
+    side: "no", quantity: 10, entryStake: 6,
+    exitProceeds: 3, settlementResult: "no",
+  });
+  assert.equal(result.actualExitPnl, -3);
+  assert.equal(result.holdPnl, 4);
+  assert.equal(result.valueSaved, -7);
+  assert.equal(result.verdict, "missed_win");
+});
+
+test("shadow proceeds require full executable evidence", () => {
+  assert.equal(getSmartExitShadowProceeds({
+    executionEvidenceReady: false,
+    estimatedSaleValue: 7,
+  }), null);
+  assert.equal(getSmartExitShadowProceeds({
+    executionEvidenceReady: true,
+    estimatedSaleValue: 7,
+  }), 7);
 });

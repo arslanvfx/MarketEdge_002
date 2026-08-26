@@ -7,4 +7,4 @@ A Smart Exit trigger, execution, and effectiveness verdict are separate lifecycl
 
 **Why:** A confirmed fill proves that execution worked, but it does not prove the decision helped. That requires comparing actual exit value with the value from authoritative Kalshi settlement, without changing canonical trading P&L.
 
-**How to apply:** Reconcile filled exits against authoritative market settlement. Report saved loss, missed win, reduced profit, no difference, or pending explicitly. Keep the ledger idempotent across one-second evaluations and server restarts.
+**How to apply:** Reconcile filled exits against authoritative market settlement. Score shadow exits only when fresh executable evidence covers the full position, and freeze those proceeds at the first trigger. Persist recovered legacy economics before evaluation history can disappear. Report saved loss, missed win, reduced profit, no difference, or pending explicitly. Keep the ledger idempotent across one-second evaluations and server restarts.
