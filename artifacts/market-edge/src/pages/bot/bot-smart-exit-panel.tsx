@@ -165,7 +165,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
   };
 
   return (
-    <div className="bg-[#0b0d13] border border-white/10 rounded-xl overflow-hidden mb-6 flex flex-col shadow-2xl">
+    <div className="bg-[#0b0d13] border border-white/10 rounded-xl overflow-hidden mb-6 flex flex-col shadow-2xl [&_.text-slate-700]:!text-slate-400 [&_.text-slate-600]:!text-slate-400 [&_.text-slate-500]:!text-slate-300 [&_.text-slate-400]:!text-slate-200">
       <div className="px-4 py-3 border-b border-white/10 flex flex-wrap items-center justify-between gap-4 bg-white/[0.02]">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center border border-indigo-500/20">
@@ -499,7 +499,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
                   {Object.entries(status.config.appliedVersions).map(([sym, meta]) => (
                     <div key={sym} className="px-2.5 py-1 bg-black/40 border border-white/10 rounded-md text-[10px] flex items-center gap-2">
                       <span className="font-bold text-slate-200">{sym}</span>
-                      <span className="text-white/20">|</span>
+                      <span className="text-white/50">|</span>
                       <span className="text-indigo-400 font-mono">{meta.owner} / {meta.version}</span>
                     </div>
                   ))}
