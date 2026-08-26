@@ -9,6 +9,32 @@ export type BinarySide = "yes" | "no";
 export type UnderlyingKind = "crypto" | "commodity" | "other";
 export type SmartExitOwnerKind = "regular" | "scalper";
 export type SmartExitTradingMode = "paper" | "live";
+export type SmartExitRiskStage = "hold" | "watch" | "prepare_exit" | "exit";
+export type SmartExitComponentStatus = "fresh" | "quiet" | "delayed" | "unavailable";
+
+export type SmartExitComponentHealthMap = Readonly<Record<string, {
+  readonly status: SmartExitComponentStatus;
+  readonly receiptAgeMs: number | null;
+  readonly eventAgeMs: number | null;
+}>>;
+
+export function normalizeSmartExitComponentHealth(
+  value: SmartExitComponentHealthMap | null | undefined,
+): SmartExitComponentHealthMap {
+  const unavailable = {
+    status: "unavailable" as const,
+    receiptAgeMs: null,
+    eventAgeMs: null,
+  };
+  const source = value ?? {};
+  return {
+    spot: source["spot"] ?? unavailable,
+    tape: source["tape"] ?? unavailable,
+    coinbaseBook: source["coinbaseBook"] ?? unavailable,
+    kalshiQuote: source["kalshiQuote"] ?? unavailable,
+    kalshiBook: source["kalshiBook"] ?? unavailable,
+  };
+}
 
 export interface SmartExitOwner {
   readonly kind: SmartExitOwnerKind;
@@ -48,6 +74,10 @@ export interface SmartExitPosition {
 export interface SmartExitEvidence {
   readonly source: "coinbase-rest" | "unsupported";
   readonly observedAtSeconds: number;
+  /** Receipt times prove transport freshness; exchange event times may be older in a quiet market. */
+  readonly spotReceivedAtSeconds: number | null;
+  readonly tapeReceivedAtSeconds: number | null;
+  readonly bookReceivedAtSeconds: number | null;
   readonly spotObservedAtSeconds: number | null;
   readonly tapeObservedAtSeconds: number | null;
   readonly bookObservedAtSeconds: number | null;
@@ -61,6 +91,12 @@ export interface SmartExitEvidence {
   readonly bookImbalance: number | null;
   /** Current winning-side market probability; retained for audit, not model entry. */
   readonly marketWinProbability: number | null;
+  readonly marketQuoteObservedAtSeconds: number | null;
+  readonly marketBookObservedAtSeconds: number | null;
+  readonly marketBestBid: number | null;
+  readonly marketBestAsk: number | null;
+  readonly marketExecutablePrice: number | null;
+  readonly marketExecutableQuantity: number | null;
 }
 
 export interface SmartExitConfig {
@@ -79,6 +115,10 @@ export interface SmartExitConfig {
   readonly hysteresisSeconds: number;
   readonly hardStopProbabilityDrop: number;
   readonly hardStopWindowSeconds: number;
+  /** Fraction of entry contract value lost before immediate high-risk review. */
+  readonly rapidLossRatio: number;
+  /** Minimum per-contract advantage required for selling over the model hold value. */
+  readonly minExitEdge: number;
   readonly continuationWeights: {
     readonly momentum: number;
     readonly tradeFlow: number;
@@ -101,9 +141,12 @@ export interface SmartExitState {
   readonly holdUntilSeconds: number;
   readonly previousModelProbability: number | null;
   readonly previousObservedAtSeconds: number | null;
+  readonly previousUnderlyingPrice: number | null;
+  readonly previousUnderlyingAtSeconds: number | null;
+  readonly previousAdverseVelocity: number | null;
 }
 
-export type SmartExitDisposition = "OFF" | "HOLD" | "EXIT_SIGNAL" | "UNAVAILABLE";
+export type SmartExitDisposition = "OFF" | "HOLD" | "WATCH" | "PREPARE_EXIT" | "EXIT_SIGNAL" | "UNAVAILABLE";
 
 export interface SmartExitDecision {
   readonly disposition: SmartExitDisposition;
@@ -114,6 +157,23 @@ export interface SmartExitDecision {
   readonly probabilityDropFromEntry: number | null;
   readonly threshold: number | null;
   readonly continuationScore: number | null;
+  readonly riskStage: SmartExitRiskStage;
+  readonly marketLossFraction: number | null;
+  readonly highRisk: boolean;
+  readonly underlyingVelocityPerSecond: number | null;
+  readonly adverseVelocityPerSecond: number | null;
+  readonly adverseAccelerationPerSecond2: number | null;
+  readonly projectedCrossingSeconds: number | null;
+  readonly projectedCrossBeforeExpiry: boolean | null;
+  readonly estimatedSaleValue: number | null;
+  readonly expectedHoldValue: number | null;
+  readonly exitEdgePerContract: number | null;
+  readonly liquidityCoverage: number | null;
+  readonly executionEvidenceReady: boolean;
+  readonly minimumWinningPrice: number | null;
+  readonly maximumExecutionEvidenceAgeSeconds: number;
+  readonly executionEvidenceExpiresAtSeconds: number | null;
+  readonly degradedComponents: readonly string[];
   readonly nextState: SmartExitState;
 }
 
@@ -133,6 +193,9 @@ export interface SmartExitEvaluationRecord {
   readonly timestamp: string;
   readonly source: SmartExitEvidence["source"];
   readonly evidenceAgeMs: number | null;
+  readonly spotReceiptAgeMs: number | null;
+  readonly tapeReceiptAgeMs: number | null;
+  readonly bookReceiptAgeMs: number | null;
   readonly spotAgeMs: number | null;
   readonly tapeAgeMs: number | null;
   readonly bookAgeMs: number | null;
@@ -148,7 +211,30 @@ export interface SmartExitEvaluationRecord {
   readonly tradeFlowImbalance: number | null;
   readonly bookImbalance: number | null;
   readonly continuationScore: number | null;
-  readonly recommendation: "off" | "hold" | "exit" | "unavailable";
+  readonly recommendation: "off" | "hold" | "watch" | "prepare_exit" | "exit" | "unavailable";
+  readonly riskStage: SmartExitRiskStage;
+  readonly marketLossFraction: number | null;
+  readonly highRisk: boolean;
+  readonly underlyingVelocityPerSecond: number | null;
+  readonly adverseVelocityPerSecond: number | null;
+  readonly adverseAccelerationPerSecond2: number | null;
+  readonly projectedCrossingSeconds: number | null;
+  readonly projectedCrossBeforeExpiry: boolean | null;
+  readonly marketBestBid: number | null;
+  readonly marketBestAsk: number | null;
+  readonly marketQuoteAgeMs: number | null;
+  readonly marketBookAgeMs: number | null;
+  readonly estimatedSaleValue: number | null;
+  readonly expectedHoldValue: number | null;
+  readonly exitEdgePerContract: number | null;
+  readonly executableQuantity: number | null;
+  readonly liquidityCoverage: number | null;
+  readonly executionEvidenceReady: boolean;
+  readonly minimumWinningPrice: number | null;
+  readonly maximumExecutionEvidenceAgeSeconds: number;
+  readonly executionEvidenceExpiresAtSeconds: number | null;
+  readonly degradedComponents: readonly string[];
+  readonly componentHealth: SmartExitComponentHealthMap;
   readonly reasonCode: string;
   readonly reason: string;
   readonly debounceProgress: number;
@@ -174,6 +260,9 @@ export interface SmartExitHealth {
   readonly activeEvaluations: number;
   readonly lastCycleAt: string | null;
   readonly lastError: string | null;
+  readonly lastCycleDurationMs: number | null;
+  readonly schedulerOverruns: number;
+  readonly targetCadenceMs: number;
   readonly evidenceBySymbol: Readonly<Record<string, {
     readonly source: SmartExitEvidence["source"];
     readonly ready: boolean;

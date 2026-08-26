@@ -94,6 +94,7 @@ export function getKalshiCachedData(symbol: string): {
   value: number | null;
   ticker?: string;
   exchangeIndex?: number;
+  at?: number;
   yesPrice?: number | null;
   yesAsk?: number | null;
   yesBid?: number | null;

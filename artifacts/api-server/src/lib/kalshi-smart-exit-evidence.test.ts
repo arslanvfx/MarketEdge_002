@@ -19,6 +19,9 @@ test("collects independent Coinbase ticker, tape, and L2 evidence", async () => 
   clock += 1_000;
   const evidence = await collector.collect("BTC", "BTC-USD", 0.6);
   assert.equal(evidence.underlyingPrice, 110);
+  assert.equal(evidence.spotReceivedAtSeconds, 1001);
+  assert.equal(evidence.tapeReceivedAtSeconds, 1001);
+  assert.equal(evidence.bookReceivedAtSeconds, 1001);
   assert.equal(evidence.tradeFlowImbalance, 0.5); // maker sell -> aggressive buy
   assert.equal(evidence.bookImbalance, 0.6);
   assert.equal(evidence.marketWinProbability, 0.6);
@@ -51,4 +54,18 @@ test("a failed subfeed is null rather than a cached or neutral substitute", asyn
   assert.equal(evidence.tapeObservedAtSeconds, null);
   assert.equal(evidence.tradeFlowImbalance, null);
   assert.equal(evidence.volatilityLogReturnPerSqrtSecond, null);
+});
+
+test("freshly received quiet tape keeps transport freshness separate from event age", async () => {
+  const fetch: SmartExitEvidenceFetch = async (url) => {
+    if (url.includes("/ticker")) return reply({ price: "100", time: "1970-01-01T00:01:40.000Z" });
+    if (url.includes("/trades")) return reply([
+      { trade_id: 1, price: "100", size: "1", side: "sell", time: "1970-01-01T00:01:30.000Z" },
+    ]);
+    return reply({ bids: [["99", "2"]], asks: [["101", "2"]] });
+  };
+  const collector = new KalshiSmartExitEvidenceCollector({ fetch, now: () => 100_000 });
+  const evidence = await collector.collect("BTC", "BTC-USD", 0.5);
+  assert.equal(evidence.tapeReceivedAtSeconds, 100);
+  assert.equal(evidence.tapeObservedAtSeconds, 90);
 });

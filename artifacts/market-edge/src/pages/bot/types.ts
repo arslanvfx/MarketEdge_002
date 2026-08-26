@@ -1343,13 +1343,40 @@ export interface SmartExitConfig {
   appliedVersions?: Record<string, { owner: string; symbol: string; version: string; liveEligible: boolean; appliedAt: string }>;
 }
 
+export interface SmartExitComponentHealth {
+  status: "fresh" | "delayed" | "quiet" | "unavailable";
+  receiptAgeMs: number | null;
+  eventAgeMs: number | null;
+}
+
+export interface SmartExitLiveHealth {
+  spot: SmartExitComponentHealth;
+  tape: SmartExitComponentHealth;
+  coinbaseBook: SmartExitComponentHealth;
+  kalshiQuote: SmartExitComponentHealth;
+  kalshiBook: SmartExitComponentHealth;
+}
+
 export interface SmartExitEvaluation {
   id?: string;
   symbol: string;
   windowKey?: string;
-  recommendation: "off" | "hold" | "exit" | "unavailable";
+  ticker?: string;
+  recommendation: "off" | "hold" | "watch" | "prepare_exit" | "exit" | "unavailable";
   confidence: number | null;
   reason: string;
+  marketLossFraction?: number | null;
+  secondsRemaining?: number | null;
+  projectedCrossingSeconds?: number | null;
+  projectedCrossBeforeExpiry?: boolean | null;
+  estimatedSaleValue?: number | null;
+  expectedHoldValue?: number | null;
+  marketBestBid?: number | null;
+  marketBestAsk?: number | null;
+  liquidityCoverage?: number | null;
+  currentDataStatus?: "fresh" | "degraded";
+  currentUnavailableReason?: string | null;
+  liveComponentHealth?: SmartExitLiveHealth;
   debounceProgress?: number;
   debounceTarget?: number;
   timestamp: string;
@@ -1366,6 +1393,9 @@ export interface SmartExitHealth {
   activeEvaluations?: number;
   schedulerActive?: boolean;
   lastError?: string | null;
+  lastCycleDurationMs?: number | null;
+  schedulerOverruns?: number;
+  targetCadenceMs?: number;
 }
 
 export interface SmartExitStatus {

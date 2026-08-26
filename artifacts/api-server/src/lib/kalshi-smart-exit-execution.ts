@@ -5,6 +5,53 @@ import type {
   SmartExitPosition,
 } from "./kalshi-smart-exit-types.ts";
 
+export function computeSmartExitExecutionLimit(params: {
+  side: "yes" | "no";
+  quantity: number;
+  minimumWinningPrice: number;
+  yesDepth: readonly [number, number][];
+  noDepth: readonly [number, number][];
+}): {
+  allowed: boolean;
+  yesSideLimitPrice: number | null;
+  executableQuantity: number;
+  reason: string;
+} {
+  const { side, quantity, minimumWinningPrice } = params;
+  if (
+    !Number.isFinite(quantity) || quantity <= 0
+    || !Number.isFinite(minimumWinningPrice)
+    || minimumWinningPrice <= 0
+    || minimumWinningPrice >= 1
+  ) {
+    return { allowed: false, yesSideLimitPrice: null, executableQuantity: 0, reason: "invalid_constraint" };
+  }
+  const winningDepth = side === "yes" ? params.yesDepth : params.noDepth;
+  const executableQuantity = winningDepth.reduce(
+    (sum, [price, available]) =>
+      Number.isFinite(price) && Number.isFinite(available)
+      && price + 1e-9 >= minimumWinningPrice && available > 0
+        ? sum + available
+        : sum,
+    0,
+  );
+  if (executableQuantity + 1e-9 < quantity) {
+    return {
+      allowed: false,
+      yesSideLimitPrice: null,
+      executableQuantity,
+      reason: "insufficient_depth_at_floor",
+    };
+  }
+  const yesSideLimitPrice = side === "yes"
+    ? Math.ceil(minimumWinningPrice * 100) / 100
+    : Math.floor((1 - minimumWinningPrice) * 100) / 100;
+  if (!(yesSideLimitPrice > 0 && yesSideLimitPrice < 1)) {
+    return { allowed: false, yesSideLimitPrice: null, executableQuantity, reason: "invalid_limit" };
+  }
+  return { allowed: true, yesSideLimitPrice, executableQuantity, reason: "authorized" };
+}
+
 export interface SmartExitExecutionIdentity {
   positionId: string;
   symbol: string;
@@ -41,7 +88,7 @@ export type SmartExitExecutionAuthorization =
 export function authorizeSmartExitExecution(params: {
   config: SmartExitConfig;
   position: SmartExitPosition;
-  recommendation: "off" | "hold" | "exit" | "unavailable";
+  recommendation: "off" | "hold" | "watch" | "prepare_exit" | "exit" | "unavailable";
   appliedVersion: SmartExitAppliedVersion | null;
 }): SmartExitExecutionAuthorization {
   const { config, position, recommendation, appliedVersion } = params;

@@ -78,6 +78,14 @@ export async function closePosition(
      * durable claim and immediately before the one broker submission.
      */
     preSubmitGuard?: () => boolean;
+    /**
+     * Smart Exit only: immutable YES-book limit plus the winning-side floor
+     * used to validate the confirmed fill. Prevents an unbounded close.
+     */
+    smartExitLimit?: {
+      yesSideLimitPrice: number;
+      minimumWinningPrice: number;
+    };
   },
 ): Promise<void> {
   const isExpiry = reason === "window_expired";
@@ -121,8 +129,14 @@ export async function closePosition(
         throw new Error("live exit blocked: owner pre-submit authorization revoked");
       }
       const result = pos.direction === "yes"
-        ? await sellYes(pos.ticker, pos.contractCount, exitClientOrderId)
-        : await sellNo(pos.ticker, pos.contractCount, exitClientOrderId);
+        ? await sellYes(
+            pos.ticker, pos.contractCount, exitClientOrderId,
+            _options?.smartExitLimit?.yesSideLimitPrice, _options?.preSubmitGuard,
+          )
+        : await sellNo(
+            pos.ticker, pos.contractCount, exitClientOrderId,
+            _options?.smartExitLimit?.yesSideLimitPrice, _options?.preSubmitGuard,
+          );
       if (result.filledCount === 0) {
         await resolveRegularExitIntent({
           clientOrderId: exitClientOrderId,
@@ -135,6 +149,12 @@ export async function closePosition(
       }
       if (!regularCountsEqual(result.filledCount, pos.contractCount) || result.avgPrice == null) {
         throw new UncertainOrderError(exitClientOrderId, "exit_fill_not_complete");
+      }
+      if (_options?.smartExitLimit) {
+        const winningFillPrice = pos.direction === "yes" ? result.avgPrice : 1 - result.avgPrice;
+        if (winningFillPrice + 1e-9 < _options.smartExitLimit.minimumWinningPrice) {
+          throw new UncertainOrderError(exitClientOrderId, "smart_exit_fill_below_economic_floor");
+        }
       }
       fillPrice = result.avgPrice;
       await resolveRegularExitIntent({

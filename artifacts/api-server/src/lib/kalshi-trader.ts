@@ -776,6 +776,8 @@ export interface PlaceOrderParams {
   /** Optional caller-owned idempotency key. Live entry callers persist this
    * exact ID before POST so an uncertain result can be reconciled durably. */
   clientOrderId?: string;
+  /** Synchronous caller authorization checked at the exact pre-POST boundary. */
+  preSubmitGuard?: () => boolean;
 }
 
 export interface PlaceOrderResult {
@@ -803,6 +805,24 @@ export async function submitKalshiCreateOrderV2(
     body,
     timeoutMs,
   );
+}
+
+export class OrderSubmissionRevokedError extends Error {
+  constructor() {
+    super("order submission revoked before broker POST");
+    this.name = "OrderSubmissionRevokedError";
+  }
+}
+
+export async function submitAuthorizedKalshiCreateOrderV2(
+  body: Record<string, unknown>,
+  preSubmitGuard?: () => boolean,
+  submitFn: (body: Record<string, unknown>) => Promise<unknown> = submitKalshiCreateOrderV2,
+): Promise<unknown> {
+  if (preSubmitGuard && !preSubmitGuard()) {
+    throw new OrderSubmissionRevokedError();
+  }
+  return submitFn(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -1188,9 +1208,10 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   // and filled, so it is AMBIGUOUS and must surface as UNKNOWN LIVE EXPOSURE.
   let raw: unknown;
   try {
-    raw = await submitKalshiCreateOrderV2(body);
+    raw = await submitAuthorizedKalshiCreateOrderV2(body, params.preSubmitGuard);
   } catch (err) {
     const msg = String((err as Error)?.message ?? err);
+    if (err instanceof OrderSubmissionRevokedError) throw err;
     if (isUncertainOrderError(err)) throw err;
     const httpStatus = Number(msg.match(/→\s*(\d{3}):/)?.[1] ?? NaN);
     // Only verified client-side rejections are definite no-order outcomes.
@@ -1523,11 +1544,29 @@ export async function buyNo(ticker: string, count: number): Promise<PlaceOrderRe
 }
 
 // Sell (close) Yes contracts at market price.
-export async function sellYes(ticker: string, count: number, clientOrderId?: string): Promise<PlaceOrderResult> {
-  return placeOrder({ ticker, side: "yes", action: "sell", count, type: "market", clientOrderId });
+export async function sellYes(
+  ticker: string,
+  count: number,
+  clientOrderId?: string,
+  limitPrice?: number,
+  preSubmitGuard?: () => boolean,
+): Promise<PlaceOrderResult> {
+  return placeOrder({
+    ticker, side: "yes", action: "sell", count, type: "market",
+    clientOrderId, limitPrice, preSubmitGuard,
+  });
 }
 
 // Sell (close) No contracts at market price.
-export async function sellNo(ticker: string, count: number, clientOrderId?: string): Promise<PlaceOrderResult> {
-  return placeOrder({ ticker, side: "no", action: "sell", count, type: "market", clientOrderId });
+export async function sellNo(
+  ticker: string,
+  count: number,
+  clientOrderId?: string,
+  limitPrice?: number,
+  preSubmitGuard?: () => boolean,
+): Promise<PlaceOrderResult> {
+  return placeOrder({
+    ticker, side: "no", action: "sell", count, type: "market",
+    clientOrderId, limitPrice, preSubmitGuard,
+  });
 }

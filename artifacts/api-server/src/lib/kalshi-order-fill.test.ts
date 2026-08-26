@@ -6,9 +6,31 @@ import {
   placeOrderWithRetry,
   placeEntryOrderWithSizeFallback,
   isInsufficientVolumeError,
+  submitAuthorizedKalshiCreateOrderV2,
   type PlaceOrderParams,
   type PlaceOrderResult,
 } from "./kalshi-trader.ts";
+
+test("revocation after routing prevents the broker POST", async () => {
+  let authorized = true;
+  let submissions = 0;
+  const delayedRouting = Promise.resolve().then(() => {
+    authorized = false;
+  });
+  await delayedRouting;
+  await assert.rejects(
+    submitAuthorizedKalshiCreateOrderV2(
+      { ticker: "T" },
+      () => authorized,
+      async () => {
+        submissions += 1;
+        return {};
+      },
+    ),
+    /revoked before broker POST/,
+  );
+  assert.equal(submissions, 0);
+});
 
 const FILLED: PlaceOrderResult = { orderId: "o1", status: "filled", filledCount: 5, avgPrice: 0.6 };
 const PARTIAL: PlaceOrderResult = { orderId: "o2", status: "filled", filledCount: 3, avgPrice: 0.6 };

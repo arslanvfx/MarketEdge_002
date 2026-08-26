@@ -26,21 +26,25 @@ function requireSmartExitOperator(
   next();
 }
 
-function evaluationForApi(
-  evaluation: Awaited<ReturnType<typeof getSmartExitHistory>>[number],
+function evaluationForApi<T extends Awaited<ReturnType<typeof getSmartExitHistory>>[number]>(
+  evaluation: T,
   maxEvidenceAgeSeconds: number,
 ) {
   const maxAgeMs = maxEvidenceAgeSeconds * 1_000;
+  const current = evaluation as T & {
+    currentDataStatus?: "fresh" | "degraded";
+    liveComponentHealth?: T["componentHealth"];
+  };
   return {
     ...evaluation,
     confidence: evaluation.modelWinProbability,
     microstructureAvailable: evaluation.source !== "unsupported"
-      && evaluation.spotAgeMs != null
-      && evaluation.tapeAgeMs != null
-      && evaluation.bookAgeMs != null
-      && evaluation.spotAgeMs >= 0 && evaluation.spotAgeMs <= maxAgeMs
-      && evaluation.tapeAgeMs >= 0 && evaluation.tapeAgeMs <= maxAgeMs
-      && evaluation.bookAgeMs >= 0 && evaluation.bookAgeMs <= maxAgeMs,
+      && evaluation.spotReceiptAgeMs != null
+      && evaluation.spotReceiptAgeMs >= 0
+      && evaluation.spotReceiptAgeMs <= maxAgeMs,
+    currentDataStatus: current.currentDataStatus
+      ?? (evaluation.recommendation === "unavailable" ? "degraded" : "fresh"),
+    liveComponentHealth: current.liveComponentHealth ?? evaluation.componentHealth,
     version: evaluation.parameterVersion,
   };
 }

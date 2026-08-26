@@ -9,9 +9,12 @@
  */
 import { openPositions, type OpenPosition } from "./kalshi-bot-state.ts";
 import { closePosition } from "./kalshi-bot-close.ts";
-import { getKalshiCachedData } from "./crypto-kalshi.ts";
+import { fetchOrderbookPrices, getKalshiCachedData } from "./crypto-kalshi.ts";
 import type { SmartExitPosition } from "./kalshi-smart-exit-types.ts";
-import { smartExitIdentityMatches } from "./kalshi-smart-exit-execution.ts";
+import {
+  computeSmartExitExecutionLimit,
+  smartExitIdentityMatches,
+} from "./kalshi-smart-exit-execution.ts";
 
 export type SmartExitOwnerCloseResult =
   | { outcome: "filled"; reason: string }
@@ -36,12 +39,19 @@ function regularIdentityMatches(
 export async function requestSmartExitFromOwner(params: {
   position: SmartExitPosition;
   parameterVersion: string;
+  executionConstraint: {
+    minimumWinningPrice: number;
+    evaluatedBookObservedAtSeconds: number;
+    maximumEvidenceAgeSeconds: number;
+    evidenceExpiresAtSeconds: number;
+  };
   isVersionStillAuthorized: (
     position: SmartExitPosition,
     parameterVersion: string,
   ) => boolean;
 }): Promise<SmartExitOwnerCloseResult> {
   const { position, parameterVersion } = params;
+  const constraint = params.executionConstraint;
   if (position.owner.kind === "scalper") {
     return {
       outcome: "blocked",
@@ -57,6 +67,18 @@ export async function requestSmartExitFromOwner(params: {
   if (!params.isVersionStillAuthorized(position, parameterVersion)) {
     return { outcome: "blocked", reason: "parameter version is no longer authorized" };
   }
+  const nowSeconds = Date.now() / 1_000;
+  if (
+    !Number.isFinite(constraint.minimumWinningPrice)
+    || constraint.minimumWinningPrice <= 0
+    || constraint.minimumWinningPrice >= 1
+    || !Number.isFinite(constraint.evaluatedBookObservedAtSeconds)
+    || !Number.isFinite(constraint.evidenceExpiresAtSeconds)
+    || nowSeconds > constraint.evidenceExpiresAtSeconds
+    || constraint.evaluatedBookObservedAtSeconds > nowSeconds
+  ) {
+    return { outcome: "blocked", reason: "evaluated economic constraint is stale or invalid" };
+  }
 
   const market = getKalshiCachedData(symbol);
   if (
@@ -67,15 +89,41 @@ export async function requestSmartExitFromOwner(params: {
   ) {
     return { outcome: "blocked", reason: "fresh exact regular market identity or quote unavailable" };
   }
+  if (
+    market.at == null
+    || nowSeconds - market.at / 1_000 > constraint.maximumEvidenceAgeSeconds
+    || market.at / 1_000 > nowSeconds
+  ) {
+    return { outcome: "blocked", reason: "fresh exact regular market quote is stale" };
+  }
+
+  const freshBook = await fetchOrderbookPrices(position.ticker);
+  if (!freshBook) {
+    return { outcome: "blocked", reason: "fresh authenticated exit book unavailable" };
+  }
+  const executionLimit = computeSmartExitExecutionLimit({
+    side: position.side,
+    quantity: position.remainingQuantity,
+    minimumWinningPrice: constraint.minimumWinningPrice,
+    yesDepth: freshBook.yesDepth,
+    noDepth: freshBook.noDepth,
+  });
+  if (!executionLimit.allowed || executionLimit.yesSideLimitPrice == null) {
+    return { outcome: "blocked", reason: "fresh exit book no longer covers quantity at economic floor" };
+  }
+  const yesSideLimitPrice = executionLimit.yesSideLimitPrice;
 
   try {
     const finalGuard = () => {
       if (!params.isVersionStillAuthorized(position, parameterVersion)) return false;
       if (!regularIdentityMatches(openPositions.get(symbol), position)) return false;
+      if (Date.now() / 1_000 > constraint.evidenceExpiresAtSeconds) return false;
       const latestMarket = getKalshiCachedData(symbol);
       return latestMarket?.ticker === position.ticker
         && latestMarket.value === position.strikePrice
-        && latestMarket.yesPrice != null;
+        && latestMarket.yesPrice != null
+        && latestMarket.at != null
+        && Date.now() - latestMarket.at <= constraint.maximumEvidenceAgeSeconds * 1_000;
     };
     await closePosition(
       current,
@@ -83,7 +131,13 @@ export async function requestSmartExitFromOwner(params: {
       market.value,
       `smart_exit:${parameterVersion}`,
       false,
-      { preSubmitGuard: finalGuard },
+      {
+        preSubmitGuard: finalGuard,
+        smartExitLimit: {
+          yesSideLimitPrice,
+          minimumWinningPrice: constraint.minimumWinningPrice,
+        },
+      },
     );
   } catch (error) {
     const message = String((error as Error)?.message ?? error);

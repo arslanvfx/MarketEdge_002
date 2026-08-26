@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { logger } from "./logger.ts";
 import { CRYPTO_COINS } from "./market-defs.ts";
-import { getKalshiCachedData } from "./crypto-kalshi.ts";
+import {
+  fetchOrderbookPrices,
+  getKalshiCachedData,
+  type OrderbookPrices,
+} from "./crypto-kalshi.ts";
 import { openPositions, type OpenPosition } from "./kalshi-bot-state.ts";
 import {
   DEFAULT_SMART_EXIT_CONFIG,
@@ -45,21 +49,28 @@ import type {
   SmartExitPosition,
   SmartExitState,
 } from "./kalshi-smart-exit-types.ts";
+import { normalizeSmartExitComponentHealth } from "./kalshi-smart-exit-types.ts";
 
-const SCHEDULER_MS = 1_500;
+const SCHEDULER_MS = 1_000;
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
 const collector = new KalshiSmartExitEvidenceCollector();
+type BookSnapshot = OrderbookPrices & { receivedAtSeconds: number };
 
 let config: SmartExitConfig = { ...DEFAULT_SMART_EXIT_CONFIG };
 let interval: ReturnType<typeof setInterval> | null = null;
 let cycleInFlight = false;
 let lastCycleAt: string | null = null;
 let lastError: string | null = null;
+let lastCycleDurationMs: number | null = null;
+let schedulerOverruns = 0;
 let prewarmCursor = 0;
 const states = new Map<string, SmartExitState>();
 const modelEntryBaselines = new Map<string, number | null>();
 const latestEvaluations = new Map<string, SmartExitEvaluationRecord>();
+const latestValidEvaluations = new Map<string, SmartExitEvaluationRecord>();
 const lastEvidencePersistenceMs = new Map<string, number>();
+const bookSnapshots = new Map<string, BookSnapshot>();
+const bookRefreshes = new Map<string, Promise<void>>();
 
 function identityKey(owner: SmartExitOwnerKind, positionId: string): string {
   return `${owner}:${positionId}`;
@@ -90,6 +101,98 @@ function exactMarket(
   const expected = windowExpirySeconds(windowKey) * 1_000;
   if (Number.isFinite(expiry) && expected > 0 && Math.abs(expiry - expected) > 5_000) return null;
   return current;
+}
+
+function requestBookRefresh(ticker: string): void {
+  if (!ticker || bookRefreshes.has(ticker)) return;
+  const refresh = fetchOrderbookPrices(ticker)
+    .then((book) => {
+      if (book) bookSnapshots.set(ticker, { ...book, receivedAtSeconds: Date.now() / 1_000 });
+    })
+    .catch((error) => logger.warn({ error, ticker }, "[kalshi-smart-exit] Kalshi book refresh failed"))
+    .finally(() => bookRefreshes.delete(ticker));
+  bookRefreshes.set(ticker, refresh);
+}
+
+function executableFromDepth(
+  depth: readonly [number, number][],
+  quantity: number,
+): { price: number | null; quantity: number } {
+  if (quantity <= 0 || depth.length === 0) return { price: null, quantity: 0 };
+  let remaining = quantity;
+  let filled = 0;
+  let proceeds = 0;
+  for (const [price, available] of [...depth].reverse()) {
+    if (!(price > 0) || !(available > 0)) continue;
+    const take = Math.min(remaining, available);
+    proceeds += take * price;
+    filled += take;
+    remaining -= take;
+    if (remaining <= 0) break;
+  }
+  return { price: filled > 0 ? proceeds / filled : null, quantity: filled };
+}
+
+function withMarketEvidence(
+  evidence: SmartExitEvidence,
+  position: Pick<SmartExitPosition, "side" | "remainingQuantity" | "ticker" | "symbol" | "windowKey">,
+): SmartExitEvidence {
+  const market = exactMarket(position.symbol, position.ticker, position.windowKey);
+  const book = bookSnapshots.get(position.ticker);
+  const depth = position.side === "yes" ? book?.yesDepth ?? [] : book?.noDepth ?? [];
+  const executable = executableFromDepth(depth, position.remainingQuantity);
+  const publicBid = position.side === "yes"
+    ? market?.yesBid ?? null
+    : market?.yesAsk == null ? null : 1 - market.yesAsk;
+  const publicAsk = position.side === "yes"
+    ? market?.yesAsk ?? null
+    : market?.yesBid == null ? null : 1 - market.yesBid;
+  const bookBid = position.side === "yes"
+    ? book?.yesBid ?? null
+    : book?.yesAsk == null ? null : 1 - book.yesAsk;
+  const bookAsk = position.side === "yes"
+    ? book?.yesAsk ?? null
+    : book?.yesBid == null ? null : 1 - book.yesBid;
+  return {
+    ...evidence,
+    marketWinProbability: marketProbabilityForSide(position.side, market?.yesPrice),
+    marketQuoteObservedAtSeconds: market?.at == null ? null : market.at / 1_000,
+    marketBookObservedAtSeconds: book?.receivedAtSeconds ?? null,
+    marketBestBid: bookBid ?? publicBid,
+    marketBestAsk: bookAsk ?? publicAsk,
+    marketExecutablePrice: executable.price ?? bookBid ?? publicBid,
+    marketExecutableQuantity: depth.length > 0 ? executable.quantity : null,
+  };
+}
+
+function componentHealth(
+  evidence: SmartExitEvidence,
+  nowMs: number,
+): SmartExitEvaluationRecord["componentHealth"] {
+  const nowSeconds = nowMs / 1_000;
+  const classify = (
+    receivedAt: number | null,
+    eventAt: number | null,
+    quietAllowed = false,
+  ): { status: "fresh" | "quiet" | "delayed" | "unavailable"; receiptAgeMs: number | null; eventAgeMs: number | null } => {
+    const receiptAgeMs = receivedAt == null ? null : nowMs - receivedAt * 1_000;
+    const eventAgeMs = eventAt == null ? null : nowMs - eventAt * 1_000;
+    if (receivedAt == null) return { status: "unavailable", receiptAgeMs, eventAgeMs };
+    if (receivedAt > nowSeconds || receiptAgeMs! > config.maxEvidenceAgeSeconds * 1_000) {
+      return { status: "delayed", receiptAgeMs, eventAgeMs };
+    }
+    if (quietAllowed && (eventAt == null || eventAgeMs! > config.maxEvidenceAgeSeconds * 1_000)) {
+      return { status: "quiet", receiptAgeMs, eventAgeMs };
+    }
+    return { status: "fresh", receiptAgeMs, eventAgeMs };
+  };
+  return {
+    spot: classify(evidence.spotReceivedAtSeconds, evidence.spotObservedAtSeconds, true),
+    tape: classify(evidence.tapeReceivedAtSeconds, evidence.tapeObservedAtSeconds, true),
+    coinbaseBook: classify(evidence.bookReceivedAtSeconds, evidence.bookObservedAtSeconds),
+    kalshiQuote: classify(evidence.marketQuoteObservedAtSeconds, evidence.marketQuoteObservedAtSeconds),
+    kalshiBook: classify(evidence.marketBookObservedAtSeconds, evidence.marketBookObservedAtSeconds),
+  };
 }
 
 function regularSnapshot(position: OpenPosition, evidence: SmartExitEvidence): SmartExitPosition {
@@ -223,6 +326,8 @@ function reasonCode(disposition: string, reason: string): string {
   }
   if (reason.includes("catastrophic")) return "catastrophic_probability_drop";
   if (reason.includes("debounce")) return "debounce_pending";
+  if (disposition === "WATCH") return "risk_watch";
+  if (disposition === "PREPARE_EXIT") return "prepare_exit";
   if (disposition === "EXIT_SIGNAL") return "confirmed_probability_decay";
   return "hold";
 }
@@ -274,13 +379,35 @@ async function executeAuthorizedExit(
       tradingMode: position.owner.tradingMode,
       exchangeIndex: position.exchangeIndex,
       parameterVersion: authorization.parameterVersion,
+      minimumWinningPrice: evaluation.minimumWinningPrice,
+      executionEvidenceExpiresAtSeconds: evaluation.executionEvidenceExpiresAtSeconds,
+      maximumExecutionEvidenceAgeSeconds: evaluation.maximumExecutionEvidenceAgeSeconds,
     },
   });
   if (!claim.claimed) return { ...evaluation, executionStatus: "blocked" };
+  if (
+    evaluation.minimumWinningPrice == null
+    || evaluation.marketBookAgeMs == null
+    || evaluation.executionEvidenceExpiresAtSeconds == null
+    || Date.now() / 1_000 > evaluation.executionEvidenceExpiresAtSeconds
+  ) {
+    await resolveSmartExitRequest({
+      id: requestId,
+      status: "blocked",
+      reason: "immutable economic execution constraint unavailable",
+    });
+    return { ...evaluation, executionStatus: "blocked" };
+  }
 
   const result = await requestSmartExitFromOwner({
     position,
     parameterVersion: authorization.parameterVersion,
+    executionConstraint: {
+      minimumWinningPrice: evaluation.minimumWinningPrice,
+      evaluatedBookObservedAtSeconds: Date.now() / 1_000 - evaluation.marketBookAgeMs / 1_000,
+      maximumEvidenceAgeSeconds: evaluation.maximumExecutionEvidenceAgeSeconds,
+      evidenceExpiresAtSeconds: evaluation.executionEvidenceExpiresAtSeconds,
+    },
     isVersionStillAuthorized: positionVersionAuthorized,
   });
   if (result.outcome === "filled") {
@@ -336,6 +463,7 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
   });
   const market = exactMarket(position.symbol, position.ticker, position.windowKey);
   const marketWinProbability = marketProbabilityForSide(position.side, market?.yesPrice);
+  const health = componentHealth(evidence, nowMs);
   let record: SmartExitEvaluationRecord = {
     id: `${key}:${nowMs}`,
     positionId: position.positionId,
@@ -352,6 +480,9 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     timestamp: new Date(nowMs).toISOString(),
     source: evidence.source,
     evidenceAgeMs: Number.isFinite(evidence.observedAtSeconds) ? nowMs - evidence.observedAtSeconds * 1_000 : null,
+    spotReceiptAgeMs: evidence.spotReceivedAtSeconds == null ? null : nowMs - evidence.spotReceivedAtSeconds * 1_000,
+    tapeReceiptAgeMs: evidence.tapeReceivedAtSeconds == null ? null : nowMs - evidence.tapeReceivedAtSeconds * 1_000,
+    bookReceiptAgeMs: evidence.bookReceivedAtSeconds == null ? null : nowMs - evidence.bookReceivedAtSeconds * 1_000,
     spotAgeMs: evidence.spotObservedAtSeconds == null ? null : nowMs - evidence.spotObservedAtSeconds * 1_000,
     tapeAgeMs: evidence.tapeObservedAtSeconds == null ? null : nowMs - evidence.tapeObservedAtSeconds * 1_000,
     bookAgeMs: evidence.bookObservedAtSeconds == null ? null : nowMs - evidence.bookObservedAtSeconds * 1_000,
@@ -367,8 +498,35 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     tradeFlowImbalance: evidence.tradeFlowImbalance,
     bookImbalance: evidence.bookImbalance,
     continuationScore: decision.continuationScore,
+    riskStage: decision.riskStage,
+    marketLossFraction: decision.marketLossFraction,
+    highRisk: decision.highRisk,
+    underlyingVelocityPerSecond: decision.underlyingVelocityPerSecond,
+    adverseVelocityPerSecond: decision.adverseVelocityPerSecond,
+    adverseAccelerationPerSecond2: decision.adverseAccelerationPerSecond2,
+    projectedCrossingSeconds: decision.projectedCrossingSeconds,
+    projectedCrossBeforeExpiry: decision.projectedCrossBeforeExpiry,
+    marketBestBid: evidence.marketBestBid,
+    marketBestAsk: evidence.marketBestAsk,
+    marketQuoteAgeMs: evidence.marketQuoteObservedAtSeconds == null ? null : nowMs - evidence.marketQuoteObservedAtSeconds * 1_000,
+    marketBookAgeMs: evidence.marketBookObservedAtSeconds == null ? null : nowMs - evidence.marketBookObservedAtSeconds * 1_000,
+    estimatedSaleValue: decision.estimatedSaleValue,
+    expectedHoldValue: decision.expectedHoldValue,
+    exitEdgePerContract: decision.exitEdgePerContract,
+    executableQuantity: evidence.marketExecutableQuantity,
+    liquidityCoverage: decision.liquidityCoverage,
+    executionEvidenceReady: decision.executionEvidenceReady,
+    minimumWinningPrice: decision.minimumWinningPrice,
+    maximumExecutionEvidenceAgeSeconds: decision.maximumExecutionEvidenceAgeSeconds,
+    executionEvidenceExpiresAtSeconds: decision.executionEvidenceExpiresAtSeconds,
+    degradedComponents: decision.degradedComponents,
+    componentHealth: health,
     recommendation: decision.disposition === "EXIT_SIGNAL"
       ? "exit"
+      : decision.disposition === "PREPARE_EXIT"
+        ? "prepare_exit"
+        : decision.disposition === "WATCH"
+          ? "watch"
       : decision.disposition === "UNAVAILABLE"
         ? "unavailable"
         : decision.disposition === "OFF" ? "off" : "hold",
@@ -390,10 +548,12 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
   if (
     decision.disposition === "EXIT_SIGNAL"
     && (config.mode === "paper-exit" || config.mode === "live-exit")
+    && (config.mode === "paper-exit" || decision.mayExecuteExit)
   ) {
     record = await executeAuthorizedExit(position, { ...record, executionStatus: "requested" });
   }
   latestEvaluations.set(key, record);
+  if (record.recommendation !== "unavailable") latestValidEvaluations.set(key, record);
   await insertSmartExitEvaluation(record);
   if (record.recoveryStudy) {
     await insertSmartExitRecoveryStudy({
@@ -408,17 +568,16 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
 }
 
 async function runCycle(): Promise<void> {
-  if (cycleInFlight || !config.enabled || config.mode === "off") return;
+  if (cycleInFlight) {
+    schedulerOverruns += 1;
+    return;
+  }
+  if (!config.enabled || config.mode === "off") return;
+  const cycleStartedAt = Date.now();
   cycleInFlight = true;
   try {
     const regular = [...openPositions.values()];
     const scalper = await listOpenScalperPositions();
-    const prewarmable = CRYPTO_COINS.filter((coin) => coin.category !== "commodity");
-    if (prewarmable.length > 0) {
-      const coin = prewarmable[prewarmCursor % prewarmable.length]!;
-      prewarmCursor += 1;
-      await collector.collect(coin.symbol, coin.product, null);
-    }
     const entries = [
       ...regular.map((position) => ({ owner: "regular" as const, symbol: position.symbol.toUpperCase(), value: position })),
       ...scalper.map((position) => ({ owner: "scalper" as const, symbol: String(position.symbol ?? "").toUpperCase(), value: position })),
@@ -427,8 +586,23 @@ async function runCycle(): Promise<void> {
       identityKey(entry.owner, String(entry.owner === "regular" ? (entry.value as OpenPosition).id : (entry.value as Record<string, unknown>).id)),
     ));
     for (const key of latestEvaluations.keys()) if (!activeKeys.has(key)) latestEvaluations.delete(key);
+    for (const key of latestValidEvaluations.keys()) if (!activeKeys.has(key)) latestValidEvaluations.delete(key);
     for (const key of states.keys()) if (!activeKeys.has(key)) states.delete(key);
 
+    for (const entry of entries) {
+      const raw = entry.value;
+      const ticker = entry.owner === "regular"
+        ? (raw as OpenPosition).ticker
+        : String((raw as Record<string, unknown>).ticker ?? "");
+      requestBookRefresh(ticker);
+    }
+    const evidenceBySymbol = new Map<string, Promise<SmartExitEvidence>>();
+    for (const entry of entries) {
+      if (evidenceBySymbol.has(entry.symbol)) continue;
+      const definition = PRODUCT_BY_SYMBOL.get(entry.symbol);
+      if (!definition) continue;
+      evidenceBySymbol.set(entry.symbol, collector.collect(entry.symbol, definition.product, null));
+    }
     await Promise.all(entries.map(async (entry) => {
       const definition = PRODUCT_BY_SYMBOL.get(entry.symbol);
       if (!definition) return;
@@ -442,12 +616,17 @@ async function runCycle(): Promise<void> {
       const windowKey = entry.owner === "regular"
         ? (raw as OpenPosition).windowKey
         : String((raw as Record<string, unknown>).window_key ?? "");
-      const market = exactMarket(entry.symbol, ticker, windowKey);
-      const evidence = await collector.collect(
-        entry.symbol,
-        definition.product,
-        marketProbabilityForSide(side, market?.yesPrice),
-      );
+      const baseEvidence = await evidenceBySymbol.get(entry.symbol)!;
+      const partialPosition = {
+        side,
+        remainingQuantity: entry.owner === "regular"
+          ? (raw as OpenPosition).contractCount
+          : numeric(raw as Record<string, unknown>, "filled_count") ?? 0,
+        ticker,
+        symbol: entry.symbol,
+        windowKey,
+      };
+      const evidence = withMarketEvidence(baseEvidence, partialPosition);
       const evidencePersistenceKey = `${entry.owner}:${entry.symbol}`;
       const nowMs = Date.now();
       if (nowMs - (lastEvidencePersistenceMs.get(evidencePersistenceKey) ?? 0) >= 5_000) {
@@ -459,12 +638,21 @@ async function runCycle(): Promise<void> {
         : scalperSnapshot(raw as Record<string, unknown>, evidence);
       await evaluateOne(snapshot, evidence);
     }));
+    const prewarmable = CRYPTO_COINS.filter((coin) =>
+      coin.category !== "commodity" && !evidenceBySymbol.has(coin.symbol));
+    if (prewarmable.length > 0) {
+      const coin = prewarmable[prewarmCursor % prewarmable.length]!;
+      prewarmCursor += 1;
+      void collector.collect(coin.symbol, coin.product, null).catch((error) =>
+        logger.debug({ error, symbol: coin.symbol }, "[kalshi-smart-exit] background prewarm skipped"));
+    }
     lastCycleAt = new Date().toISOString();
     lastError = null;
   } catch (error) {
     lastError = String((error as Error)?.message ?? error).slice(0, 240);
     logger.warn({ error }, "[kalshi-smart-exit] evaluation cycle failed (non-fatal)");
   } finally {
+    lastCycleDurationMs = Date.now() - cycleStartedAt;
     cycleInFlight = false;
   }
 }
@@ -495,13 +683,17 @@ export async function initSmartExit(): Promise<void> {
       identityKey(persisted.owner, persisted.positionId),
       persisted.modelAtEntryProbability,
     );
-    states.set(identityKey(persisted.owner, persisted.positionId), persisted.state);
+    states.set(identityKey(persisted.owner, persisted.positionId), {
+      ...INITIAL_SMART_EXIT_STATE,
+      ...persisted.state,
+    });
   }
   const prior = await listLatestSmartExitEvaluationsPerPosition({ limit: 1_000 });
-  for (const evaluation of prior) latestEvaluations.set(
-    identityKey(evaluation.owner, evaluation.positionId),
-    evaluation,
-  );
+  for (const evaluation of prior) {
+    const key = identityKey(evaluation.owner, evaluation.positionId);
+    latestEvaluations.set(key, evaluation);
+    if (evaluation.recommendation !== "unavailable") latestValidEvaluations.set(key, evaluation);
+  }
   startScheduler();
   logger.info(
     { enabled: config.enabled, mode: config.mode },
@@ -535,7 +727,7 @@ export async function updateSmartExitConfig(patch: Record<string, unknown>): Pro
     "mode", "baseProbabilityDropThreshold", "confirmationLevel", "debounceCount",
     "hysteresisSeconds", "hardStopProbabilityDrop", "hardStopWindowSeconds",
     "maxEvidenceAgeSeconds", "minVolatilityLogReturnPerSqrtSecond",
-    "fatTailVolatilityMultiplier", "probabilityShrinkage",
+    "fatTailVolatilityMultiplier", "probabilityShrinkage", "rapidLossRatio", "minExitEdge",
   ]);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`unsupported config field: ${key}`);
   const next: SmartExitConfig = { ...config };
@@ -555,6 +747,8 @@ export async function updateSmartExitConfig(patch: Record<string, unknown>): Pro
     minVolatilityLogReturnPerSqrtSecond: [0.00000001, 0.01],
     fatTailVolatilityMultiplier: [1, 5],
     probabilityShrinkage: [0, 0.9],
+    rapidLossRatio: [0.1, 0.9],
+    minExitEdge: [0, 0.25],
   };
   for (const [name, range] of Object.entries(ranges)) {
     if (patch[name] !== undefined) Object.assign(next, { [name]: boundedNumber(patch[name], range[0], range[1], name) });
@@ -602,6 +796,9 @@ export function getSmartExitHealth(): SmartExitHealth {
     activeEvaluations: latestEvaluations.size,
     lastCycleAt,
     lastError,
+    lastCycleDurationMs,
+    schedulerOverruns,
+    targetCadenceMs: SCHEDULER_MS,
     evidenceBySymbol,
   };
 }
@@ -609,12 +806,29 @@ export function getSmartExitHealth(): SmartExitHealth {
 export function getSmartExitStatus(): {
   config: SmartExitConfig;
   health: SmartExitHealth;
-  evaluations: SmartExitEvaluationRecord[];
+  evaluations: Array<SmartExitEvaluationRecord & {
+    currentDataStatus: "fresh" | "degraded";
+    currentObservationAt: string;
+    currentUnavailableReason: string | null;
+    liveComponentHealth: SmartExitEvaluationRecord["componentHealth"];
+  }>;
 } {
+  const evaluations = [...latestEvaluations.entries()].map(([key, current]) => {
+    const sticky = latestValidEvaluations.get(key) ?? current;
+    return {
+      ...sticky,
+      currentDataStatus: current.recommendation === "unavailable" ? "degraded" as const : "fresh" as const,
+      currentObservationAt: current.timestamp,
+      currentUnavailableReason: current.recommendation === "unavailable" ? current.reason : null,
+      liveComponentHealth: normalizeSmartExitComponentHealth(
+        current.componentHealth ?? sticky.componentHealth,
+      ),
+    };
+  });
   return {
     config: getSmartExitConfig(),
     health: getSmartExitHealth(),
-    evaluations: [...latestEvaluations.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)),
+    evaluations: evaluations.sort((a, b) => a.symbol.localeCompare(b.symbol)),
   };
 }
 

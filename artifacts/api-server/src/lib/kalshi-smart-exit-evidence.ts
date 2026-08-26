@@ -19,7 +19,10 @@ export interface SmartExitEvidenceFetchResponse {
 
 export type SmartExitEvidenceFetch = (
   url: string,
-  init?: { readonly headers?: Readonly<Record<string, string>> },
+  init?: {
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly signal?: AbortSignal;
+  },
 ) => Promise<SmartExitEvidenceFetchResponse>;
 
 export interface SmartExitEvidenceCollectorOptions {
@@ -33,6 +36,7 @@ export interface SmartExitEvidenceCollectorOptions {
   readonly momentumWindowSeconds?: number;
   readonly bookLevels?: number;
   readonly tradeLimit?: number;
+  readonly requestTimeoutMs?: number;
 }
 
 export interface SmartExitEvidenceCollectorHealth {
@@ -54,6 +58,7 @@ type State = {
   seenTradeIds: Set<string>;
   latest: SmartExitEvidence | null;
 };
+type FetchResult = { body: unknown | null; receivedAtSeconds: number | null };
 
 const number = (value: unknown): number | null => {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
@@ -74,11 +79,15 @@ function emptyEvidence(
   marketWinProbability: number | null,
 ): SmartExitEvidence {
   return {
-    source, observedAtSeconds, spotObservedAtSeconds: null, tapeObservedAtSeconds: null,
+    source, observedAtSeconds,
+    spotReceivedAtSeconds: null, tapeReceivedAtSeconds: null, bookReceivedAtSeconds: null,
+    spotObservedAtSeconds: null, tapeObservedAtSeconds: null,
     bookObservedAtSeconds: null, underlyingPrice: null,
     volatilityLogReturnPerSqrtSecond: null, momentumLogReturn: null,
     momentumWindowSeconds: null, tradeFlowImbalance: null, bookImbalance: null,
-    marketWinProbability,
+    marketWinProbability, marketQuoteObservedAtSeconds: null, marketBookObservedAtSeconds: null,
+    marketBestBid: null, marketBestAsk: null, marketExecutablePrice: null,
+    marketExecutableQuantity: null,
   };
 }
 
@@ -93,6 +102,7 @@ export class KalshiSmartExitEvidenceCollector {
   private readonly momentumWindowSeconds: number;
   private readonly bookLevels: number;
   private readonly tradeLimit: number;
+  private readonly requestTimeoutMs: number;
   private readonly states = new Map<string, State>();
 
   constructor(options: SmartExitEvidenceCollectorOptions = {}) {
@@ -105,6 +115,7 @@ export class KalshiSmartExitEvidenceCollector {
     this.momentumWindowSeconds = Math.max(1, options.momentumWindowSeconds ?? 15);
     this.bookLevels = Math.max(1, Math.floor(options.bookLevels ?? 10));
     this.tradeLimit = Math.max(1, Math.floor(options.tradeLimit ?? 100));
+    this.requestTimeoutMs = Math.max(100, Math.floor(options.requestTimeoutMs ?? 800));
   }
 
   private state(symbol: string): State {
@@ -116,14 +127,16 @@ export class KalshiSmartExitEvidenceCollector {
     return state;
   }
 
-  private async json(url: string): Promise<unknown | null> {
+  private async json(url: string): Promise<FetchResult> {
     try {
       const response = await this.fetcher(url, {
         headers: { Accept: "application/json", "User-Agent": "MarketEdge/1.0 (smart-exit)" },
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
       });
-      return response.ok ? await response.json() : null;
+      if (!response.ok) return { body: null, receivedAtSeconds: null };
+      return { body: await response.json(), receivedAtSeconds: this.now() / 1_000 };
     } catch {
-      return null;
+      return { body: null, receivedAtSeconds: null };
     }
   }
 
@@ -132,20 +145,24 @@ export class KalshiSmartExitEvidenceCollector {
    * fields derived from that subfeed; no cached quote or neutral value is used.
    */
   async collect(symbol: string, product: string, marketWinProbability: number | null): Promise<SmartExitEvidence> {
-    const observedAtSeconds = this.now() / 1_000;
+    const startedAtSeconds = this.now() / 1_000;
     const currentMarketProbability = marketProbability(marketWinProbability);
     if (isPythProduct(product)) {
-      const evidence = emptyEvidence("unsupported", observedAtSeconds, currentMarketProbability);
+      const evidence = emptyEvidence("unsupported", startedAtSeconds, currentMarketProbability);
       this.state(symbol).latest = evidence;
       return evidence;
     }
 
     const encoded = encodeURIComponent(product);
-    const [tickerRaw, tradesRaw, bookRaw] = await Promise.all([
+    const [tickerResult, tradesResult, bookResult] = await Promise.all([
       this.json(`${COINBASE_REST}/products/${encoded}/ticker`),
       this.json(`${COINBASE_REST}/products/${encoded}/trades?limit=${this.tradeLimit}`),
       this.json(`${COINBASE_REST}/products/${encoded}/book?level=2`),
     ]);
+    const observedAtSeconds = this.now() / 1_000;
+    const tickerRaw = tickerResult.body;
+    const tradesRaw = tradesResult.body;
+    const bookRaw = bookResult.body;
     const state = this.state(symbol);
     const ticker = this.ticker(tickerRaw);
     const previous = state.latest;
@@ -166,11 +183,14 @@ export class KalshiSmartExitEvidenceCollector {
     const bookValid = this.bookIsValid(bookRaw);
     const evidence: SmartExitEvidence = {
       ...emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability),
+      spotReceivedAtSeconds: ticker && tickerIsMonotonic ? tickerResult.receivedAtSeconds : null,
+      tapeReceivedAtSeconds: Array.isArray(tradesRaw) ? tradesResult.receivedAtSeconds : null,
+      bookReceivedAtSeconds: bookValid ? bookResult.receivedAtSeconds : null,
       spotObservedAtSeconds: tickerIsMonotonic ? ticker!.at : null,
       tapeObservedAtSeconds,
       // Coinbase's REST L2 response has no exchange timestamp. Receipt time is
       // explicit and may be used only for this component.
-      bookObservedAtSeconds: bookValid ? observedAtSeconds : null,
+      bookObservedAtSeconds: bookValid ? bookResult.receivedAtSeconds : null,
       underlyingPrice: tickerIsMonotonic ? ticker!.price : null,
       volatilityLogReturnPerSqrtSecond: tickerIsMonotonic ? this.volatility(calculationPrices) : null,
       momentumLogReturn: tickerIsMonotonic ? this.momentum(calculationPrices, observedAtSeconds) : null,

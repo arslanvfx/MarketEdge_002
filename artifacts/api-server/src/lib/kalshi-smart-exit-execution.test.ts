@@ -3,6 +3,7 @@ import test from "node:test";
 import { DEFAULT_SMART_EXIT_CONFIG } from "./kalshi-smart-exit-policy.ts";
 import {
   authorizeSmartExitExecution,
+  computeSmartExitExecutionLimit,
   smartExitIdentityMatches,
 } from "./kalshi-smart-exit-execution.ts";
 import type {
@@ -10,6 +11,7 @@ import type {
   SmartExitConfig,
   SmartExitPosition,
 } from "./kalshi-smart-exit-types.ts";
+import { normalizeSmartExitComponentHealth } from "./kalshi-smart-exit-types.ts";
 
 const position: SmartExitPosition = {
   positionId: "p1",
@@ -105,4 +107,47 @@ test("identity matching detects every stale/race-sensitive field", () => {
     { ...identity, tradingMode: "paper" as const },
     { ...identity, remainingQuantity: 3 },
   ]) assert.equal(smartExitIdentityMatches(stale, position), false);
+});
+
+test("deteriorated book blocks instead of crossing below the Smart Exit economic floor", () => {
+  const healthy = computeSmartExitExecutionLimit({
+    side: "yes",
+    quantity: 10,
+    minimumWinningPrice: 0.34,
+    yesDepth: [[0.34, 10]],
+    noDepth: [],
+  });
+  assert.equal(healthy.allowed, true);
+  assert.equal(healthy.yesSideLimitPrice, 0.34);
+
+  const deteriorated = computeSmartExitExecutionLimit({
+    side: "yes",
+    quantity: 10,
+    minimumWinningPrice: 0.34,
+    yesDepth: [[0.33, 100]],
+    noDepth: [],
+  });
+  assert.equal(deteriorated.allowed, false);
+  assert.equal(deteriorated.reason, "insufficient_depth_at_floor");
+});
+
+test("NO exits convert the winning-side floor to a bounded YES-book bid", () => {
+  const result = computeSmartExitExecutionLimit({
+    side: "no",
+    quantity: 5,
+    minimumWinningPrice: 0.41,
+    yesDepth: [],
+    noDepth: [[0.41, 5]],
+  });
+  assert.equal(result.allowed, true);
+  assert.equal(result.yesSideLimitPrice, 0.59);
+});
+
+test("legacy persisted evaluations receive complete unavailable component health", () => {
+  const health = normalizeSmartExitComponentHealth(undefined);
+  for (const key of ["spot", "tape", "coinbaseBook", "kalshiQuote", "kalshiBook"]) {
+    assert.equal(health[key]?.status, "unavailable");
+    assert.equal(health[key]?.receiptAgeMs, null);
+    assert.equal(health[key]?.eventAgeMs, null);
+  }
 });

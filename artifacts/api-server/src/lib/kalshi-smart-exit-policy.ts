@@ -21,6 +21,8 @@ export const DEFAULT_SMART_EXIT_CONFIG: SmartExitConfig = Object.freeze({
   hysteresisSeconds: 3,
   hardStopProbabilityDrop: 0.30,
   hardStopWindowSeconds: 5,
+  rapidLossRatio: 0.50,
+  minExitEdge: 0.01,
   continuationWeights: Object.freeze({ momentum: 0.34, tradeFlow: 0.33, book: 0.33 }),
   appliedVersions: Object.freeze({}),
 });
@@ -30,6 +32,9 @@ export const INITIAL_SMART_EXIT_STATE: SmartExitState = Object.freeze({
   holdUntilSeconds: 0,
   previousModelProbability: null,
   previousObservedAtSeconds: null,
+  previousUnderlyingPrice: null,
+  previousUnderlyingAtSeconds: null,
+  previousAdverseVelocity: null,
 });
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
@@ -80,50 +85,83 @@ export function adverseContinuationScore(
   evidence: SmartExitEvidence,
   config: SmartExitConfig,
 ): number | null {
+  const parts: Array<{ weight: number; value: number }> = [];
   if (
-    !finite(evidence.volatilityLogReturnPerSqrtSecond) ||
-    !finite(evidence.momentumLogReturn) ||
-    !finite(evidence.momentumWindowSeconds) ||
-    !finite(evidence.tradeFlowImbalance) ||
-    !finite(evidence.bookImbalance) ||
-    evidence.momentumWindowSeconds <= 0
-  ) return null;
-  const sigma = Math.max(config.minVolatilityLogReturnPerSqrtSecond, evidence.volatilityLogReturnPerSqrtSecond);
-  const momentumZ = evidence.momentumLogReturn / (sigma * Math.sqrt(evidence.momentumWindowSeconds));
+    finite(evidence.volatilityLogReturnPerSqrtSecond)
+    && finite(evidence.momentumLogReturn)
+    && finite(evidence.momentumWindowSeconds)
+    && evidence.momentumWindowSeconds > 0
+  ) {
+    const sigma = Math.max(config.minVolatilityLogReturnPerSqrtSecond, evidence.volatilityLogReturnPerSqrtSecond);
+    parts.push({
+      weight: config.continuationWeights.momentum,
+      value: evidence.momentumLogReturn / (sigma * Math.sqrt(evidence.momentumWindowSeconds)),
+    });
+  }
+  if (finite(evidence.tradeFlowImbalance)) {
+    parts.push({ weight: config.continuationWeights.tradeFlow, value: evidence.tradeFlowImbalance });
+  }
+  if (finite(evidence.bookImbalance)) {
+    parts.push({ weight: config.continuationWeights.book, value: evidence.bookImbalance });
+  }
+  const totalWeight = parts.reduce((sum, part) => sum + part.weight, 0);
+  if (totalWeight <= 0) return null;
   // A lower underlying hurts YES; a higher underlying hurts NO.
   const adverseSign = side === "yes" ? -1 : 1;
-  const w = config.continuationWeights;
-  return adverseSign * (w.momentum * momentumZ + w.tradeFlow * evidence.tradeFlowImbalance + w.book * evidence.bookImbalance);
+  return adverseSign * parts.reduce((sum, part) => sum + part.weight * part.value, 0) / totalWeight;
 }
 
-function unavailable(reason: string, state: SmartExitState): SmartExitDecision {
-  return { disposition: "UNAVAILABLE", reason, mayExecuteExit: false, modelWinProbability: null, probabilityDropFromEntry: null, threshold: null, continuationScore: null, nextState: state };
+type DecisionMetrics = Omit<SmartExitDecision,
+  "disposition" | "reason" | "mayExecuteExit" | "modelWinProbability"
+  | "probabilityDropFromEntry" | "threshold" | "continuationScore" | "riskStage" | "nextState">;
+
+function emptyMetrics(): DecisionMetrics {
+  return {
+    marketLossFraction: null,
+    highRisk: false,
+    underlyingVelocityPerSecond: null,
+    adverseVelocityPerSecond: null,
+    adverseAccelerationPerSecond2: null,
+    projectedCrossingSeconds: null,
+    projectedCrossBeforeExpiry: null,
+    estimatedSaleValue: null,
+    expectedHoldValue: null,
+    exitEdgePerContract: null,
+    liquidityCoverage: null,
+    executionEvidenceReady: false,
+    minimumWinningPrice: null,
+    maximumExecutionEvidenceAgeSeconds: DEFAULT_SMART_EXIT_CONFIG.maxEvidenceAgeSeconds,
+    executionEvidenceExpiresAtSeconds: null,
+    degradedComponents: [],
+  };
+}
+
+function unavailable(reason: string, state: SmartExitState, degradedComponents: readonly string[] = []): SmartExitDecision {
+  return {
+    disposition: "UNAVAILABLE", reason, mayExecuteExit: false,
+    modelWinProbability: null, probabilityDropFromEntry: null, threshold: null,
+    continuationScore: null, riskStage: "hold", nextState: state,
+    ...emptyMetrics(), degradedComponents,
+  };
+}
+
+function isFresh(receivedAt: number | null, now: number, maxAge: number): boolean {
+  return receivedAt !== null && receivedAt <= now && now - receivedAt <= maxAge;
 }
 
 function evidenceProblem(position: SmartExitPosition, evidence: SmartExitEvidence, config: SmartExitConfig, now: number): string | null {
   if (position.underlyingKind === "commodity") return "commodity microstructure is unsupported";
-  if (
-    position.modelAtEntry.winProbability == null
-    || !Number.isFinite(position.modelAtEntry.winProbability)
-    || position.modelAtEntry.winProbability < 0
-    || position.modelAtEntry.winProbability > 1
-  ) return "model-at-entry baseline is unavailable";
   if (config.totalWindowSeconds <= 0 || config.minVolatilityLogReturnPerSqrtSecond <= 0 ||
-      config.fatTailVolatilityMultiplier <= 0 || config.debounceCount < 1) return "configuration is invalid";
+      config.fatTailVolatilityMultiplier <= 0 || config.debounceCount < 1 ||
+      config.rapidLossRatio <= 0 || config.rapidLossRatio > 1 || config.minExitEdge < 0) return "configuration is invalid";
   if (now - evidence.observedAtSeconds > config.maxEvidenceAgeSeconds || evidence.observedAtSeconds > now) return "evidence is stale or clock-invalid";
-  const componentTimes = [
-    evidence.spotObservedAtSeconds,
-    evidence.tapeObservedAtSeconds,
-    evidence.bookObservedAtSeconds,
-  ];
-  if (componentTimes.some((at) => at == null)) return "spot, tape, and book timestamps are required";
-  if (componentTimes.some((at) => now - at! > config.maxEvidenceAgeSeconds || at! > now)) {
-    return "spot, tape, or book evidence is stale or clock-invalid";
+  if (!isFresh(evidence.spotReceivedAtSeconds, now, config.maxEvidenceAgeSeconds)) {
+    return "spot transport is stale or unavailable";
   }
-  if (!finite(evidence.underlyingPrice) || !finite(evidence.volatilityLogReturnPerSqrtSecond) ||
-      !finite(evidence.momentumLogReturn) || !finite(evidence.momentumWindowSeconds) ||
-      !finite(evidence.tradeFlowImbalance) || !finite(evidence.bookImbalance)) return "evidence is missing or incomplete";
-  if (evidence.underlyingPrice <= 0 || evidence.volatilityLogReturnPerSqrtSecond < 0 || evidence.momentumWindowSeconds <= 0) return "evidence is invalid";
+  if (!finite(evidence.underlyingPrice) || !finite(evidence.volatilityLogReturnPerSqrtSecond)) {
+    return "spot or volatility evidence is missing";
+  }
+  if (evidence.underlyingPrice <= 0 || evidence.volatilityLogReturnPerSqrtSecond < 0) return "evidence is invalid";
   return null;
 }
 
@@ -135,29 +173,172 @@ export function evaluateSmartExit(
   nowSeconds: number,
 ): SmartExitDecision {
   if (!config.enabled || config.mode === "off") {
-    return { disposition: "OFF", reason: "smart exit is disabled", mayExecuteExit: false, modelWinProbability: null, probabilityDropFromEntry: null, threshold: null, continuationScore: null, nextState: state };
+    return {
+      disposition: "OFF", reason: "smart exit is disabled", mayExecuteExit: false,
+      modelWinProbability: null, probabilityDropFromEntry: null, threshold: null,
+      continuationScore: null, riskStage: "hold", nextState: state, ...emptyMetrics(),
+    };
   }
   const problem = evidenceProblem(position, evidence, config, nowSeconds);
   if (problem) return unavailable(problem, state);
   const probability = modelWinProbability(position, evidence, config, nowSeconds);
   const continuation = adverseContinuationScore(position.side, evidence, config);
-  if (probability === null || continuation === null) return unavailable("model inputs are unavailable", state);
+  if (probability === null) return unavailable("model inputs are unavailable", state);
 
-  const drop = probability - position.modelAtEntry.winProbability!;
+  const modelEntryProbability = position.modelAtEntry.winProbability;
+  const hasModelEntryBaseline = modelEntryProbability != null
+    && Number.isFinite(modelEntryProbability)
+    && modelEntryProbability >= 0
+    && modelEntryProbability <= 1;
+  const drop = hasModelEntryBaseline ? probability - modelEntryProbability : null;
   const threshold = probabilityDropThreshold(position.expirySeconds - nowSeconds, config);
+  const elapsed = state.previousUnderlyingAtSeconds == null
+    ? null
+    : evidence.spotObservedAtSeconds == null
+      ? null
+      : evidence.spotObservedAtSeconds - state.previousUnderlyingAtSeconds;
+  const velocity = elapsed != null && elapsed > 0 && state.previousUnderlyingPrice != null
+    ? (evidence.underlyingPrice! - state.previousUnderlyingPrice) / elapsed
+    : null;
+  const adverseVelocity = velocity == null ? null : position.side === "yes" ? -velocity : velocity;
+  const adverseAcceleration = adverseVelocity == null || state.previousAdverseVelocity == null || elapsed == null || elapsed <= 0
+    ? null
+    : (adverseVelocity - state.previousAdverseVelocity) / elapsed;
+  const remaining = Math.max(0, position.expirySeconds - nowSeconds);
+  const alreadyAcrossTarget = position.side === "yes"
+    ? evidence.underlyingPrice! <= position.strikePrice
+    : evidence.underlyingPrice! >= position.strikePrice;
+  const targetDistance = Math.abs(evidence.underlyingPrice! - position.strikePrice);
+  const projectedCrossingSeconds = alreadyAcrossTarget
+    ? 0
+    : adverseVelocity != null && adverseVelocity > 0
+      ? targetDistance / adverseVelocity
+      : null;
+  const projectedCrossBeforeExpiry = projectedCrossingSeconds == null
+    ? null
+    : projectedCrossingSeconds <= remaining;
+  const entryMarket = position.marketAtEntry.winProbability;
+  const marketLossFraction = finite(evidence.marketWinProbability) && entryMarket > 0
+    ? clamp((entryMarket - evidence.marketWinProbability) / entryMarket, 0, 1)
+    : null;
+  const highRisk = marketLossFraction != null && marketLossFraction >= config.rapidLossRatio;
+  const quantity = Math.max(0, position.remainingQuantity);
+  const estimatedSaleValue = finite(evidence.marketExecutablePrice)
+    ? evidence.marketExecutablePrice * quantity : null;
+  const expectedHoldValue = probability * quantity;
+  const exitEdge = finite(evidence.marketExecutablePrice)
+    ? evidence.marketExecutablePrice - probability : null;
+  const liquidityCoverage = finite(evidence.marketExecutableQuantity) && quantity > 0
+    ? evidence.marketExecutableQuantity / quantity : null;
+  const minimumWinningPrice = probability + config.minExitEdge < 1
+    ? Math.ceil((probability + config.minExitEdge) * 100) / 100
+    : null;
+  const mandatoryExecutionTimes = [
+    evidence.spotReceivedAtSeconds,
+    evidence.marketQuoteObservedAtSeconds,
+    evidence.marketBookObservedAtSeconds,
+  ];
+  const executionEvidenceExpiresAtSeconds = mandatoryExecutionTimes.every((at) => at !== null)
+    ? Math.min(...mandatoryExecutionTimes as number[]) + config.maxEvidenceAgeSeconds
+    : null;
+  const quoteFresh = isFresh(evidence.marketQuoteObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
+  const marketBookFresh = isFresh(evidence.marketBookObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
+  const executionEvidenceReady = quoteFresh && marketBookFresh
+    && finite(evidence.marketExecutablePrice) && evidence.marketExecutablePrice > 0
+    && minimumWinningPrice !== null && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice
+    && liquidityCoverage !== null && liquidityCoverage >= 1;
+  const degradedComponents: string[] = [];
+  if (!isFresh(evidence.tapeReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)) degradedComponents.push("coinbase_tape");
+  if (!isFresh(evidence.bookReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)) degradedComponents.push("coinbase_book");
+  if (!quoteFresh) degradedComponents.push("kalshi_quote");
+  if (!marketBookFresh) degradedComponents.push("kalshi_book");
+  if (!finite(evidence.tradeFlowImbalance)) degradedComponents.push("trade_flow");
+  if (!finite(evidence.bookImbalance)) degradedComponents.push("book_imbalance");
+  if (!hasModelEntryBaseline) degradedComponents.push("model_entry_baseline");
+  const common = {
+    modelWinProbability: probability,
+    probabilityDropFromEntry: drop,
+    threshold,
+    continuationScore: continuation,
+    marketLossFraction,
+    highRisk,
+    underlyingVelocityPerSecond: velocity,
+    adverseVelocityPerSecond: adverseVelocity,
+    adverseAccelerationPerSecond2: adverseAcceleration,
+    projectedCrossingSeconds,
+    projectedCrossBeforeExpiry,
+    estimatedSaleValue,
+    expectedHoldValue,
+    exitEdgePerContract: exitEdge,
+    liquidityCoverage,
+    executionEvidenceReady,
+    minimumWinningPrice,
+    maximumExecutionEvidenceAgeSeconds: config.maxEvidenceAgeSeconds,
+    executionEvidenceExpiresAtSeconds,
+    degradedComponents,
+  };
   const nextBase: SmartExitState = {
     adverseSampleCount: 0, holdUntilSeconds: state.holdUntilSeconds,
     previousModelProbability: probability, previousObservedAtSeconds: evidence.observedAtSeconds,
+    previousUnderlyingPrice: evidence.underlyingPrice,
+    previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
+    previousAdverseVelocity: adverseVelocity,
   };
   const fastDrop = state.previousModelProbability !== null && state.previousObservedAtSeconds !== null &&
     evidence.observedAtSeconds >= state.previousObservedAtSeconds &&
     evidence.observedAtSeconds - state.previousObservedAtSeconds <= config.hardStopWindowSeconds &&
     probability - state.previousModelProbability <= -config.hardStopProbabilityDrop;
-  if (fastDrop) return { disposition: "EXIT_SIGNAL", reason: "catastrophic probability drop", mayExecuteExit: config.mode === "live-exit", modelWinProbability: probability, probabilityDropFromEntry: drop, threshold, continuationScore: continuation, nextState: nextBase };
-  if (nowSeconds < state.holdUntilSeconds) return { disposition: "HOLD", reason: "hysteresis active", mayExecuteExit: false, modelWinProbability: probability, probabilityDropFromEntry: drop, threshold, continuationScore: continuation, nextState: nextBase };
-  const adverse = drop < -threshold && continuation >= config.confirmationLevel;
+  const economicExit = minimumWinningPrice !== null
+    && evidence.marketExecutablePrice !== null
+    && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice;
+  const continuationAdverse = continuation !== null && continuation >= config.confirmationLevel;
+  const collapseExit = highRisk && economicExit && (
+    projectedCrossBeforeExpiry === true
+    || continuationAdverse
+    || (evidence.marketWinProbability != null && evidence.marketWinProbability <= 0.25)
+  );
+  const mayExecute = config.mode === "live-exit" && executionEvidenceReady;
+  if (collapseExit || (fastDrop && economicExit)) {
+    return {
+      disposition: "EXIT_SIGNAL",
+      reason: collapseExit ? "rapid value loss with adverse crossing risk; selling dominates hold value" : "catastrophic probability drop; selling dominates hold value",
+      mayExecuteExit: mayExecute, riskStage: "exit", nextState: nextBase, ...common,
+    };
+  }
+  if (highRisk || fastDrop) {
+    return {
+      disposition: "PREPARE_EXIT",
+      reason: economicExit
+        ? "rapid loss detected; awaiting adverse crossing confirmation"
+        : "rapid loss detected; current executable sale does not beat hold value",
+      mayExecuteExit: false, riskStage: "prepare_exit", nextState: nextBase, ...common,
+    };
+  }
+  if (nowSeconds < state.holdUntilSeconds) {
+    return {
+      disposition: "HOLD", reason: "hysteresis active", mayExecuteExit: false,
+      riskStage: "hold", nextState: nextBase, ...common,
+    };
+  }
+  const adverse = drop !== null && drop < -threshold && continuationAdverse;
   const count = adverse ? state.adverseSampleCount + 1 : 0;
   const nextState: SmartExitState = { ...nextBase, adverseSampleCount: count, holdUntilSeconds: adverse ? state.holdUntilSeconds : nowSeconds + config.hysteresisSeconds };
-  if (adverse && count >= config.debounceCount) return { disposition: "EXIT_SIGNAL", reason: "confirmed adverse probability decay", mayExecuteExit: config.mode === "live-exit", modelWinProbability: probability, probabilityDropFromEntry: drop, threshold, continuationScore: continuation, nextState };
-  return { disposition: "HOLD", reason: adverse ? "awaiting debounce confirmation" : "within tolerance or unconfirmed", mayExecuteExit: false, modelWinProbability: probability, probabilityDropFromEntry: drop, threshold, continuationScore: continuation, nextState };
+  if (adverse && count >= config.debounceCount) {
+    if (economicExit) {
+      return {
+        disposition: "EXIT_SIGNAL", reason: "confirmed adverse probability decay; selling dominates hold value",
+        mayExecuteExit: mayExecute, riskStage: "exit", nextState, ...common,
+      };
+    }
+    return {
+      disposition: "PREPARE_EXIT", reason: "adverse decay confirmed but current executable sale does not beat hold value",
+      mayExecuteExit: false, riskStage: "prepare_exit", nextState, ...common,
+    };
+  }
+  const watch = (marketLossFraction != null && marketLossFraction >= 0.25) || adverse;
+  return {
+    disposition: watch ? "WATCH" : "HOLD",
+    reason: adverse ? "awaiting debounce confirmation" : watch ? "value deterioration under review" : "within tolerance or unconfirmed",
+    mayExecuteExit: false, riskStage: watch ? "watch" : "hold", nextState, ...common,
+  };
 }
