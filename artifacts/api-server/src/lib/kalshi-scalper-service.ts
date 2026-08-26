@@ -14,7 +14,12 @@ import { getKalshiCachedData, fetchOrderbookPrices, fetchKalshiTarget } from "./
 // READ-ONLY imports from the protected regular-bot trader: balance + settlement
 // reads only. The scalper's ORDER SUBMISSION path uses its own isolated exchange
 // boundary (placeScalpOrderStrict) and NEVER imports/calls placeOrder.
-import { getBalance, fetchKalshiMarketResult, fetchKalshiSettledMarkets } from "./kalshi-trader.ts";
+import {
+  getBalance,
+  rebalanceKalshiCashToShard,
+  fetchKalshiMarketResult,
+  fetchKalshiSettledMarkets,
+} from "./kalshi-trader.ts";
 import {
   isDefinitiveScalpOrderRejection,
   parseDefinitiveScalpOrderRejection,
@@ -66,7 +71,6 @@ import {
   compareRiskSnapshot,
   decideAuthenticatedQuoteRetry,
   sizeOrderWithinReservedBudget,
-  evaluateScalpLiveBalance,
   shouldRetryConfirmedZeroFillSameLifecycle,
   evaluateScalpReservationRetry,
   describeScalpCircuitBreakerReason,
@@ -170,6 +174,8 @@ import {
   getActiveScalpCalibrationApplications,
   getScalpCalibrationRecommendationById,
   persistScalpCalibrationDecision,
+  claimScalpShardFundingTransfer,
+  markScalpShardFundingTransferAccepted,
 } from "./kalshi-scalper-db.ts";
 import { calculateScalpPerformance } from "./kalshi-scalper-performance.ts";
 import {
@@ -223,6 +229,7 @@ const _preflightSampleReady = new Set<string>();
 const _preflightRoutedBalanceReady = new Map<string, {
   exchangeIndex: number;
   availableBalance: number;
+  targetAvailableBalance: number;
   checkedAt: number;
 }>();
 const _preflightRegularPositions = new Map<string, RegularPositionForScalperLayering>();
@@ -1435,13 +1442,21 @@ async function _runPreflight(
   startsInSeconds: number,
 ): Promise<void> {
   const mode = _config.mode;
+  const fundingDeadlineMs = Math.min(
+    ...targets.map(
+      (target) =>
+        Date.parse(target.closeTime)
+        - target.params.finalWindowSeconds * 1_000
+        - 5_000,
+    ),
+  );
+  const validatedRoutes = new Map<string, number>();
   _warmRegularPositionReadView(mode, windowKey);
   const accountPromise = getScalpCommittedTotals(mode, windowKey);
 
   // Refresh every target rather than treating an old identity marker as
-  // readiness. This intentionally primes provider connections, the exact
-  // exchange-scoped balance, and the reserved authoritative sample lane before
-  // the final window; none of these warm values authorizes an order.
+  // readiness. This intentionally primes provider connections and the reserved
+  // authoritative sample lane before the final window.
   await _runWithConcurrency(targets, SCALP_MAX_CONCURRENT_CANDIDATES, async (target) => {
     const readinessKey = `${windowKey}:${target.symbol}`;
     const samplePromise = _collectPriceSample(
@@ -1458,25 +1473,14 @@ async function _runPreflight(
         Math.abs(Date.parse(refreshed.closeTime) - Date.parse(target.closeTime)) <= 30_000
       ) {
         _preflightIdentityReady.add(readinessKey);
-        const [sampleReady, routedBalance] = await Promise.all([
-          samplePromise,
-          mode === "live"
-            ? Number.isInteger(refreshed.exchangeIndex) && refreshed.exchangeIndex! >= 0
-              ? getBalance(refreshed.exchangeIndex!).then(
-                  (balance) => ({
-                    exchangeIndex: refreshed.exchangeIndex!,
-                    availableBalance: balance.availableBalance,
-                    checkedAt: Date.now(),
-                  }),
-                  () => null,
-                )
-              : Promise.resolve(null)
-            : Promise.resolve(null),
-        ]);
-        if (sampleReady) _preflightSampleReady.add(readinessKey);
-        if (routedBalance) {
-          _preflightRoutedBalanceReady.set(readinessKey, routedBalance);
+        if (
+          Number.isInteger(refreshed.exchangeIndex)
+          && refreshed.exchangeIndex! >= 0
+        ) {
+          validatedRoutes.set(target.symbol, refreshed.exchangeIndex!);
         }
+        const sampleReady = await samplePromise;
+        if (sampleReady) _preflightSampleReady.add(readinessKey);
       }
     } catch (err) {
       logger.debug(
@@ -1485,6 +1489,101 @@ async function _runPreflight(
       );
     }
   });
+
+  if (mode === "live" && Date.now() < fundingDeadlineMs) {
+    const routeIndexes = [
+      ...new Set(validatedRoutes.values()),
+    ];
+    if (routeIndexes.length === 1) {
+      const exchangeIndex = routeIndexes[0]!;
+      try {
+        // The trader reconciles Kalshi's durable pending-transfer history before
+        // issuing another POST, so restart or an ambiguous timeout cannot create
+        // a duplicate funding transfer.
+        const funding = await rebalanceKalshiCashToShard(
+          exchangeIndex,
+          0.90,
+          {
+            deadlineMs: fundingDeadlineMs,
+            claimTransfer: (transfer) =>
+              claimScalpShardFundingTransfer({
+                windowKey,
+                sourceExchangeIndex: transfer.sourceExchangeIndex,
+                destinationExchangeIndex: transfer.destinationExchangeIndex,
+                amountCenticents: transfer.amountCenticents,
+              }),
+            recordTransferAccepted: (transfer, transferId) =>
+              markScalpShardFundingTransferAccepted({
+                windowKey,
+                sourceExchangeIndex: transfer.sourceExchangeIndex,
+                destinationExchangeIndex: transfer.destinationExchangeIndex,
+                transferId,
+              }),
+          },
+        );
+        logger.info(
+          {
+            windowKey,
+            exchangeIndex,
+            aggregateAvailableBalance: funding.aggregateAvailableBalance,
+            destinationAvailableBalance: funding.destinationAvailableBalance,
+            targetAvailableBalance: funding.targetAvailableBalance,
+            transferCount: funding.transfers.length,
+            transferAmount: funding.transfers.reduce(
+              (sum, transfer) => sum + transfer.amountCenticents / 10_000,
+              0,
+            ),
+          },
+          "[kalshi-scalper] preflight crypto-shard funding prepared",
+        );
+      } catch (err) {
+        logger.warn(
+          { err, windowKey, exchangeIndex },
+          "[kalshi-scalper] preflight crypto-shard funding request failed or remains pending",
+        );
+      }
+    } else if (routeIndexes.length > 1) {
+      logger.error(
+        { windowKey, routeIndexes },
+        "[kalshi-scalper] multiple crypto shards discovered — automatic 90% allocation skipped",
+      );
+    }
+
+    // Transfer processing is asynchronous. Every preflight refresh verifies the
+    // current aggregate breakdown, but this balance is never fetched again in
+    // the eligible execution path.
+    try {
+      const remainingFundingMs = Math.floor(fundingDeadlineMs - Date.now());
+      if (remainingFundingMs <= 0) {
+        throw new Error("preflight funding deadline passed before verification");
+      }
+      const aggregate = await getBalance(
+        undefined,
+        Math.min(10_000, remainingFundingMs),
+      );
+      for (const target of targets) {
+        const exchangeIndex = validatedRoutes.get(target.symbol);
+        if (!Number.isInteger(exchangeIndex) || exchangeIndex! < 0) continue;
+        const routedAvailable = aggregate.balanceBreakdown
+          ?.filter((entry) => entry.exchangeIndex === exchangeIndex)
+          .reduce((sum, entry) => sum + entry.availableBalance, 0);
+        if (routedAvailable == null || !Number.isFinite(routedAvailable)) continue;
+        _preflightRoutedBalanceReady.set(`${windowKey}:${target.symbol}`, {
+          exchangeIndex: exchangeIndex!,
+          availableBalance: routedAvailable,
+          targetAvailableBalance: Math.floor(
+            aggregate.availableBalance * 0.90 * 10_000,
+          ) / 10_000,
+          checkedAt: Date.now(),
+        });
+      }
+    } catch (err) {
+      logger.warn(
+        { err, windowKey },
+        "[kalshi-scalper] preflight aggregate balance verification failed",
+      );
+    }
+  }
 
   const { dailyCommitted, openCommitted } = await accountPromise;
   if (windowKey !== currentWindowKey() || mode !== _config.mode) return;
@@ -1505,11 +1604,12 @@ async function _runPreflight(
     } else if (mode === "live" && routedBalance == null) {
       reason = "balance_unavailable";
     } else if (
-      mode === "live" &&
-      routedBalance != null &&
-      routedBalance.availableBalance + 1e-9 < target.params.budgetDollars
+      mode === "live"
+      && routedBalance != null
+      && routedBalance.availableBalance + 0.0001
+        < routedBalance.targetAvailableBalance
     ) {
-      reason = "insufficient_balance";
+      reason = "shard_funding_pending";
     } else if (
       _config.dailyCapDollars != null &&
       dailyCommitted + target.params.budgetDollars > _config.dailyCapDollars + 1e-9
@@ -1548,8 +1648,7 @@ async function _runPreflight(
     readySymbols,
     totalSymbols: targets.length,
     reason,
-    // A single status value cannot represent multiple exchange shards. Expose
-    // the conservative minimum while per-symbol readiness uses the exact route.
+    // Display the conservative shard value prepared before the entry window.
     availableBalance: routedBalances.length > 0
       ? Math.min(...routedBalances)
       : null,
@@ -1585,6 +1684,10 @@ function _maybeStartPreflight(windowKey: string, nowMs: number): void {
     startsInSeconds,
     totalSymbols: plan.targets.length,
   };
+  // Funding and balance verification are preparation only. Once eligibility
+  // begins, this lane is completely dormant and cannot contend with order
+  // execution or introduce a new balance read.
+  if (startsInSeconds <= 5) return;
   const preflightRefreshMs = scalpPreflightRefreshMs(startsInSeconds);
   if (_preflightInFlight || nowMs - _lastPreflightStartedAt < preflightRefreshMs) {
     return;
@@ -2383,21 +2486,6 @@ interface PreparedScalpReadiness {
         latencyMs: number;
       };
   freshSampleResult: boolean;
-  balanceResult:
-    | {
-        ok: true;
-        availableBalance: number | null;
-        exchangeIndex: number | null;
-        error: null;
-        latencyMs: number | null;
-      }
-    | {
-        ok: false;
-        availableBalance: null;
-        exchangeIndex: number | null;
-        error: unknown;
-        latencyMs: number | null;
-      };
   parallelRefreshMs: number;
 }
 
@@ -2469,54 +2557,6 @@ function _startScalpReadiness(
         latencyMs: runtime.nowMs() - identityStartedAtMs,
       }),
     );
-  const routedBalancePromise = mode === "live"
-    ? identityPromise.then(async (identity): Promise<PreparedScalpReadiness["balanceResult"]> => {
-        if (!identity.ok) {
-          return {
-            ok: false,
-            availableBalance: null,
-            exchangeIndex: null,
-            error: identity.error,
-            latencyMs: null,
-          };
-        }
-        const routedExchangeIndex = identity.identity?.exchangeIndex;
-        if (!Number.isInteger(routedExchangeIndex) || routedExchangeIndex! < 0) {
-          return {
-            ok: false,
-            availableBalance: null,
-            exchangeIndex: null,
-            error: new Error("routed exchange_index unavailable for final balance check"),
-            latencyMs: null,
-          };
-        }
-        const balanceStartedAtMs = runtime.nowMs();
-        try {
-          const balance = await runtime.getBalance(routedExchangeIndex);
-          return {
-            ok: true,
-            availableBalance: balance.availableBalance,
-            exchangeIndex: routedExchangeIndex!,
-            error: null,
-            latencyMs: runtime.nowMs() - balanceStartedAtMs,
-          };
-        } catch (error) {
-          return {
-            ok: false,
-            availableBalance: null,
-            exchangeIndex: routedExchangeIndex!,
-            error,
-            latencyMs: runtime.nowMs() - balanceStartedAtMs,
-          };
-        }
-      })
-    : Promise.resolve({
-        ok: true as const,
-        availableBalance: null,
-        exchangeIndex: null,
-        error: null,
-        latencyMs: null,
-      });
   return Promise.all([
     identityPromise,
     runtime.fetchOrderbookPrices(ticker).then(
@@ -2542,12 +2582,10 @@ function _startScalpReadiness(
           )
         : Promise.resolve(false)
       : Promise.resolve(true),
-    routedBalancePromise,
-  ]).then(([identityResult, orderbookResult, freshSampleResult, balanceResult]) => ({
+  ]).then(([identityResult, orderbookResult, freshSampleResult]) => ({
     identityResult,
     orderbookResult,
     freshSampleResult,
-    balanceResult,
     parallelRefreshMs: runtime.nowMs() - startedAtMs,
   }));
 }
@@ -2634,14 +2672,9 @@ async function _executeScalpAttempt(
     });
 
   // ── FINAL PRE-SUBMIT BOUNDARY ─────────────────────────────────────────────
-  // Identity, authenticated quote, routed balance, and fresh Freefall sample
-  // are warmed concurrently. Every result remains mandatory and fail-closed.
-  //
-  // The balance request is chained only to the force-refreshed identity because
-  // Kalshi scopes CreateOrderV2 cash to exchange_index. It still overlaps the
-  // authenticated quote and fresh guard sample; using the aggregate balance in
-  // parallel would be faster but can authorize an order the routed exchange
-  // rejects as insufficient_balance.
+  // Identity, authenticated quote, and fresh Freefall sample are warmed
+  // concurrently. Balance allocation was already handled during preflight and
+  // is deliberately absent from this eligible execution boundary.
 
   if (_isCircuitBreakerBlocking()) {
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "breaker_before_submit", true, _timingEvidence());
@@ -2665,7 +2698,6 @@ async function _executeScalpAttempt(
     identityResult,
     orderbookResult,
     freshSampleResult,
-    balanceResult,
     parallelRefreshMs: concurrentFetchMs,
   } = await (
     preparedReadiness
@@ -2677,7 +2709,7 @@ async function _executeScalpAttempt(
   parallelRefreshMs = concurrentFetchMs;
   if (latency) {
     latency.identityRefreshMs = identityRefreshMs;
-    latency.routedBalanceMs = balanceResult.latencyMs;
+    latency.routedBalanceMs = null;
     latency.quoteRefreshMs = quoteRefreshMs;
     latency.parallelRefreshMs = parallelRefreshMs;
   }
@@ -2727,17 +2759,6 @@ async function _executeScalpAttempt(
   // Pin routing from this attempt's authoritative force refresh. A same-lifecycle
   // zero-fill retry re-enters this function and obtains a fresh value.
   const exchangeIndex = refreshed.exchangeIndex!;
-  if (mode === "live" && balanceResult.exchangeIndex !== exchangeIndex) {
-    await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_exchange_index_mismatch", true, {
-      ..._timingEvidence(),
-      identityFetchOk: true,
-      identityReason: "balance_exchange_index_mismatch",
-      balanceExchangeIndex: balanceResult.exchangeIndex,
-      refreshedTicker: refreshed.ticker,
-      refreshedCloseTimeIso: refreshed.closeTime,
-    });
-    return;
-  }
   if (refreshed.ticker !== ticker || refreshed.closeTime !== closeTime) {
     logger.info(
       { symbol, reservedTicker: ticker, refreshedTicker: refreshed.ticker },
@@ -3389,10 +3410,10 @@ async function _executeScalpAttempt(
   // Principal plus the upward-rounded worst-case taker fee at the band-capped
   // IOC limit is guaranteed to remain within reservedBudget.
   //
-  // Never shrink a configured full-size Scalper order to whatever cash remains
-  // on the routed exchange. That creates misleading $1-$3 scraps after another
-  // candidate consumes the same routed cash. The final balance check below must
-  // authorize the complete configured order or skip it.
+  // Never shrink a configured full-size Scalper order to whatever cash remains.
+  // Preflight funds the crypto shard before the eligible window; the hot path
+  // does not fetch or locally gate on balance. If cash truly runs out, the
+  // exchange's definitive rejection is authoritative.
   const sized = sizeOrderWithinReservedBudget(
     reservedBudget,
     winningAsk,
@@ -3403,8 +3424,6 @@ async function _executeScalpAttempt(
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", sizingReason, true, {
       ..._timingEvidence(),
       requestedBudget: reservedBudget,
-      availableBalance: balanceResult.availableBalance,
-      balanceExchangeIndex: balanceResult.exchangeIndex,
     });
     _rememberReservationOutcome(
       attemptKey,
@@ -3422,57 +3441,8 @@ async function _executeScalpAttempt(
     principalExposure,
     estimatedFee,
   } = sized;
-  const balanceDecision = evaluateScalpLiveBalance(
-    balanceResult.availableBalance,
-    sized,
-  );
-  const balanceEvidence = {
-    requestedBudget: reservedBudget,
-    availableBalance: balanceResult.availableBalance,
-    balanceExchangeIndex: balanceResult.exchangeIndex,
-    maxExposure,
-    principalExposure,
-    estimatedFee,
-    safetyMargin: balanceDecision.safetyMarginCents / 100,
-    totalRequired: balanceDecision.totalRequiredCents / 100,
-  };
-  // ── FINAL live balance check against ACTUAL worst-case submit exposure ─────
-  if (mode === "live") {
-    if (!balanceResult.ok || balanceResult.availableBalance == null) {
-      logger.warn(
-        { err: balanceResult.ok ? undefined : balanceResult.error, symbol },
-        "[kalshi-scalper] final balance check failed — re-arming",
-      );
-      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "balance_check_failed_final", true, {
-        ..._timingEvidence(),
-        ...balanceEvidence,
-      });
-      _rememberReservationOutcome(attemptKey, "skipped", "balance_check_failed_final", priorSubmittedOrders, runtime.nowMs());
-      return;
-    }
-    if (!balanceDecision.allowed) {
-      logger.warn(
-        {
-          symbol,
-          availableBalanceCents: balanceDecision.availableBalanceCents,
-          balanceExchangeIndex: balanceResult.exchangeIndex,
-          totalRequiredCents: balanceDecision.totalRequiredCents,
-          contractCount,
-          maxWinningCost,
-        },
-        "[kalshi-scalper] insufficient balance for principal, fee, and safety margin (final) — re-arming",
-      );
-      await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", "insufficient_balance_final", true, {
-        ..._timingEvidence(),
-        ...balanceEvidence,
-      });
-      _rememberReservationOutcome(attemptKey, "skipped", "insufficient_balance_final", priorSubmittedOrders, runtime.nowMs());
-      return;
-    }
-  }
-
-  // The first authenticated quote overlaps identity, balance, and fresh guard
-  // inputs. Once every other await is complete, requalify in the existing
+  // The first authenticated quote overlaps identity and fresh guard inputs.
+  // Once every other await is complete, requalify in the existing
   // bounded candidate lane immediately before the intent boundary. Only a
   // transient invalid/one-sided result may retry, at most twice, and only while
   // enough close-time budget remains. Valid out-of-band and side-flipped quotes
@@ -3698,7 +3668,7 @@ async function _executeScalpAttempt(
 
   // ── AUTHORITATIVE FINAL VALIDATION (post-await) ───────────────────────────
   // Every awaited pre-submit step (authenticated quote requalification,
-  // Freefall sample, sizing, and final balance) is now complete. Re-run the
+  // Freefall sample and sizing) is now complete. Re-run the
   // SYNCHRONOUS authoritative check
   // AFTER all that async work so a config/window/identity change during those
   // awaits fails closed here — before any intent is written or fill simulated.
@@ -3773,9 +3743,9 @@ async function _executeScalpAttempt(
     targetProximityGuardEnabled: snapshot.targetProximityGuardEnabled,
     principalExposure,
     estimatedFee,
-    safetyMargin: balanceDecision.safetyMarginCents / 100,
-    totalRequired: balanceDecision.totalRequiredCents / 100,
-    availableBalance: balanceResult.availableBalance,
+    safetyMargin: 0.01,
+    totalRequired: principalExposure + estimatedFee + 0.01,
+    availableBalance: null,
     samples: evidenceSamples.map((sample) => ({
       at: new Date(sample.at).toISOString(),
       price: sample.price,

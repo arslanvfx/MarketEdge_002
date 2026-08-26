@@ -46,7 +46,7 @@ describe("authenticated final quote retry boundary", () => {
     assert.deepEqual(result.submittedExchangeIndexes, [0]);
   });
 
-  it("pins authoritative shard 2 and shard 0 in CreateOrder submissions", async () => {
+  it("pins authoritative shard 2 and shard 0 in CreateOrder submissions without a hot-path balance request", async () => {
     const shardTwo = await runControlledFreefallServiceExercise({
       onlyRecoveredStep: true,
       exchangeIndex: 2,
@@ -57,32 +57,30 @@ describe("authenticated final quote retry boundary", () => {
     });
     assert.deepEqual(shardTwo.submittedExchangeIndexes, [2]);
     assert.deepEqual(shardZero.submittedExchangeIndexes, [0]);
-    assert.deepEqual(shardTwo.balanceExchangeIndexes, [2]);
-    assert.deepEqual(shardZero.balanceExchangeIndexes, [0]);
+    assert.deepEqual(shardTwo.balanceExchangeIndexes, []);
+    assert.deepEqual(shardZero.balanceExchangeIndexes, []);
   });
 
-  it("uses routed cash rather than a sufficient aggregate balance", async () => {
+  it("does not locally block a full configured order on a stale low routed balance", async () => {
     const result = await runControlledFreefallServiceExercise({
       onlyRecoveredStep: true,
       exchangeIndex: 2,
       aggregateAvailableBalance: 251.93,
       availableBalanceByExchange: { 2: 1.00 },
     });
-    assert.deepEqual(result.balanceExchangeIndexes, [2]);
-    assert.equal(result.intentWrites, 0);
-    assert.equal(result.brokerSubmissions, 0);
-    assert.equal(result.skippedAttempts.at(-1)?.reason, "insufficient_balance_final");
-    assert.equal(result.skippedAttempts.at(-1)?.evidence?.balanceExchangeIndex, 2);
-    assert.equal(result.skippedAttempts.at(-1)?.evidence?.availableBalance, 1.00);
+    assert.deepEqual(result.balanceExchangeIndexes, []);
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 1);
+    assert.deepEqual(result.submittedCounts, [2]);
   });
 
-  it("pins one immutable routing snapshot for balance and broker submission", async () => {
+  it("pins one immutable routing snapshot for broker submission", async () => {
     const result = await runControlledFreefallServiceExercise({
       onlyRecoveredStep: true,
       exchangeIndexReadSequence: [2, 0, 0],
       availableBalanceByExchange: { 2: 100, 0: 1.99 },
     });
-    assert.deepEqual(result.balanceExchangeIndexes, [2]);
+    assert.deepEqual(result.balanceExchangeIndexes, []);
     assert.deepEqual(result.submittedExchangeIndexes, [2]);
     assert.equal(result.intentWrites, 1);
     assert.equal(result.brokerSubmissions, 1);
@@ -114,31 +112,26 @@ describe("authenticated final quote retry boundary", () => {
     assert.equal(result.skippedAttempts.at(-1)?.reason, "identity_refresh_failed");
   });
 
-  it("does not turn a configured order into a tiny scrap when routed cash is low", async () => {
+  it("submits the full configured order when a stale routed-balance sample is low", async () => {
     const result = await runControlledFreefallServiceExercise({
       onlyRecoveredStep: true,
       availableBalance: 1.99,
     });
-    assert.equal(result.intentWrites, 0);
-    assert.equal(result.brokerSubmissions, 0);
-    assert.deepEqual(result.submittedCounts, []);
-    const blocked = result.skippedAttempts.at(-1);
-    assert.equal(blocked?.reason, "insufficient_balance_final");
-    assert.equal(blocked?.evidence?.requestedBudget, 2);
-    assert.equal(blocked?.evidence?.availableBalance, 1.99);
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 1);
+    assert.deepEqual(result.submittedCounts, [2]);
+    assert.deepEqual(result.balanceExchangeIndexes, []);
   });
 
-  it("blocks when routed cash cannot fund the configured order plus fee and margin", async () => {
+  it("lets Kalshi decide insufficient funds instead of pre-blocking another full order", async () => {
     const result = await runControlledFreefallServiceExercise({
       onlyRecoveredStep: true,
       availableBalance: 1.00,
     });
-    assert.equal(result.intentWrites, 0);
-    assert.equal(result.brokerSubmissions, 0);
-    const blocked = result.skippedAttempts.at(-1);
-    assert.equal(blocked?.reason, "insufficient_balance_final");
-    assert.equal(blocked?.evidence?.requestedBudget, 2);
-    assert.equal(blocked?.evidence?.availableBalance, 1.00);
+    assert.equal(result.intentWrites, 1);
+    assert.equal(result.brokerSubmissions, 1);
+    assert.deepEqual(result.submittedCounts, [2]);
+    assert.deepEqual(result.balanceExchangeIndexes, []);
   });
 
   it("does not retry a valid above-cap or below-floor quote and records the exact terminal value", async () => {

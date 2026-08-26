@@ -242,6 +242,40 @@ export async function fetchKalshiSettledMarkets(
 export interface KalshiBalance {
   availableBalance: number; // in dollars
   totalBalance: number;     // in dollars
+  balanceBreakdown?: KalshiBalanceBreakdown[];
+}
+
+export interface KalshiBalanceBreakdown {
+  exchangeIndex: number;
+  availableBalance: number;
+}
+
+export interface KalshiShardTransferPlan {
+  sourceExchangeIndex: number;
+  destinationExchangeIndex: number;
+  amountCenticents: number;
+}
+
+export interface KalshiShardRebalanceResult {
+  aggregateAvailableBalance: number;
+  destinationAvailableBalance: number;
+  targetAvailableBalance: number;
+  transfers: Array<KalshiShardTransferPlan & { transferId: string }>;
+}
+
+export interface KalshiShardRebalanceOptions {
+  deadlineMs?: number;
+  claimTransfer?: (transfer: KalshiShardTransferPlan) => Promise<boolean>;
+  recordTransferAccepted?: (
+    transfer: KalshiShardTransferPlan,
+    transferId: string,
+  ) => Promise<void>;
+}
+
+interface KalshiShardTransferRecord {
+  transferId: string;
+  destinationExchangeIndex: number;
+  status: "pending" | "complete";
 }
 
 export function buildKalshiBalancePath(exchangeIndex?: number): string {
@@ -252,7 +286,10 @@ export function buildKalshiBalancePath(exchangeIndex?: number): string {
   return `/portfolio/balance?exchange_index=${exchangeIndex}`;
 }
 
-export async function getBalance(exchangeIndex?: number): Promise<KalshiBalance> {
+export async function getBalance(
+  exchangeIndex?: number,
+  timeoutMs = 10_000,
+): Promise<KalshiBalance> {
   // GET /portfolio/balance — Kalshi trade-api v2.
   // Confirmed response shape (2026-07):
   //   { balance: <cents int>,          ← available CASH (what you can bet with)
@@ -262,14 +299,20 @@ export async function getBalance(exchangeIndex?: number): Promise<KalshiBalance>
   //     updated_ts: <unix seconds> }
   //
   // Without exchange_index Kalshi returns an aggregate across every exchange.
-  // CreateOrderV2 is routed to one exact exchange_index, so execution guards
-  // MUST pass that same index or an aggregate balance can authorize an order
-  // that the routed exchange correctly rejects as insufficient_balance.
+  // The Scalper uses that aggregate breakdown only during preflight funding;
+  // eligible order execution performs no balance read or local balance gate.
   const raw = await kalshiFetch<Record<string, unknown>>(
     "GET",
     buildKalshiBalancePath(exchangeIndex),
+    undefined,
+    timeoutMs,
   );
+  return parseKalshiBalanceResponse(raw);
+}
 
+export function parseKalshiBalanceResponse(
+  raw: Record<string, unknown>,
+): KalshiBalance {
   const num = (key: string): number | null => {
     const v = raw[key];
     return typeof v === "number" ? v : null;
@@ -277,10 +320,219 @@ export async function getBalance(exchangeIndex?: number): Promise<KalshiBalance>
 
   const cashCents = num("balance") ?? 0;
   const positionCents = num("portfolio_value") ?? 0;
+  const balanceBreakdown = Array.isArray(raw["balance_breakdown"])
+    ? raw["balance_breakdown"].flatMap((entry): KalshiBalanceBreakdown[] => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const row = entry as Record<string, unknown>;
+        const rawExchangeIndex = row["exchange_index"];
+        const parsedExchangeIndex =
+          typeof rawExchangeIndex === "number"
+            ? rawExchangeIndex
+            : typeof rawExchangeIndex === "string" && rawExchangeIndex.trim() !== ""
+              ? Number(rawExchangeIndex)
+              : NaN;
+        const rawBalance = row["balance"];
+        const parsedBalance =
+          typeof rawBalance === "number"
+            ? rawBalance
+            : typeof rawBalance === "string" && rawBalance.trim() !== ""
+              ? Number(rawBalance)
+              : NaN;
+        if (
+          !Number.isInteger(parsedExchangeIndex)
+          || parsedExchangeIndex < 0
+          || !Number.isFinite(parsedBalance)
+          || parsedBalance < 0
+        ) {
+          return [];
+        }
+        return [{
+          exchangeIndex: parsedExchangeIndex,
+          availableBalance: parsedBalance,
+        }];
+      })
+    : undefined;
 
   return {
     availableBalance: cashCents / 100,
     totalBalance: (cashCents + positionCents) / 100,
+    balanceBreakdown,
+  };
+}
+
+async function getRecentKalshiShardTransfers(
+  timeoutMs = 10_000,
+): Promise<KalshiShardTransferRecord[]> {
+  const raw = await kalshiFetch<Record<string, unknown>>(
+    "GET",
+    "/portfolio/intra_exchange_instance_transfers?limit=100",
+    undefined,
+    timeoutMs,
+  );
+  const rows = raw["transfers"];
+  if (!Array.isArray(rows)) {
+    throw new Error("Kalshi transfer history response missing transfers array");
+  }
+  return rows.flatMap((entry): KalshiShardTransferRecord[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const row = entry as Record<string, unknown>;
+    const transferId = row["transfer_id"];
+    const destinationExchangeIndex = Number(row["destination_exchange_shard"]);
+    const status = row["status"];
+    if (
+      typeof transferId !== "string"
+      || transferId.trim() === ""
+      || !Number.isInteger(destinationExchangeIndex)
+      || destinationExchangeIndex < 0
+      || (status !== "pending" && status !== "complete")
+    ) {
+      return [];
+    }
+    return [{ transferId, destinationExchangeIndex, status }];
+  });
+}
+
+export function planKalshiShardRebalance(
+  balance: KalshiBalance,
+  destinationExchangeIndex: number,
+  targetFraction: number,
+): KalshiShardTransferPlan[] {
+  if (!Number.isInteger(destinationExchangeIndex) || destinationExchangeIndex < 0) {
+    throw new Error("Kalshi rebalance destination exchange index must be a non-negative integer");
+  }
+  if (!Number.isFinite(targetFraction) || targetFraction <= 0 || targetFraction > 1) {
+    throw new Error("Kalshi rebalance target fraction must be in (0, 1]");
+  }
+  const breakdown = balance.balanceBreakdown;
+  if (!breakdown || breakdown.length === 0) {
+    throw new Error("Kalshi aggregate balance response missing exchange balance breakdown");
+  }
+
+  const totalCenticents = Math.max(
+    0,
+    Math.floor(balance.availableBalance * 10_000 + 1e-6),
+  );
+  const targetCenticents = Math.floor(totalCenticents * targetFraction);
+  const destinationCenticents = breakdown
+    .filter((entry) => entry.exchangeIndex === destinationExchangeIndex)
+    .reduce(
+      (sum, entry) =>
+        sum + Math.max(0, Math.floor(entry.availableBalance * 10_000 + 1e-6)),
+      0,
+    );
+  let neededCenticents = Math.max(0, targetCenticents - destinationCenticents);
+  if (neededCenticents === 0) return [];
+
+  const transfers: KalshiShardTransferPlan[] = [];
+  const sources = breakdown
+    .filter(
+      (entry) =>
+        entry.exchangeIndex !== destinationExchangeIndex
+        && Number.isFinite(entry.availableBalance)
+        && entry.availableBalance > 0,
+    )
+    .map((entry) => ({
+      exchangeIndex: entry.exchangeIndex,
+      availableCenticents: Math.max(
+        0,
+        Math.floor(entry.availableBalance * 10_000 + 1e-6),
+      ),
+    }))
+    .sort((a, b) => b.availableCenticents - a.availableCenticents);
+
+  for (const source of sources) {
+    if (neededCenticents <= 0) break;
+    const amountCenticents = Math.min(
+      source.availableCenticents,
+      neededCenticents,
+    );
+    if (amountCenticents <= 0) continue;
+    transfers.push({
+      sourceExchangeIndex: source.exchangeIndex,
+      destinationExchangeIndex,
+      amountCenticents,
+    });
+    neededCenticents -= amountCenticents;
+  }
+  if (neededCenticents > 0) {
+    throw new Error("Kalshi exchange balance breakdown cannot fund requested shard allocation");
+  }
+  return transfers;
+}
+
+export async function rebalanceKalshiCashToShard(
+  destinationExchangeIndex: number,
+  targetFraction: number,
+  options: KalshiShardRebalanceOptions = {},
+): Promise<KalshiShardRebalanceResult> {
+  const remainingBeforeDeadline = (): number => {
+    if (options.deadlineMs == null) return 10_000;
+    const remaining = Math.floor(options.deadlineMs - Date.now());
+    if (remaining <= 0) {
+      throw new Error("Kalshi shard funding deadline passed before transfer");
+    }
+    return Math.min(10_000, remaining);
+  };
+  const balance = await getBalance(undefined, remainingBeforeDeadline());
+  const plan = planKalshiShardRebalance(
+    balance,
+    destinationExchangeIndex,
+    targetFraction,
+  );
+  const destinationAvailableBalance =
+    balance.balanceBreakdown
+      ?.filter((entry) => entry.exchangeIndex === destinationExchangeIndex)
+      .reduce((sum, entry) => sum + entry.availableBalance, 0)
+    ?? 0;
+  if (plan.length > 0) {
+    const pendingTransfer = (
+      await getRecentKalshiShardTransfers(remainingBeforeDeadline())
+    ).find(
+      (transfer) =>
+        transfer.destinationExchangeIndex === destinationExchangeIndex
+        && transfer.status === "pending",
+    );
+    if (pendingTransfer) {
+      throw new Error(
+        `Kalshi shard ${destinationExchangeIndex} funding transfer is still pending`,
+      );
+    }
+  }
+  const transfers: KalshiShardRebalanceResult["transfers"] = [];
+  for (const transfer of plan) {
+    remainingBeforeDeadline();
+    if (options.claimTransfer && !(await options.claimTransfer(transfer))) {
+      continue;
+    }
+    const transferTimeoutMs = remainingBeforeDeadline();
+    const raw = await kalshiFetch<Record<string, unknown>>(
+      "POST",
+      "/portfolio/intra_exchange_instance_transfer",
+      {
+        source: "event_contract",
+        destination: "event_contract",
+        amount: transfer.amountCenticents,
+        source_exchange_shard: transfer.sourceExchangeIndex,
+        destination_exchange_shard: transfer.destinationExchangeIndex,
+        source_subaccount: 0,
+        destination_subaccount: 0,
+      },
+      transferTimeoutMs,
+    );
+    const transferId = raw["transfer_id"];
+    if (typeof transferId !== "string" || transferId.trim() === "") {
+      throw new Error("Kalshi shard transfer response missing transfer_id");
+    }
+    await options.recordTransferAccepted?.(transfer, transferId);
+    transfers.push({ ...transfer, transferId });
+  }
+  return {
+    aggregateAvailableBalance: balance.availableBalance,
+    destinationAvailableBalance,
+    targetAvailableBalance: Math.floor(
+      balance.availableBalance * targetFraction * 10_000,
+    ) / 10_000,
+    transfers,
   };
 }
 

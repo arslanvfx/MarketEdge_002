@@ -56,6 +56,27 @@ export async function runScalpMigrations(): Promise<void> {
       )
     `);
 
+    // Durable ownership for non-idempotent internal Kalshi shard transfers.
+    // The claim is written before the external POST so an ambiguous response or
+    // process restart cannot submit the same source move twice in one window.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kalshi_scalp_shard_funding (
+        window_key                  TEXT NOT NULL,
+        source_exchange_index       INTEGER NOT NULL,
+        destination_exchange_index  INTEGER NOT NULL,
+        amount_centicents           BIGINT NOT NULL,
+        status                      TEXT NOT NULL DEFAULT 'claimed',
+        transfer_id                 TEXT,
+        created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (
+          window_key,
+          source_exchange_index,
+          destination_exchange_index
+        )
+      )
+    `);
+
     // Durable reservations: UNIQUE(mode, symbol, window_key) prevents duplicate attempts.
     // reserved_budget is held for cap accounting until the attempt resolves.
     // skip_evidence is a nullable additive JSONB column for structured skip diagnostics.
@@ -292,6 +313,74 @@ export async function runScalpMigrations(): Promise<void> {
     await _upgradeScalpSchema(client);
 
     logger.info("[kalshi-scalper] DB migrations complete");
+  } finally {
+    client.release();
+  }
+}
+
+export async function claimScalpShardFundingTransfer(params: {
+  windowKey: string;
+  sourceExchangeIndex: number;
+  destinationExchangeIndex: number;
+  amountCenticents: number;
+}): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [
+        `kalshi-scalper-shard-funding:${params.windowKey}:`
+        + `${params.sourceExchangeIndex}:${params.destinationExchangeIndex}`,
+      ],
+    );
+    const result = await client.query(
+      `INSERT INTO kalshi_scalp_shard_funding
+         (window_key, source_exchange_index, destination_exchange_index,
+          amount_centicents, status)
+       VALUES ($1, $2, $3, $4, 'claimed')
+       ON CONFLICT (
+         window_key, source_exchange_index, destination_exchange_index
+       ) DO NOTHING
+       RETURNING window_key`,
+      [
+        params.windowKey,
+        params.sourceExchangeIndex,
+        params.destinationExchangeIndex,
+        params.amountCenticents,
+      ],
+    ) as { rowCount?: number };
+    await client.query("COMMIT");
+    return (result.rowCount ?? 0) === 1;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function markScalpShardFundingTransferAccepted(params: {
+  windowKey: string;
+  sourceExchangeIndex: number;
+  destinationExchangeIndex: number;
+  transferId: string;
+}): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `UPDATE kalshi_scalp_shard_funding
+          SET status = 'pending', transfer_id = $1, updated_at = NOW()
+        WHERE window_key = $2
+          AND source_exchange_index = $3
+          AND destination_exchange_index = $4`,
+      [
+        params.transferId,
+        params.windowKey,
+        params.sourceExchangeIndex,
+        params.destinationExchangeIndex,
+      ],
+    );
   } finally {
     client.release();
   }

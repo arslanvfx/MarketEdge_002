@@ -57,7 +57,11 @@ import {
   type RiskConfigLike,
   type RiskParamsLike,
 } from "./kalshi-scalper-policy.ts";
-import { buildKalshiBalancePath } from "./kalshi-trader.ts";
+import {
+  buildKalshiBalancePath,
+  parseKalshiBalanceResponse,
+  planKalshiShardRebalance,
+} from "./kalshi-trader.ts";
 import {
   DEFAULT_SCALP_CONFIG,
   DEFAULT_SCALP_OPEN_CAP_DOLLARS,
@@ -3129,12 +3133,25 @@ describe("execution wiring (static source assertions)", () => {
     const preflight = svc.slice(start, end);
     assert.match(preflight, /getScalpCommittedTotals\(/);
     assert.match(preflight, /fetchKalshiTarget\(/);
-    assert.match(preflight, /getBalance\(refreshed\.exchangeIndex!\)/);
+    assert.match(
+      preflight,
+      /rebalanceKalshiCashToShard\(\s*exchangeIndex,\s*0\.90,/,
+    );
+    assert.match(preflight, /const aggregate = await getBalance\(\s*undefined,/);
     assert.match(preflight, /_collectPriceSample\([\s\S]*?"authoritative"/);
     assert.ok(!/checkFreefallGuard\(/.test(preflight), "preflight must never make an execution decision");
     assert.ok(!/claimReservationAndCap\(/.test(preflight), "preflight must not claim a reservation");
     assert.ok(!/insertScalpOrderIntent\(/.test(preflight), "preflight must not create an order intent");
     assert.ok(!/placeScalpOrderStrict\(/.test(preflight), "preflight must not submit an order");
+  });
+
+  it("stops the entire preflight lane before balance reads once entry eligibility begins", () => {
+    const start = idx("function _maybeStartPreflight");
+    const end = idx("// Main scan tick");
+    const preflightScheduler = svc.slice(start, end);
+    const stop = preflightScheduler.indexOf("if (startsInSeconds <= 5) return");
+    const launch = preflightScheduler.indexOf("void _runPreflight(");
+    assert.ok(stop >= 0 && launch > stop);
   });
 
   it("uses a 250ms scan with bounded concurrent candidate evaluation", () => {
@@ -3235,24 +3252,24 @@ describe("execution wiring (static source assertions)", () => {
     );
   });
 
-  it("FINAL balance check uses fee-inclusive integer cents before order intent/submit", () => {
-    const finalBal = idx("FINAL live balance check");
+  it("keeps every balance read out of the eligible execution path", () => {
+    const executeStart = idx("async function _executeScalpAttempt");
+    const executeEnd = idx("async function _handleUnknownExposure");
+    const execute = svc.slice(executeStart, executeEnd);
     const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
     const place = idx("await runtime.placeScalpOrderStrict(");
-    assert.ok(finalBal >= 0, "final balance check block must exist");
-    assert.ok(finalBal < intent, "final balance check must precede order intent");
-    assert.ok(finalBal < place, "final balance check must precede submit");
-    assert.match(svc, /evaluateScalpLiveBalance\(/);
-    assert.match(svc, /if \(!balanceDecision\.allowed\)/);
-    assert.doesNotMatch(svc, /availableBalance < maxExposure/);
+    assert.ok(intent > executeStart && place > intent);
+    assert.doesNotMatch(execute, /runtime\.getBalance\(/);
+    assert.doesNotMatch(execute, /evaluateScalpLiveBalance\(/);
+    assert.doesNotMatch(execute, /insufficient_balance_final/);
   });
 
   it("requalifies the authenticated quote after other awaits and before intent without bypassing band or side", () => {
-    const finalBalance = idx("FINAL live balance check");
+    const sizing = idx("Size the order STRICTLY");
     const requote = idx("const finalRequoteStartedAtMs = runtime.nowMs()");
     const authoritative = idx("AUTHORITATIVE FINAL VALIDATION (post-await)");
     const intent = idx("runtime.insertScalpOrderIntent(orderRecord)");
-    assert.ok(finalBalance >= 0 && requote > finalBalance, "requote must run after the other awaited safety reads");
+    assert.ok(sizing >= 0 && requote > sizing, "requote must run after the other awaited safety reads");
     assert.ok(requote < authoritative && authoritative < intent, "requote must finish before final sync validation and intent");
     assert.match(svc, /requalifyAuthenticatedScalpQuote\(\{/);
     assert.match(svc, /bandMin: snapshot\.bandMin,[\s\S]*?bandMax: snapshot\.bandMax/);
@@ -3269,15 +3286,13 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(!/availableBalance < budget\b/.test(svc) || /reservedBudget/.test(svc), "balance compares against reserved/exposure");
   });
 
-  it("AUTHORITATIVE post-await validation runs AFTER final balance, final requote, and final freefall", () => {
+  it("AUTHORITATIVE post-await validation runs AFTER final requote and final freefall", () => {
     const finalFf = idx("FINAL FREEFALL GUARD");
-    const finalBal = idx("FINAL live balance check");
     const finalRequote = idx("const finalRequoteStartedAtMs = runtime.nowMs()");
     const authoritative = idx("AUTHORITATIVE FINAL VALIDATION (post-await)");
     assert.ok(authoritative >= 0, "authoritative post-await validation block must exist");
-    assert.ok(finalFf >= 0 && finalBal >= 0);
+    assert.ok(finalFf >= 0 && finalRequote >= 0);
     assert.ok(authoritative > finalFf, "authoritative validation must be AFTER final freefall");
-    assert.ok(authoritative > finalBal, "authoritative validation must be AFTER final balance");
     assert.ok(authoritative > finalRequote, "authoritative validation must be AFTER final requote");
     // And it must precede order intent and submit.
     assert.ok(authoritative < idx("runtime.insertScalpOrderIntent(orderRecord)"));
@@ -3435,7 +3450,7 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(block, /updateReservationStatus\([\s\S]*?"skipped"[\s\S]*?\);\s*\n\s*return;/);
   });
 
-  it("overlaps quote and Freefall readiness while checking the routed exchange balance after identity", () => {
+  it("overlaps quote and Freefall readiness without a balance request in the eligible execution path", () => {
     const sampleHelperStart = idx("async function _collectAttemptReadinessSample");
     const readinessStart = idx("function _startScalpReadiness");
     const executeStart = idx("async function _executeScalpAttempt");
@@ -3446,21 +3461,23 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(boundary, /fetchKalshiTarget\(/);
     assert.match(boundary, /fetchOrderbookPrices\(/);
     assert.match(boundary, /runtime\.collectPriceSample\(/);
-    assert.match(boundary, /runtime\.getBalance\(routedExchangeIndex\)/);
-    assert.match(boundary, /const routedBalancePromise = mode === "live"[\s\S]*?identityPromise\.then/);
-    assert.doesNotMatch(boundary, /runtime\.getBalance\(\)/);
+    assert.doesNotMatch(boundary, /runtime\.getBalance\(/);
     assert.match(boundary, /const refreshed = identityResult\.identity/);
-    assert.match(boundary, /balanceResult\.exchangeIndex !== exchangeIndex/);
+    assert.doesNotMatch(boundary, /balanceResult/);
   });
 
-  it("never authorizes a final live submission with the aggregate balance", () => {
+  it("uses aggregate balance only for preflight shard funding, never final submission authorization", () => {
     const trader = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "kalshi-trader.ts"),
       "utf8",
     );
     assert.match(trader, /buildKalshiBalancePath\(exchangeIndex\)/);
     assert.match(trader, /portfolio\/balance\?exchange_index=/);
-    assert.match(svc, /balanceExchangeIndex:\s*balanceResult\.exchangeIndex/);
+    const executeStart = idx("async function _executeScalpAttempt");
+    const executeEnd = idx("async function _handleUnknownExposure");
+    const execute = svc.slice(executeStart, executeEnd);
+    assert.doesNotMatch(execute, /getBalance\(/);
+    assert.doesNotMatch(execute, /insufficient_balance_final/);
   });
 
   it("records guard readiness for blocked attempts through skip timing evidence", () => {
@@ -3575,5 +3592,115 @@ describe("exchange-scoped Kalshi balance path", () => {
     for (const invalid of [-1, 1.5, Number.NaN]) {
       assert.throws(() => buildKalshiBalancePath(invalid), /non-negative integer/);
     }
+  });
+
+  it("parses Kalshi's aggregate cents and fixed-point dollar breakdown without unit drift", () => {
+    assert.deepEqual(
+      parseKalshiBalanceResponse({
+        balance: 25_193,
+        portfolio_value: 0,
+        balance_dollars: "251.9300",
+        balance_breakdown: [
+          { exchange_index: 0, balance: "250.9300" },
+          { exchange_index: 2, balance: "1.0000" },
+        ],
+      }),
+      {
+        availableBalance: 251.93,
+        totalBalance: 251.93,
+        balanceBreakdown: [
+          { exchangeIndex: 0, availableBalance: 250.93 },
+          { exchangeIndex: 2, availableBalance: 1 },
+        ],
+      },
+    );
+  });
+
+  it("plans enough internal transfers to place 90% of aggregate cash on crypto shard 2", () => {
+    assert.deepEqual(
+      planKalshiShardRebalance(
+        {
+          availableBalance: 251.93,
+          totalBalance: 251.93,
+          balanceBreakdown: [
+            { exchangeIndex: 0, availableBalance: 250.93 },
+            { exchangeIndex: 2, availableBalance: 1.00 },
+          ],
+        },
+        2,
+        0.90,
+      ),
+      [{
+        sourceExchangeIndex: 0,
+        destinationExchangeIndex: 2,
+        amountCenticents: 2_257_370,
+      }],
+    );
+  });
+
+  it("does not transfer again when the crypto shard already holds at least 90%", () => {
+    assert.deepEqual(
+      planKalshiShardRebalance(
+        {
+          availableBalance: 100,
+          totalBalance: 100,
+          balanceBreakdown: [
+            { exchangeIndex: 0, availableBalance: 10 },
+            { exchangeIndex: 2, availableBalance: 90 },
+          ],
+        },
+        2,
+        0.90,
+      ),
+      [],
+    );
+  });
+
+  it("reconciles pending transfer history before another non-idempotent funding POST", () => {
+    const trader = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "kalshi-trader.ts"),
+      "utf8",
+    );
+    const rebalance = trader.slice(
+      trader.indexOf("export async function rebalanceKalshiCashToShard"),
+      trader.indexOf("// Positions"),
+    );
+    assert.match(rebalance, /await getRecentKalshiShardTransfers\(/);
+    assert.match(rebalance, /transfer\.status === "pending"/);
+    assert.ok(
+      rebalance.indexOf("await getRecentKalshiShardTransfers(")
+        < rebalance.indexOf('"POST"'),
+    );
+  });
+
+  it("durably claims each non-idempotent shard transfer before its Kalshi POST", () => {
+    const db = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "kalshi-scalper-db.ts"),
+      "utf8",
+    );
+    assert.match(db, /CREATE TABLE IF NOT EXISTS kalshi_scalp_shard_funding/);
+    assert.match(db, /export async function claimScalpShardFundingTransfer/);
+    const service = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "kalshi-scalper-service.ts"),
+      "utf8",
+    );
+    const preflight = service.slice(
+      service.indexOf("async function _runPreflight"),
+      service.indexOf("function _maybeStartPreflight"),
+    );
+    assert.match(preflight, /claimTransfer:\s*\(transfer\)/);
+    assert.match(preflight, /claimScalpShardFundingTransfer\(/);
+    const trader = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "kalshi-trader.ts"),
+      "utf8",
+    );
+    const rebalance = trader.slice(
+      trader.indexOf("export async function rebalanceKalshiCashToShard"),
+      trader.indexOf("// Positions"),
+    );
+    assert.ok(
+      rebalance.indexOf("await options.claimTransfer(transfer)")
+        < rebalance.indexOf('"POST"'),
+    );
   });
 });
