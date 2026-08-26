@@ -22,6 +22,7 @@ import {
   getSmartExitEvaluationsByIds,
   insertSmartExitEvaluation,
   insertSmartExitEvidence,
+  insertSmartExitReplayReport,
   insertSmartExitRecoveryStudy,
   listLatestSmartExitEvaluationsPerPosition,
   listSmartExitCoverageEvaluations,
@@ -29,6 +30,7 @@ import {
   listSmartExitPositionStates,
   listSmartExitEvaluations,
   listSmartExitReplayReports,
+  listSmartExitReplaySources,
   listSmartExitLifecycles,
   listUnsettledSmartExitLifecycles,
   loadSmartExitConfig,
@@ -39,6 +41,10 @@ import {
   upsertSmartExitPositionState,
   upsertSmartExitLifecycle,
 } from "./kalshi-smart-exit-db.ts";
+import {
+  buildCrossingRiskReplayLifecycles,
+  calibrateSmartExit,
+} from "./kalshi-smart-exit-replay.ts";
 import { fetchKalshiMarketResult } from "./kalshi-trader.ts";
 import { requestSmartExitFromOwner } from "./kalshi-smart-exit-owners.ts";
 import {
@@ -354,7 +360,7 @@ function reasonCode(disposition: string, reason: string): string {
   if (reason.includes("debounce")) return "debounce_pending";
   if (disposition === "WATCH") return "risk_watch";
   if (disposition === "PREPARE_EXIT") return "prepare_exit";
-  if (disposition === "EXIT_SIGNAL") return "confirmed_probability_decay";
+  if (disposition === "EXIT_SIGNAL") return "confirmed_target_crossing";
   return "hold";
 }
 
@@ -678,6 +684,9 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     adverseAccelerationPerSecond2: decision.adverseAccelerationPerSecond2,
     projectedCrossingSeconds: decision.projectedCrossingSeconds,
     projectedCrossBeforeExpiry: decision.projectedCrossBeforeExpiry,
+    crossingRiskConfirmed: decision.crossingRiskConfirmed,
+    targetAlreadyCrossed: decision.targetAlreadyCrossed,
+    volatilityReachableBeforeExpiry: decision.volatilityReachableBeforeExpiry,
     marketBestBid: evidence.marketBestBid,
     marketBestAsk: evidence.marketBestAsk,
     marketQuoteAgeMs: evidence.marketQuoteObservedAtSeconds == null ? null : nowMs - evidence.marketQuoteObservedAtSeconds * 1_000,
@@ -1125,6 +1134,130 @@ export async function getSmartExitReplayReports(): Promise<Array<Record<string, 
   const reports = await listSmartExitReplayReports({ limit: 100 });
   return reports.map((report) => ({ id: report.id, owner: report.owner, symbol: report.symbol,
     version: report.version, status: report.status, createdAt: report.createdAt, ...report.payload }));
+}
+
+/**
+ * Builds advisory reports from persisted one-second evaluations and fresh,
+ * authoritative Kalshi settlements. It never changes mode, config, applied
+ * versions, owner authorization, or order state.
+ */
+export async function calibrateSmartExitFromDurableHistory(params: {
+  owner?: SmartExitOwnerKind;
+  symbol?: string;
+  limitPositions?: number;
+} = {}): Promise<Array<Record<string, unknown>>> {
+  const sources = await listSmartExitReplaySources({
+    owner: params.owner,
+    symbol: params.symbol?.toUpperCase(),
+    limitPositions: params.limitPositions,
+  });
+  const settledSources = sources.filter((source) =>
+    source.expiryTimestampSeconds <= Date.now() / 1_000);
+  const settlementByTicker = new Map<string, "yes" | "no" | null>();
+  const tickers = [...new Set(settledSources.map((source) => source.ticker))];
+  for (let index = 0; index < tickers.length; index += 5) {
+    const batch = tickers.slice(index, index + 5);
+    const results = await Promise.all(batch.map(async (ticker) => {
+      try {
+        const settlement = await fetchKalshiMarketResult(ticker);
+        return [ticker, settlement.result === "yes" || settlement.result === "no"
+          ? settlement.result
+          : null] as const;
+      } catch (error) {
+        logger.warn({ error, ticker }, "[kalshi-smart-exit] replay settlement unavailable");
+        return [ticker, null] as const;
+      }
+    }));
+    for (const [ticker, result] of results) settlementByTicker.set(ticker, result);
+  }
+  const groups = new Map<string, typeof settledSources>();
+  for (const source of settledSources) {
+    if (!settlementByTicker.get(source.ticker)) continue;
+    const key = `${source.owner}:${source.symbol}`;
+    (groups.get(key) ?? (() => {
+      const value: typeof settledSources = [];
+      groups.set(key, value);
+      return value;
+    })()).push(source);
+  }
+  const reports: Array<Record<string, unknown>> = [];
+  for (const group of groups.values()) {
+    const first = group[0]!;
+    const settlements = group.map((source) => {
+      const settlementResult = settlementByTicker.get(source.ticker)!;
+      const holdValue = settlementResult === source.side ? source.quantity : 0;
+      return {
+        owner: source.owner,
+        positionId: source.positionId,
+        symbol: source.symbol,
+        regime: "unclassified",
+        entryTimestampSeconds: source.entryTimestampSeconds,
+        expiryTimestampSeconds: source.expiryTimestampSeconds,
+        entryContractCost: source.entryContractCost,
+        quantity: source.quantity,
+        holdToExpiryPnl: holdValue - source.entryContractCost * source.quantity,
+      };
+    });
+    const evaluations = group.flatMap((source) => source.evaluations);
+    const candidateParameters = {
+      debounceCount: config.debounceCount,
+      confirmationLevel: config.confirmationLevel,
+      minMarketLossFraction: 0.25,
+      minExitEdge: config.minExitEdge,
+      crossingReserveFraction: 0.2,
+      minCrossingReserveSeconds: 5,
+      maxCrossingReserveSeconds: 30,
+    } as const;
+    const lifecycles = buildCrossingRiskReplayLifecycles(
+      settlements,
+      evaluations,
+      candidateParameters,
+    );
+    const calibration = calibrateSmartExit(lifecycles, {
+      slippageAssumptions: [{ cents: 1 }, { cents: 2 }],
+      maxTotalPnlSacrifice: 0,
+      maxSlippageTotalPnlSacrifice: 0,
+    });
+    const version = [
+      "crossing-risk-v2",
+      `d${candidateParameters.debounceCount}`,
+      `c${candidateParameters.confirmationLevel.toFixed(2)}`,
+      `m${candidateParameters.minMarketLossFraction.toFixed(2)}`,
+    ].join("-");
+    const payload = {
+      totalEvaluated: lifecycles.length,
+      exitsRecommended: lifecycles.filter((item) => item.candidateExit !== null).length,
+      authoritativeSettlementCount: settlements.length,
+      hypotheticalPnlSaved: calibration.report.overall.totalPnlDelta,
+      calibrationScore: calibration.holdout?.totalPnlDelta ?? null,
+      chronologicalHoldoutPassed: calibration.status === "validated",
+      slippageSensitivityPassed: calibration.status === "validated",
+      liveEligible: calibration.status === "validated",
+      advisoryOnly: true,
+      parameters: candidateParameters,
+      reasons: calibration.reasons,
+      overall: calibration.report.overall,
+      training: calibration.training,
+      holdout: calibration.holdout,
+      slippage: calibration.report.slippage,
+    };
+    await insertSmartExitReplayReport({
+      id: `${first.owner}:${first.symbol}:${version}`,
+      owner: first.owner,
+      symbol: first.symbol,
+      version,
+      status: calibration.status,
+      payload,
+    });
+    reports.push({
+      owner: first.owner,
+      symbol: first.symbol,
+      version,
+      status: calibration.status,
+      ...payload,
+    });
+  }
+  return reports;
 }
 
 export async function applySmartExitParameterVersion(params: {

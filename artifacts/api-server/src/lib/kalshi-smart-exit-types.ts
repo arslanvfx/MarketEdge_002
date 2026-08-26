@@ -169,6 +169,10 @@ export interface SmartExitDecision {
   readonly adverseAccelerationPerSecond2: number | null;
   readonly projectedCrossingSeconds: number | null;
   readonly projectedCrossBeforeExpiry: boolean | null;
+  /** True only when the shared target-crossing gate is satisfied. */
+  readonly crossingRiskConfirmed: boolean;
+  readonly targetAlreadyCrossed: boolean;
+  readonly volatilityReachableBeforeExpiry: boolean | null;
   readonly estimatedSaleValue: number | null;
   readonly expectedHoldValue: number | null;
   readonly exitEdgePerContract: number | null;
@@ -224,6 +228,9 @@ export interface SmartExitEvaluationRecord {
   readonly adverseAccelerationPerSecond2: number | null;
   readonly projectedCrossingSeconds: number | null;
   readonly projectedCrossBeforeExpiry: boolean | null;
+  readonly crossingRiskConfirmed: boolean;
+  readonly targetAlreadyCrossed: boolean;
+  readonly volatilityReachableBeforeExpiry: boolean | null;
   readonly marketBestBid: number | null;
   readonly marketBestAsk: number | null;
   readonly marketQuoteAgeMs: number | null;

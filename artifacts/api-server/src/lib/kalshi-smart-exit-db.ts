@@ -60,8 +60,25 @@ export interface SmartExitPersistedPositionState {
   updatedAt?: Date | string;
 }
 
+export interface SmartExitReplaySource {
+  owner: SmartExitOwnerKind;
+  positionId: string;
+  symbol: string;
+  ticker: string;
+  side: "yes" | "no";
+  entryTimestampSeconds: number;
+  expiryTimestampSeconds: number;
+  entryContractCost: number;
+  quantity: number;
+  evaluations: SmartExitEvaluationRecord[];
+}
+
 let migrated = false;
 let migrationPromise: Promise<void> | null = null;
+const SMART_EXIT_REPLAY_MAX_POSITIONS = 50;
+const SMART_EXIT_REPLAY_MAX_EVALUATIONS_PER_POSITION = 1_000;
+const SMART_EXIT_REPLAY_MAX_TOTAL_EVALUATIONS =
+  SMART_EXIT_REPLAY_MAX_POSITIONS * SMART_EXIT_REPLAY_MAX_EVALUATIONS_PER_POSITION;
 
 /** Creates only kalshi_smart_exit_* tables and is safe on every startup. */
 export async function runSmartExitMigrations(): Promise<void> {
@@ -267,6 +284,146 @@ export async function listSmartExitEvaluations(params: {
     ORDER BY evaluated_at DESC LIMIT $4`,
   [params.owner ?? null, params.symbol ?? null, params.positionId ?? null, Math.max(1, params.limit ?? 100)]);
   return result.rows.map((row: { payload: SmartExitEvaluationRecord }) => row.payload);
+}
+
+/**
+ * Loads bounded, owner-scoped position histories for advisory replay. Final
+ * outcomes are intentionally absent: callers must obtain authoritative Kalshi
+ * settlement separately rather than trusting inferred or cached bet outcomes.
+ */
+export async function listSmartExitReplaySources(params: {
+  owner?: SmartExitOwnerKind;
+  symbol?: string;
+  limitPositions?: number;
+} = {}): Promise<SmartExitReplaySource[]> {
+  await ensureMigrated();
+  const limit = Math.min(
+    SMART_EXIT_REPLAY_MAX_POSITIONS,
+    Math.max(1, params.limitPositions ?? SMART_EXIT_REPLAY_MAX_POSITIONS),
+  );
+  const result = await pool.query(`
+    WITH positions AS (
+      SELECT owner, position_id, MAX(evaluated_at) AS latest_at
+      FROM kalshi_smart_exit_evaluations
+      WHERE ($1::text IS NULL OR owner = $1)
+        AND ($2::text IS NULL OR symbol = UPPER($2))
+      GROUP BY owner, position_id
+      ORDER BY latest_at DESC
+      LIMIT $3
+    ),
+    ranked_evaluations AS (
+      SELECT e.owner, e.position_id, e.evaluated_at, e.payload,
+             ROW_NUMBER() OVER (
+               PARTITION BY e.owner, e.position_id
+               ORDER BY e.evaluated_at DESC
+             ) AS sample_rank
+      FROM kalshi_smart_exit_evaluations e
+      INNER JOIN positions p
+        ON p.owner = e.owner AND p.position_id = e.position_id
+    )
+    SELECT owner, position_id, payload
+    FROM ranked_evaluations
+    WHERE sample_rank <= $4
+    ORDER BY owner, position_id, evaluated_at ASC
+    LIMIT $5`,
+  [
+    params.owner ?? null,
+    params.symbol ?? null,
+    limit,
+    SMART_EXIT_REPLAY_MAX_EVALUATIONS_PER_POSITION,
+    SMART_EXIT_REPLAY_MAX_TOTAL_EVALUATIONS,
+  ]);
+  const histories = new Map<string, {
+    owner: SmartExitOwnerKind;
+    positionId: string;
+    evaluations: SmartExitEvaluationRecord[];
+  }>();
+  for (const row of result.rows as Array<{
+    owner: SmartExitOwnerKind;
+    position_id: string;
+    payload: SmartExitEvaluationRecord;
+  }>) {
+    const key = `${row.owner}:${row.position_id}`;
+    let history = histories.get(key);
+    if (!history) {
+      history = { owner: row.owner, positionId: String(row.position_id), evaluations: [] };
+      histories.set(key, history);
+    }
+    history.evaluations.push(row.payload);
+  }
+  const regularIds = [...histories.values()]
+    .filter((item) => item.owner === "regular")
+    .map((item) => item.positionId);
+  const scalperIds = [...histories.values()]
+    .filter((item) => item.owner === "scalper")
+    .map((item) => item.positionId);
+  const [regularResult, scalperResult] = await Promise.all([
+    regularIds.length === 0 ? { rows: [] } : pool.query(`
+      SELECT id, symbol, ticker, direction, created_at, contract_count, bet_amount,
+             entry_yes_price
+      FROM kalshi_bot_bets
+      WHERE id = ANY($1::text[])`, [regularIds]),
+    scalperIds.length === 0 ? { rows: [] } : pool.query(`
+      SELECT id, symbol, ticker, side, created_at, filled_count,
+             winning_contract_cost, avg_fill_price, entry_yes_price
+      FROM kalshi_scalp_orders
+      WHERE id = ANY($1::text[]) AND status = 'filled' AND filled_count > 0`,
+    [scalperIds]),
+  ]);
+  const sourceRows = new Map<string, Record<string, unknown>>();
+  for (const row of regularResult.rows as Array<Record<string, unknown>>) {
+    sourceRows.set(`regular:${String(row.id)}`, row);
+  }
+  for (const row of scalperResult.rows as Array<Record<string, unknown>>) {
+    sourceRows.set(`scalper:${String(row.id)}`, row);
+  }
+  const numberOrNull = (value: unknown): number | null => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const sources: SmartExitReplaySource[] = [];
+  for (const [key, history] of histories) {
+    const row = sourceRows.get(key);
+    const first = history.evaluations[0];
+    if (!row || !first) continue;
+    const ticker = String(row.ticker ?? first.ticker ?? "");
+    const side = (row.direction ?? row.side ?? first.side) === "no" ? "no" : "yes";
+    const quantity = history.owner === "regular"
+      ? numberOrNull(row.contract_count)
+      : numberOrNull(row.filled_count);
+    const exactStake = history.owner === "regular"
+      ? numberOrNull(row.bet_amount)
+      : (() => {
+          const winningCost = numberOrNull(row.winning_contract_cost);
+          return winningCost !== null && quantity !== null ? winningCost * quantity : null;
+        })();
+    const fallbackYesPrice = numberOrNull(row.entry_yes_price)
+      ?? numberOrNull(row.avg_fill_price);
+    const fallbackWinningPrice = fallbackYesPrice === null
+      ? first.marketAtEntryProbability
+      : side === "yes" ? fallbackYesPrice : 1 - fallbackYesPrice;
+    const entryStake = exactStake
+      ?? (quantity !== null ? fallbackWinningPrice * quantity : null);
+    const entryTimestampSeconds = new Date(String(row.created_at ?? "")).getTime() / 1_000;
+    const firstAt = Date.parse(first.timestamp) / 1_000;
+    const expiryTimestampSeconds = firstAt + first.secondsRemaining;
+    if (!ticker || quantity === null || quantity <= 0 || entryStake === null
+        || entryStake < 0 || !Number.isFinite(entryTimestampSeconds)
+        || !Number.isFinite(expiryTimestampSeconds)) continue;
+    sources.push({
+      owner: history.owner,
+      positionId: history.positionId,
+      symbol: String(row.symbol ?? first.symbol).toUpperCase(),
+      ticker,
+      side,
+      entryTimestampSeconds,
+      expiryTimestampSeconds,
+      entryContractCost: entryStake / quantity,
+      quantity,
+      evaluations: history.evaluations,
+    });
+  }
+  return sources;
 }
 
 export async function listLatestSmartExitEvaluationsPerPosition(params: {

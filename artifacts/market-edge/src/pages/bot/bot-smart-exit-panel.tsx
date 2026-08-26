@@ -361,15 +361,36 @@ export function BotSmartExitPanel({ authPost }: Props) {
           <SectionHeader title={`Exit Lifecycle & Effectiveness · ${lifecycle?.summary.triggered ?? 0} triggered · ${lifecycle?.summary.sold ?? 0} sold · ${lifecycle?.summary.settled ?? 0} settled`} />
           <div className="overflow-x-auto overflow-y-auto max-h-[360px]">
             <table className="w-full min-w-[1080px] table-fixed text-left text-xs whitespace-nowrap">
+              <caption className="sr-only">
+                Saved / Forfeited equals Sell-now P&amp;L minus Held-to-result P&amp;L. Positive saved means recovered value versus a final loss; negative forfeited means value surrendered versus holding.
+              </caption>
               <thead>
                 <tr className="border-b border-white/5 text-[9px] text-slate-500 uppercase tracking-wider">
                   <th className="w-[105px] px-4 py-2 font-medium">Triggered</th>
                   <th className="w-[90px] px-4 py-2 font-medium">Market</th>
                   <th className="w-[110px] px-4 py-2 font-medium">Entry</th>
                   <th className="w-[100px] px-4 py-2 font-medium text-right">Stake</th>
-                  <th className="w-[120px] px-4 py-2 font-medium text-right">Exit P&amp;L</th>
-                  <th className="w-[120px] px-4 py-2 font-medium text-right">Hold P&amp;L</th>
-                  <th className="w-[120px] px-4 py-2 font-medium text-right">Saved</th>
+                  <th
+                    className="w-[120px] px-4 py-2 font-medium text-right"
+                    title="P&amp;L from selling when Smart Exit triggered."
+                    aria-label="Sell-now profit and loss: P and L from selling when Smart Exit triggered"
+                  >
+                    Sell-now P&amp;L
+                  </th>
+                  <th
+                    className="w-[120px] px-4 py-2 font-medium text-right"
+                    title="P&amp;L if the position had been held to its final result."
+                    aria-label="Held-to-result profit and loss: P and L if the position had been held to its final result"
+                  >
+                    Held-to-result P&amp;L
+                  </th>
+                  <th
+                    className="w-[120px] px-4 py-2 font-medium text-right"
+                    title="Sell-now P&amp;L minus held-to-result P&amp;L. Positive saved means recovered value versus a final loss; negative forfeited means value surrendered versus holding."
+                    aria-label="Saved or forfeited: sell-now profit and loss minus held-to-result profit and loss. Positive saved means recovered value versus a final loss; negative forfeited means value surrendered versus holding."
+                  >
+                    Saved / Forfeited
+                  </th>
                   <th className="w-[120px] px-4 py-2 font-medium">Outcome</th>
                   <th className="w-auto px-4 py-2 font-medium">Effect</th>
                 </tr>

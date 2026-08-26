@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { calibrateSmartExit, replaySmartExit, type SmartExitReplayLifecycle } from "./kalshi-smart-exit-replay.ts";
+import { fileURLToPath } from "node:url";
+import {
+  buildCrossingRiskReplayLifecycles,
+  calibrateSmartExit,
+  replaySmartExit,
+  type SmartExitReplayLifecycle,
+} from "./kalshi-smart-exit-replay.ts";
+import type { SmartExitEvaluationRecord } from "./kalshi-smart-exit-types.ts";
 
 const lifecycle = (overrides: Partial<SmartExitReplayLifecycle> = {}): SmartExitReplayLifecycle => ({
   owner: "regular", symbol: "BTC", regime: "trend", entryTimestampSeconds: 10, expiryTimestampSeconds: 100,
@@ -20,6 +29,8 @@ test("replay sorts chronologically and scores candidate exits", () => {
 test("false exits count an exited position that would have won", () => {
   const report = replaySmartExit([lifecycle({ holdToExpiryPnl: 0.4, candidateExit: { timestampSeconds: 20, contractPrice: 0.3, reason: "bad" } })]);
   assert.equal(report.overall.falseExits, 1);
+  assert.equal(report.overall.missedWins, 1);
+  assert.ok(report.overall.missedWinDollars > 0);
   assert.equal(report.overall.avoidedLosses, 0);
 });
 
@@ -74,4 +85,121 @@ test("rejects a segment or slippage scenario that is not stable", () => {
   });
   assert.equal(result.status, "rejected");
   assert.ok(result.reasons.some((reason) => reason.includes("slippage")));
+});
+
+const durableEvaluation = (
+  timestampSeconds: number,
+  overrides: Partial<SmartExitEvaluationRecord> = {},
+): SmartExitEvaluationRecord => ({
+  owner: "regular",
+  positionId: "p",
+  symbol: "BTC",
+  side: "yes",
+  timestamp: new Date(timestampSeconds * 1_000).toISOString(),
+  secondsRemaining: 100 - timestampSeconds,
+  underlyingPrice: 100.5,
+  strikePrice: 100,
+  volatilityLogReturnPerSqrtSecond: 0.01,
+  continuationScore: 1,
+  adverseVelocityPerSecond: 0.2,
+  adverseAccelerationPerSecond2: 0,
+  projectedCrossingSeconds: 2.5,
+  marketLossFraction: 0.5,
+  exitEdgePerContract: 0.1,
+  executionEvidenceReady: true,
+  liquidityCoverage: 1,
+  estimatedSaleValue: 0.4,
+  remainingQuantity: 1,
+  ...overrides,
+} as SmartExitEvaluationRecord);
+
+test("durable one-second replay requires sustained realistic crossing before selecting an exit", () => {
+  const settlements = [{
+    owner: "regular" as const,
+    positionId: "p",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 100,
+    entryContractCost: 0.8,
+    quantity: 1,
+    holdToExpiryPnl: -0.8,
+  }];
+  const replay = buildCrossingRiskReplayLifecycles(settlements, [
+    durableEvaluation(20, {
+      underlyingPrice: 150,
+      volatilityLogReturnPerSqrtSecond: 0.00001,
+      projectedCrossingSeconds: 10,
+    }),
+    durableEvaluation(30),
+    durableEvaluation(31),
+    durableEvaluation(32),
+    durableEvaluation(33),
+  ]);
+  assert.equal(replay[0]!.candidateExit?.timestampSeconds, 33);
+  assert.match(replay[0]!.candidateExit?.reason ?? "", /sustained projected target crossing/);
+});
+
+test("durable replay treats a fully executable actual crossing as immediate", () => {
+  const replay = buildCrossingRiskReplayLifecycles([{
+    owner: "regular",
+    positionId: "p",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 100,
+    entryContractCost: 0.8,
+    quantity: 1,
+    holdToExpiryPnl: -0.8,
+  }], [
+    durableEvaluation(20, {
+      underlyingPrice: 99.9,
+      projectedCrossingSeconds: 0,
+      adverseVelocityPerSecond: null,
+      continuationScore: null,
+    }),
+  ]);
+  assert.equal(replay[0]!.candidateExit?.timestampSeconds, 20);
+  assert.match(replay[0]!.candidateExit?.reason ?? "", /actual target crossing/);
+});
+
+test("durable replay refuses partial liquidity and reports dollars saved versus forfeited", () => {
+  const noExit = buildCrossingRiskReplayLifecycles([{
+    owner: "regular",
+    positionId: "p",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 100,
+    entryContractCost: 0.8,
+    quantity: 1,
+    holdToExpiryPnl: -0.8,
+  }], [
+    durableEvaluation(20, {
+      underlyingPrice: 99.9,
+      projectedCrossingSeconds: 0,
+      executionEvidenceReady: false,
+      liquidityCoverage: 0.5,
+    }),
+  ]);
+  assert.equal(noExit[0]!.candidateExit, null);
+
+  const report = replaySmartExit([
+    lifecycle({ holdToExpiryPnl: -0.6, candidateExit: { timestampSeconds: 20, contractPrice: 0.3, reason: "saved" } }),
+    lifecycle({ holdToExpiryPnl: 0.4, candidateExit: { timestampSeconds: 20, contractPrice: 0.3, reason: "forfeited" } }),
+  ]);
+  assert.ok(report.overall.avoidedLossDollars > 0);
+  assert.ok(report.overall.missedWinDollars > 0);
+  assert.ok(Math.abs(report.overall.totalPnlDelta
+    - (report.overall.avoidedLossDollars - report.overall.missedWinDollars)) < 1e-12);
+});
+
+test("durable replay DB loading is capped per position and in total", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "kalshi-smart-exit-db.ts"), "utf8");
+  assert.match(source, /SMART_EXIT_REPLAY_MAX_POSITIONS = 50/);
+  assert.match(source, /SMART_EXIT_REPLAY_MAX_EVALUATIONS_PER_POSITION = 1_000/);
+  assert.match(source, /ROW_NUMBER\(\) OVER \(\s*PARTITION BY e\.owner, e\.position_id/s);
+  assert.match(source, /WHERE sample_rank <= \$4/);
+  assert.match(source, /LIMIT \$5/);
 });

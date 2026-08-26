@@ -53,37 +53,64 @@ test("missing, stale, and commodity evidence fail closed", () => {
   assert.equal(evaluateSmartExit(position, evidence({ spotReceivedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit({ ...position, underlyingKind: "commodity" }, evidence(), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
 });
-test("confirmation debounces then signals; shadow cannot execute", () => {
-  const current = evidence({ marketWinProbability: 0.7, marketExecutablePrice: 0.9 });
-  const first = evaluateSmartExit(position, current, INITIAL_SMART_EXIT_STATE, config, 100);
-  assert.equal(first.disposition, "WATCH");
+test("near-target adverse movement prepares, then signals only after sustained confirmation", () => {
+  const initialState = {
+    ...INITIAL_SMART_EXIT_STATE,
+    previousUnderlyingPrice: 101,
+    previousUnderlyingAtSeconds: 99,
+  };
+  const current = evidence({
+    underlyingPrice: 100.6,
+    marketWinProbability: 0.4,
+    marketExecutablePrice: 0.9,
+  });
+  const first = evaluateSmartExit(position, current, initialState, config, 100);
+  assert.equal(first.disposition, "PREPARE_EXIT");
+  assert.equal(first.crossingRiskConfirmed, false);
   const second = evaluateSmartExit(
     position,
-    { ...current, observedAtSeconds: 101, spotReceivedAtSeconds: 101, spotObservedAtSeconds: 101 },
+    {
+      ...current,
+      underlyingPrice: 100.2,
+      observedAtSeconds: 101,
+      spotReceivedAtSeconds: 101,
+      tapeReceivedAtSeconds: 101,
+      bookReceivedAtSeconds: 101,
+      spotObservedAtSeconds: 101,
+      marketQuoteObservedAtSeconds: 101,
+      marketBookObservedAtSeconds: 101,
+    },
     first.nextState,
     config,
     101,
   );
   assert.equal(second.disposition, "EXIT_SIGNAL");
+  assert.equal(second.crossingRiskConfirmed, true);
   assert.equal(second.mayExecuteExit, false);
 });
-test("fast catastrophic drop bypasses debounce and live flag is only advisory", () => {
+test("fast catastrophic probability drop cannot bypass crossing confirmation", () => {
   const state = {
     ...INITIAL_SMART_EXIT_STATE,
-    previousModelProbability: 0.9,
+    previousModelProbability: 1,
     previousObservedAtSeconds: 99,
-    previousUnderlyingPrice: 101,
+    previousUnderlyingPrice: 151,
     previousUnderlyingAtSeconds: 99,
   };
   const decision = evaluateSmartExit(
     position,
-    evidence({ marketExecutablePrice: 0.9 }),
+    evidence({
+      underlyingPrice: 150,
+      volatilityLogReturnPerSqrtSecond: 0.1,
+      marketExecutablePrice: 0.9,
+      marketWinProbability: 0.2,
+    }),
     state,
     { ...config, mode: "live-exit" },
     100,
   );
-  assert.equal(decision.disposition, "EXIT_SIGNAL");
-  assert.equal(decision.mayExecuteExit, true);
+  assert.notEqual(decision.disposition, "EXIT_SIGNAL");
+  assert.equal(decision.crossingRiskConfirmed, false);
+  assert.equal(decision.mayExecuteExit, false);
 });
 
 test("80-cent entry collapsing below 40 cents escalates immediately with crossing projection and economics", () => {
@@ -106,9 +133,101 @@ test("80-cent entry collapsing below 40 cents escalates immediately with crossin
     100,
   );
   assert.equal(decision.highRisk, true);
+  assert.equal(decision.targetAlreadyCrossed, true);
   assert.equal(decision.projectedCrossBeforeExpiry, true);
   assert.equal(decision.disposition, "EXIT_SIGNAL");
   assert.ok(decision.estimatedSaleValue! > decision.expectedHoldValue!);
+});
+
+test("80-to-30-cent market collapse only warns when the underlying cannot plausibly cross", () => {
+  const decision = evaluateSmartExit(
+    {
+      ...position,
+      marketAtEntry: { winProbability: 0.8, observedAtSeconds: 0 },
+    },
+    evidence({
+      underlyingPrice: 150,
+      volatilityLogReturnPerSqrtSecond: 0.00001,
+      momentumLogReturn: -0.001,
+      marketWinProbability: 0.3,
+      marketExecutablePrice: 0.9,
+    }),
+    INITIAL_SMART_EXIT_STATE,
+    config,
+    100,
+  );
+  assert.equal(decision.highRisk, true);
+  assert.equal(decision.crossingRiskConfirmed, false);
+  assert.equal(decision.disposition, "WATCH");
+  assert.match(decision.reason, /repricing.*crossing is not plausible/i);
+});
+
+test("a sharp adverse move remains non-executable when distance and volatility make crossing unrealistic", () => {
+  const state = {
+    ...INITIAL_SMART_EXIT_STATE,
+    adverseSampleCount: config.debounceCount,
+    previousUnderlyingPrice: 151,
+    previousUnderlyingAtSeconds: 99,
+    previousAdverseVelocity: 1,
+  };
+  const decision = evaluateSmartExit(
+    position,
+    evidence({
+      underlyingPrice: 150,
+      volatilityLogReturnPerSqrtSecond: 0.00001,
+      marketWinProbability: 0.7,
+      marketExecutablePrice: 0.9,
+    }),
+    state,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(decision.projectedCrossBeforeExpiry, true);
+  assert.equal(decision.volatilityReachableBeforeExpiry, false);
+  assert.equal(decision.crossingRiskConfirmed, false);
+  assert.notEqual(decision.disposition, "EXIT_SIGNAL");
+  assert.equal(decision.mayExecuteExit, false);
+});
+
+test("actual target crossing can escalate immediately but requires complete executable evidence", () => {
+  const noDepth = evaluateSmartExit(
+    position,
+    evidence({ marketExecutableQuantity: null }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(noDepth.targetAlreadyCrossed, true);
+  assert.equal(noDepth.disposition, "PREPARE_EXIT");
+  assert.equal(noDepth.mayExecuteExit, false);
+
+  const executable = evaluateSmartExit(
+    position,
+    evidence({ marketExecutablePrice: 0.9 }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(executable.disposition, "EXIT_SIGNAL");
+  assert.equal(executable.crossingRiskConfirmed, true);
+  assert.equal(executable.mayExecuteExit, true);
+});
+
+test("actual target crossing does not wait for a 25-percent Kalshi repricing", () => {
+  const decision = evaluateSmartExit(
+    position,
+    evidence({
+      marketWinProbability: 0.65,
+      marketExecutablePrice: 0.9,
+    }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.ok(decision.marketLossFraction! < 0.25);
+  assert.equal(decision.targetAlreadyCrossed, true);
+  assert.equal(decision.disposition, "EXIT_SIGNAL");
+  assert.equal(decision.mayExecuteExit, true);
 });
 
 test("quiet tape degrades confidence without erasing the shadow decision", () => {

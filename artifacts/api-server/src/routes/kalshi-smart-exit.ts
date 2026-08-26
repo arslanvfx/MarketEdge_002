@@ -3,6 +3,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { getSmartExitMutationCapability } from "../lib/kalshi-smart-exit-authz.ts";
 import {
   applySmartExitParameterVersion,
+  calibrateSmartExitFromDurableHistory,
   emergencyDisableSmartExit,
   getSmartExitHistory,
   getSmartExitLifecycleLedger,
@@ -93,6 +94,36 @@ router.get("/crypto/smart-exit/replay", async (req, res): Promise<void> => {
     res.status(500).json({ error: "Failed to fetch Smart Exit replay reports" });
   }
 });
+
+router.post(
+  "/crypto/smart-exit/replay/calibrate",
+  requireSmartExitOperator,
+  async (req, res): Promise<void> => {
+    const owner = req.body?.owner as SmartExitOwnerKind | undefined;
+    const symbol = typeof req.body?.symbol === "string"
+      ? req.body.symbol.trim().toUpperCase()
+      : undefined;
+    if (owner !== undefined && owner !== "regular" && owner !== "scalper") {
+      res.status(400).json({ ok: false, error: "owner must be regular or scalper" });
+      return;
+    }
+    const requestedLimit = Number(req.body?.limitPositions);
+    const limitPositions = Number.isFinite(requestedLimit)
+      ? Math.min(50, Math.max(1, Math.floor(requestedLimit)))
+      : 50;
+    try {
+      const reports = await calibrateSmartExitFromDurableHistory({
+        owner,
+        symbol: symbol || undefined,
+        limitPositions,
+      });
+      res.json({ ok: true, applied: false, reports });
+    } catch (error) {
+      req.log.error({ error }, "Failed to calibrate Smart Exit replay");
+      res.status(500).json({ ok: false, error: "Failed to calibrate Smart Exit replay" });
+    }
+  },
+);
 
 router.post(
   "/crypto/smart-exit/config",

@@ -135,6 +135,7 @@
 - [Daily trading P&L boundary](daily-trading-pnl-boundary.md) — resets at DST-aware New York midnight; includes only regular bot plus canonical High-Value Scalper settlements
 - [Smart Exit ownership boundary](smart-exit-ownership-boundary.md) — recommendations never own positions; execution requires durable owner delegation and final pre-submit revalidation.
 - [Smart Exit effectiveness accounting](smart-exit-effectiveness-accounting.md) — confirmed fills prove execution; only authoritative settlement determines whether exiting helped.
+- [Smart Exit crossing-risk policy](smart-exit-crossing-risk.md) — repricing only confirms danger; target-crossing risk drives exits, with live/replay parity and advisory calibration.
 - [Transaction history row limits](transaction-history-row-limits.md) — filter transactions vs. high-volume skip telemetry in SQL before limiting rows, or real bets disappear from the UI.
 - [Publish diff boolean checks](publish-diff-boolean-checks.md) — bare boolean CHECK expressions may serialize as nested CHECK; use explicit equality forms.
 - [Regular placement funnel safety](regular-placement-funnel-safety.md) — paper parity uses identical read-only live predicates; hot-path telemetry must be hard-bounded, idempotent, and non-throwing.

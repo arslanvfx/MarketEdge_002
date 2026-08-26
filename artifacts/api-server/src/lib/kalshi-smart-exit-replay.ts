@@ -3,6 +3,11 @@
  * This module scores supplied, settled lifecycles only.  It neither reads
  * persistence nor changes a Smart Exit configuration.
  */
+import type { SmartExitEvaluationRecord } from "./kalshi-smart-exit-types.ts";
+import {
+  assessSmartExitCrossingRisk,
+  SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
+} from "./kalshi-smart-exit-policy.ts";
 
 export type SmartExitReplayOwner = "regular" | "scalper";
 export type SmartExitReplayStatus = "insufficient_data" | "validated" | "rejected";
@@ -52,7 +57,11 @@ export interface SmartExitComparison {
   readonly averageLossDelta: number;
   readonly winRateDelta: number;
   readonly falseExits: number;
+  /** Exits on positions that ultimately won; explicit alias for operators. */
+  readonly missedWins: number;
   readonly avoidedLosses: number;
+  readonly avoidedLossDollars: number;
+  readonly missedWinDollars: number;
 }
 
 export interface SmartExitSlippageResult {
@@ -91,6 +100,33 @@ export interface SmartExitCalibrationResult {
   readonly report: SmartExitReplayReport;
   readonly training: SmartExitComparison | null;
   readonly holdout: SmartExitComparison | null;
+}
+
+export interface SmartExitDurableSettlement {
+  readonly owner: SmartExitReplayOwner;
+  readonly positionId: string;
+  readonly symbol: string;
+  readonly regime: string;
+  readonly entryTimestampSeconds: number;
+  readonly expiryTimestampSeconds: number;
+  readonly entryContractCost: number;
+  readonly quantity: number;
+  /** Must come from an authoritative settlement, not an inferred spot result. */
+  readonly holdToExpiryPnl: number;
+}
+
+export interface SmartExitCrossingCandidateOptions {
+  readonly debounceCount?: number;
+  readonly confirmationLevel?: number;
+  readonly minMarketLossFraction?: number;
+  readonly minExitEdge?: number;
+  readonly crossingReserveFraction?: number;
+  readonly minCrossingReserveSeconds?: number;
+  readonly maxCrossingReserveSeconds?: number;
+  readonly fatTailVolatilityMultiplier?: number;
+  readonly minVolatilityLogReturnPerSqrtSecond?: number;
+  /** Maximum gap between samples that can count as sustained one-second evidence. */
+  readonly maxSampleGapSeconds?: number;
 }
 
 const DEFAULTS = {
@@ -179,11 +215,166 @@ function compare(items: readonly SmartExitReplayLifecycle[], slippage: Required<
   const avoidedLosses = items.filter((item, index) =>
     item.candidateExit !== null && item.holdToExpiryPnl < 0 && candidateValues[index]! > item.holdToExpiryPnl,
   ).length;
+  const avoidedLossDollars = items.reduce((total, item, index) =>
+    item.candidateExit !== null && item.holdToExpiryPnl < 0
+      ? total + Math.max(0, candidateValues[index]! - item.holdToExpiryPnl)
+      : total, 0);
+  const missedWinDollars = items.reduce((total, item, index) =>
+    item.candidateExit !== null && item.holdToExpiryPnl > 0
+      ? total + Math.max(0, item.holdToExpiryPnl - candidateValues[index]!)
+      : total, 0);
   return {
     hold, candidate, totalPnlDelta: candidate.totalPnl - hold.totalPnl,
     averageLossDelta: candidate.averageLoss - hold.averageLoss,
-    winRateDelta: candidate.winRate - hold.winRate, falseExits, avoidedLosses,
+    winRateDelta: candidate.winRate - hold.winRate,
+    falseExits,
+    missedWins: falseExits,
+    avoidedLosses,
+    avoidedLossDollars,
+    missedWinDollars,
   };
+}
+
+function evaluationTimeSeconds(evaluation: SmartExitEvaluationRecord): number {
+  return Date.parse(evaluation.timestamp) / 1_000;
+}
+
+/**
+ * Reconstructs a candidate from durable one-second evaluations. It deliberately
+ * accepts authoritative settlements separately so a price sample can never
+ * invent the final result. The first fully executable evaluation satisfying
+ * the shared crossing policy becomes the candidate exit.
+ */
+export function buildCrossingRiskReplayLifecycles(
+  settlements: readonly SmartExitDurableSettlement[],
+  evaluations: readonly SmartExitEvaluationRecord[],
+  options: SmartExitCrossingCandidateOptions = {},
+): SmartExitReplayLifecycle[] {
+  const settings = {
+    debounceCount: options.debounceCount ?? 3,
+    confirmationLevel: options.confirmationLevel ?? 0.35,
+    minMarketLossFraction: options.minMarketLossFraction ?? 0.25,
+    minExitEdge: options.minExitEdge ?? 0.01,
+    crossingReserveFraction: options.crossingReserveFraction ?? 0.2,
+    minCrossingReserveSeconds: options.minCrossingReserveSeconds ?? 5,
+    maxCrossingReserveSeconds: options.maxCrossingReserveSeconds ?? 30,
+    fatTailVolatilityMultiplier: options.fatTailVolatilityMultiplier ?? 1.25,
+    minVolatilityLogReturnPerSqrtSecond:
+      options.minVolatilityLogReturnPerSqrtSecond ?? 0.000001,
+    maxSampleGapSeconds:
+      options.maxSampleGapSeconds ?? SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
+  };
+  const numericSettings = Object.entries(settings);
+  for (const [name, value] of numericSettings) finite(value, name);
+  if (settings.debounceCount < 1
+      || settings.confirmationLevel < 0
+      || settings.minMarketLossFraction < 0
+      || settings.minExitEdge < 0
+      || settings.crossingReserveFraction < 0
+      || settings.minCrossingReserveSeconds < 0
+      || settings.maxCrossingReserveSeconds < settings.minCrossingReserveSeconds
+      || settings.fatTailVolatilityMultiplier <= 0
+      || settings.minVolatilityLogReturnPerSqrtSecond <= 0
+      || settings.maxSampleGapSeconds <= 0) {
+    throw new Error("crossing candidate settings are invalid");
+  }
+
+  const evaluationsByPosition = new Map<string, SmartExitEvaluationRecord[]>();
+  for (const evaluation of evaluations) {
+    const key = `${evaluation.owner}:${evaluation.positionId}`;
+    (evaluationsByPosition.get(key) ?? (() => {
+      const value: SmartExitEvaluationRecord[] = [];
+      evaluationsByPosition.set(key, value);
+      return value;
+    })()).push(evaluation);
+  }
+
+  return settlements.map((settlement) => {
+    const key = `${settlement.owner}:${settlement.positionId}`;
+    const samples = [...(evaluationsByPosition.get(key) ?? [])]
+      .filter((sample) => {
+        const at = evaluationTimeSeconds(sample);
+        return Number.isFinite(at)
+          && at >= settlement.entryTimestampSeconds
+          && at <= settlement.expiryTimestampSeconds;
+      })
+      .sort((a, b) => evaluationTimeSeconds(a) - evaluationTimeSeconds(b));
+    let directionalCount = 0;
+    let previousSampleAt: number | null = null;
+    let candidateExit: SmartExitCandidateExit | null = null;
+    for (const sample of samples) {
+      const sampleAt = evaluationTimeSeconds(sample);
+      const sampleElapsedSeconds = previousSampleAt === null
+        ? null
+        : sampleAt - previousSampleAt;
+      const crossing = sample.underlyingPrice !== null
+        && sample.underlyingPrice > 0
+        && sample.strikePrice > 0
+        && sample.volatilityLogReturnPerSqrtSecond !== null
+        ? assessSmartExitCrossingRisk({
+            side: sample.side,
+            underlyingPrice: sample.underlyingPrice,
+            strikePrice: sample.strikePrice,
+            remainingSeconds: sample.secondsRemaining,
+            volatilityLogReturnPerSqrtSecond: sample.volatilityLogReturnPerSqrtSecond,
+            minVolatilityLogReturnPerSqrtSecond:
+              settings.minVolatilityLogReturnPerSqrtSecond,
+            fatTailVolatilityMultiplier: settings.fatTailVolatilityMultiplier,
+            adverseVelocityPerSecond: sample.adverseVelocityPerSecond,
+            adverseAccelerationPerSecond2: sample.adverseAccelerationPerSecond2,
+            continuationScore: sample.continuationScore,
+            confirmationLevel: settings.confirmationLevel,
+            previousDirectionalCount: directionalCount,
+            sampleElapsedSeconds,
+            debounceCount: settings.debounceCount,
+            crossingReserveFraction: settings.crossingReserveFraction,
+            minCrossingReserveSeconds: settings.minCrossingReserveSeconds,
+            maxCrossingReserveSeconds: settings.maxCrossingReserveSeconds,
+            maxSampleGapSeconds: settings.maxSampleGapSeconds,
+          })
+        : null;
+      directionalCount = crossing?.directionalCount ?? 0;
+      previousSampleAt = sampleAt;
+      const fullyExecutable = sample.executionEvidenceReady
+        && sample.estimatedSaleValue !== null
+        && sample.remainingQuantity > 0
+        && sample.liquidityCoverage !== null
+        && sample.liquidityCoverage >= 1;
+      if (
+        crossing?.crossingRiskConfirmed
+        && (
+          crossing.targetAlreadyCrossed
+          || (
+            sample.marketLossFraction !== null
+            && sample.marketLossFraction >= settings.minMarketLossFraction
+          )
+        )
+        && sample.exitEdgePerContract !== null
+        && sample.exitEdgePerContract >= settings.minExitEdge
+        && fullyExecutable
+      ) {
+        candidateExit = {
+          timestampSeconds: sampleAt,
+          contractPrice: sample.estimatedSaleValue! / sample.remainingQuantity,
+          reason: crossing.targetAlreadyCrossed
+            ? "actual target crossing with full executable evidence"
+            : "sustained projected target crossing with full executable evidence",
+        };
+        break;
+      }
+    }
+    return {
+      owner: settlement.owner,
+      symbol: settlement.symbol,
+      regime: settlement.regime,
+      entryTimestampSeconds: settlement.entryTimestampSeconds,
+      expiryTimestampSeconds: settlement.expiryTimestampSeconds,
+      entryContractCost: settlement.entryContractCost,
+      quantity: settlement.quantity,
+      holdToExpiryPnl: settlement.holdToExpiryPnl,
+      candidateExit,
+    };
+  });
 }
 
 function groups(items: readonly SmartExitReplayLifecycle[], key: keyof Pick<SmartExitReplayLifecycle, "owner" | "symbol" | "regime">): Record<string, SmartExitReplayLifecycle[]> {
@@ -222,6 +413,8 @@ export function replaySmartExit(lifecycles: readonly SmartExitReplayLifecycle[],
 
 function failsStability(label: string, comparison: SmartExitComparison, options: ResolvedCalibrationOptions): string | null {
   if (comparison.totalPnlDelta < -options.maxTotalPnlSacrifice) return `${label} sacrifices too much total P&L`;
+  if (comparison.missedWinDollars > comparison.avoidedLossDollars
+      && comparison.totalPnlDelta < 0) return `${label} forfeits more through missed wins than it saves from avoided losses`;
   if (comparison.winRateDelta < -options.maxWinRateDrop) return `${label} has an unstable win rate`;
   if (comparison.averageLossDelta > 0) return `${label} increases average loss`;
   return null;

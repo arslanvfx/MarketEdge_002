@@ -39,6 +39,119 @@ export const INITIAL_SMART_EXIT_STATE: SmartExitState = Object.freeze({
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 const finite = (value: number | null): value is number => value !== null && Number.isFinite(value);
+export const SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS = 2.5;
+
+export interface SmartExitCrossingRiskInput {
+  readonly side: BinarySide;
+  readonly underlyingPrice: number;
+  readonly strikePrice: number;
+  readonly remainingSeconds: number;
+  readonly volatilityLogReturnPerSqrtSecond: number;
+  readonly minVolatilityLogReturnPerSqrtSecond: number;
+  readonly fatTailVolatilityMultiplier: number;
+  readonly adverseVelocityPerSecond: number | null;
+  readonly adverseAccelerationPerSecond2: number | null;
+  readonly continuationScore: number | null;
+  readonly confirmationLevel: number;
+  readonly previousDirectionalCount: number;
+  readonly sampleElapsedSeconds: number | null;
+  readonly debounceCount: number;
+  readonly crossingReserveFraction?: number;
+  readonly minCrossingReserveSeconds?: number;
+  readonly maxCrossingReserveSeconds?: number;
+  readonly maxSampleGapSeconds?: number;
+}
+
+export interface SmartExitCrossingRisk {
+  readonly targetAlreadyCrossed: boolean;
+  readonly projectedCrossingSeconds: number | null;
+  readonly projectedCrossBeforeExpiry: boolean | null;
+  readonly volatilityReachableBeforeExpiry: boolean;
+  readonly directionalCount: number;
+  readonly crossingTrajectoryPlausible: boolean;
+  readonly crossingRiskConfirmed: boolean;
+}
+
+/** The sole target-crossing projection used by both live policy and replay. */
+export function assessSmartExitCrossingRisk(input: SmartExitCrossingRiskInput): SmartExitCrossingRisk {
+  const remaining = Math.max(0, input.remainingSeconds);
+  const targetAlreadyCrossed = input.side === "yes"
+    ? input.underlyingPrice <= input.strikePrice
+    : input.underlyingPrice >= input.strikePrice;
+  const targetDistance = Math.abs(input.underlyingPrice - input.strikePrice);
+  const decelerationLookahead = Math.min(5, Math.max(1, remaining * 0.1));
+  const conservativeAdverseVelocity = input.adverseVelocityPerSecond != null
+    && input.adverseVelocityPerSecond > 0
+    ? input.adverseAccelerationPerSecond2 != null && input.adverseAccelerationPerSecond2 < 0
+      ? Math.max(
+          0,
+          input.adverseVelocityPerSecond
+            + input.adverseAccelerationPerSecond2 * decelerationLookahead,
+        )
+      : input.adverseVelocityPerSecond
+    : null;
+  const projectedCrossingSeconds = targetAlreadyCrossed
+    ? 0
+    : conservativeAdverseVelocity != null && conservativeAdverseVelocity > 0
+      ? targetDistance / conservativeAdverseVelocity
+      : null;
+  const projectedCrossBeforeExpiry = projectedCrossingSeconds == null
+    ? null
+    : projectedCrossingSeconds <= remaining;
+  const logTargetDistance = Math.abs(Math.log(input.underlyingPrice / input.strikePrice));
+  const volatilityReach = Math.max(
+    input.minVolatilityLogReturnPerSqrtSecond,
+    input.volatilityLogReturnPerSqrtSecond,
+  ) * Math.sqrt(remaining) * input.fatTailVolatilityMultiplier;
+  const volatilityReachableBeforeExpiry = remaining > 0
+    ? logTargetDistance <= volatilityReach
+    : targetAlreadyCrossed;
+  const continuationAdverse = input.continuationScore !== null
+    && input.continuationScore >= input.confirmationLevel;
+  const maxGap = input.maxSampleGapSeconds
+    ?? SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS;
+  const sustainedAdverseSample = input.adverseVelocityPerSecond !== null
+    && input.adverseVelocityPerSecond > 0
+    && continuationAdverse
+    && input.sampleElapsedSeconds !== null
+    && input.sampleElapsedSeconds > 0
+    && input.sampleElapsedSeconds <= maxGap;
+  const directionalCount = sustainedAdverseSample
+    ? input.previousDirectionalCount + 1
+    : 0;
+  const crossingReserveSeconds = Math.min(
+    input.maxCrossingReserveSeconds ?? 30,
+    Math.max(
+      input.minCrossingReserveSeconds ?? 5,
+      remaining * (input.crossingReserveFraction ?? 0.2),
+    ),
+  );
+  const actionableCrossingHorizon = Math.max(0, remaining - crossingReserveSeconds);
+  const crossingTrajectoryPlausible = targetAlreadyCrossed || (
+    projectedCrossingSeconds !== null
+    && projectedCrossingSeconds <= actionableCrossingHorizon
+    && volatilityReachableBeforeExpiry
+  );
+  const crossingRiskConfirmed = targetAlreadyCrossed || (
+    crossingTrajectoryPlausible
+    && directionalCount >= input.debounceCount
+    && continuationAdverse
+    && (
+      input.adverseAccelerationPerSecond2 === null
+      || input.adverseAccelerationPerSecond2 >= 0
+      || projectedCrossingSeconds! <= actionableCrossingHorizon / 2
+    )
+  );
+  return {
+    targetAlreadyCrossed,
+    projectedCrossingSeconds,
+    projectedCrossBeforeExpiry,
+    volatilityReachableBeforeExpiry,
+    directionalCount,
+    crossingTrajectoryPlausible,
+    crossingRiskConfirmed,
+  };
+}
 
 // Abramowitz-Stegun approximation; deterministic and dependency-free.
 export function normalCdf(z: number): number {
@@ -124,6 +237,9 @@ function emptyMetrics(): DecisionMetrics {
     adverseAccelerationPerSecond2: null,
     projectedCrossingSeconds: null,
     projectedCrossBeforeExpiry: null,
+    crossingRiskConfirmed: false,
+    targetAlreadyCrossed: false,
+    volatilityReachableBeforeExpiry: null,
     estimatedSaleValue: null,
     expectedHoldValue: null,
     exitEdgePerContract: null,
@@ -205,18 +321,31 @@ export function evaluateSmartExit(
     ? null
     : (adverseVelocity - state.previousAdverseVelocity) / elapsed;
   const remaining = Math.max(0, position.expirySeconds - nowSeconds);
-  const alreadyAcrossTarget = position.side === "yes"
-    ? evidence.underlyingPrice! <= position.strikePrice
-    : evidence.underlyingPrice! >= position.strikePrice;
-  const targetDistance = Math.abs(evidence.underlyingPrice! - position.strikePrice);
-  const projectedCrossingSeconds = alreadyAcrossTarget
-    ? 0
-    : adverseVelocity != null && adverseVelocity > 0
-      ? targetDistance / adverseVelocity
-      : null;
-  const projectedCrossBeforeExpiry = projectedCrossingSeconds == null
-    ? null
-    : projectedCrossingSeconds <= remaining;
+  const crossingRisk = assessSmartExitCrossingRisk({
+    side: position.side,
+    underlyingPrice: evidence.underlyingPrice!,
+    strikePrice: position.strikePrice,
+    remainingSeconds: remaining,
+    volatilityLogReturnPerSqrtSecond: evidence.volatilityLogReturnPerSqrtSecond!,
+    minVolatilityLogReturnPerSqrtSecond: config.minVolatilityLogReturnPerSqrtSecond,
+    fatTailVolatilityMultiplier: config.fatTailVolatilityMultiplier,
+    adverseVelocityPerSecond: adverseVelocity,
+    adverseAccelerationPerSecond2: adverseAcceleration,
+    continuationScore: continuation,
+    confirmationLevel: config.confirmationLevel,
+    previousDirectionalCount: state.adverseSampleCount,
+    sampleElapsedSeconds: elapsed,
+    debounceCount: config.debounceCount,
+  });
+  const {
+    targetAlreadyCrossed: alreadyAcrossTarget,
+    projectedCrossingSeconds,
+    projectedCrossBeforeExpiry,
+    volatilityReachableBeforeExpiry,
+    directionalCount,
+    crossingTrajectoryPlausible,
+    crossingRiskConfirmed,
+  } = crossingRisk;
   const entryMarket = position.marketAtEntry.winProbability;
   const marketLossFraction = finite(evidence.marketWinProbability) && entryMarket > 0
     ? clamp((entryMarket - evidence.marketWinProbability) / entryMarket, 0, 1)
@@ -267,6 +396,9 @@ export function evaluateSmartExit(
     adverseAccelerationPerSecond2: adverseAcceleration,
     projectedCrossingSeconds,
     projectedCrossBeforeExpiry,
+    crossingRiskConfirmed: false,
+    targetAlreadyCrossed: alreadyAcrossTarget,
+    volatilityReachableBeforeExpiry,
     estimatedSaleValue,
     expectedHoldValue,
     exitEdgePerContract: exitEdge,
@@ -277,13 +409,6 @@ export function evaluateSmartExit(
     executionEvidenceExpiresAtSeconds,
     degradedComponents,
   };
-  const nextBase: SmartExitState = {
-    adverseSampleCount: 0, holdUntilSeconds: state.holdUntilSeconds,
-    previousModelProbability: probability, previousObservedAtSeconds: evidence.observedAtSeconds,
-    previousUnderlyingPrice: evidence.underlyingPrice,
-    previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
-    previousAdverseVelocity: adverseVelocity,
-  };
   const fastDrop = state.previousModelProbability !== null && state.previousObservedAtSeconds !== null &&
     evidence.observedAtSeconds >= state.previousObservedAtSeconds &&
     evidence.observedAtSeconds - state.previousObservedAtSeconds <= config.hardStopWindowSeconds &&
@@ -292,53 +417,71 @@ export function evaluateSmartExit(
     && evidence.marketExecutablePrice !== null
     && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice;
   const continuationAdverse = continuation !== null && continuation >= config.confirmationLevel;
-  const collapseExit = highRisk && economicExit && (
-    projectedCrossBeforeExpiry === true
-    || continuationAdverse
-    || (evidence.marketWinProbability != null && evidence.marketWinProbability <= 0.25)
-  );
+  const sustainedAdverseSample = directionalCount > 0;
+  const nextBase: SmartExitState = {
+    adverseSampleCount: directionalCount,
+    holdUntilSeconds: state.holdUntilSeconds,
+    previousModelProbability: probability,
+    previousObservedAtSeconds: evidence.observedAtSeconds,
+    previousUnderlyingPrice: evidence.underlyingPrice,
+    previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
+    previousAdverseVelocity: adverseVelocity,
+  };
+  const shared = { ...common, crossingRiskConfirmed };
+  const probabilityDeteriorated = drop !== null && drop < -threshold;
+  const marketDeteriorated = marketLossFraction !== null && marketLossFraction >= 0.25;
+  const meaningfulDeterioration = alreadyAcrossTarget
+    || probabilityDeteriorated || fastDrop || highRisk || marketDeteriorated;
+  const exitReady = crossingRiskConfirmed
+    && meaningfulDeterioration
+    && (alreadyAcrossTarget || marketDeteriorated)
+    && economicExit
+    && executionEvidenceReady;
   const mayExecute = config.mode === "live-exit" && executionEvidenceReady;
-  if (collapseExit || (fastDrop && economicExit)) {
+  if (exitReady) {
     return {
       disposition: "EXIT_SIGNAL",
-      reason: collapseExit ? "rapid value loss with adverse crossing risk; selling dominates hold value" : "catastrophic probability drop; selling dominates hold value",
-      mayExecuteExit: mayExecute, riskStage: "exit", nextState: nextBase, ...common,
+      reason: alreadyAcrossTarget
+        ? "target crossed with fresh full-liquidity sale evidence"
+        : "sustained adverse move can cross target before expiry; fresh full-liquidity sale dominates hold value",
+      mayExecuteExit: mayExecute, riskStage: "exit", nextState: nextBase, ...shared,
     };
   }
-  if (highRisk || fastDrop) {
+  if (meaningfulDeterioration && crossingTrajectoryPlausible) {
     return {
       disposition: "PREPARE_EXIT",
-      reason: economicExit
-        ? "rapid loss detected; awaiting adverse crossing confirmation"
-        : "rapid loss detected; current executable sale does not beat hold value",
-      mayExecuteExit: false, riskStage: "prepare_exit", nextState: nextBase, ...common,
+      reason: !crossingRiskConfirmed
+        ? "adverse move is near enough to threaten the target; awaiting sustained direction"
+        : !executionEvidenceReady
+          ? "crossing risk confirmed; awaiting fresh full-position executable liquidity"
+          : !economicExit
+            ? "crossing risk confirmed; current executable sale does not beat hold value"
+            : "crossing risk confirmed; awaiting material Kalshi deterioration",
+      mayExecuteExit: false, riskStage: "prepare_exit", nextState: nextBase, ...shared,
     };
   }
   if (nowSeconds < state.holdUntilSeconds) {
     return {
       disposition: "HOLD", reason: "hysteresis active", mayExecuteExit: false,
-      riskStage: "hold", nextState: nextBase, ...common,
+      riskStage: "hold", nextState: nextBase, ...shared,
     };
   }
-  const adverse = drop !== null && drop < -threshold && continuationAdverse;
-  const count = adverse ? state.adverseSampleCount + 1 : 0;
-  const nextState: SmartExitState = { ...nextBase, adverseSampleCount: count, holdUntilSeconds: adverse ? state.holdUntilSeconds : nowSeconds + config.hysteresisSeconds };
-  if (adverse && count >= config.debounceCount) {
-    if (economicExit) {
-      return {
-        disposition: "EXIT_SIGNAL", reason: "confirmed adverse probability decay; selling dominates hold value",
-        mayExecuteExit: mayExecute, riskStage: "exit", nextState, ...common,
-      };
-    }
-    return {
-      disposition: "PREPARE_EXIT", reason: "adverse decay confirmed but current executable sale does not beat hold value",
-      mayExecuteExit: false, riskStage: "prepare_exit", nextState, ...common,
-    };
-  }
-  const watch = (marketLossFraction != null && marketLossFraction >= 0.25) || adverse;
+  const nextState: SmartExitState = {
+    ...nextBase,
+    holdUntilSeconds: sustainedAdverseSample
+      ? state.holdUntilSeconds
+      : nowSeconds + config.hysteresisSeconds,
+  };
+  const watch = marketDeteriorated || probabilityDeteriorated || fastDrop || highRisk || sustainedAdverseSample;
   return {
     disposition: watch ? "WATCH" : "HOLD",
-    reason: adverse ? "awaiting debounce confirmation" : watch ? "value deterioration under review" : "within tolerance or unconfirmed",
-    mayExecuteExit: false, riskStage: watch ? "watch" : "hold", nextState, ...common,
+    reason: crossingTrajectoryPlausible
+      ? "crossing trajectory is forming but deterioration is not yet actionable"
+      : marketDeteriorated || highRisk
+        ? "Kalshi repricing is under review; underlying target crossing is not plausible"
+        : sustainedAdverseSample
+          ? "adverse movement remains too far from target to justify preparing an exit"
+          : "within tolerance or unconfirmed",
+    mayExecuteExit: false, riskStage: watch ? "watch" : "hold", nextState, ...shared,
   };
 }
