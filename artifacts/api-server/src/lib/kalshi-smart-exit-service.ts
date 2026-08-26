@@ -18,6 +18,7 @@ import { KalshiSmartExitEvidenceCollector } from "./kalshi-smart-exit-evidence.t
 import {
   applyValidatedSmartExitParameterVersion,
   claimSmartExitRequest,
+  deleteSmartExitHistory,
   getValidatedSmartExitParameterReport,
   getSmartExitReplayReportByIdentity,
   getSmartExitLifecycle,
@@ -42,6 +43,7 @@ import {
   saveSmartExitConfig,
   upsertSmartExitPositionState,
   upsertSmartExitLifecycle,
+  type SmartExitHistoryDeleteCounts,
 } from "./kalshi-smart-exit-db.ts";
 import {
   buildCrossingRiskReplayLifecycles,
@@ -1102,6 +1104,16 @@ export function getSmartExitStatus(): {
 
 export async function getSmartExitHistory(limit = 50): Promise<SmartExitEvaluationRecord[]> {
   return listSmartExitEvaluations({ limit: Math.min(500, Math.max(1, limit)) });
+}
+
+export async function resetSmartExitHistory(): Promise<SmartExitHistoryDeleteCounts> {
+  const deleted = await deleteSmartExitHistory();
+  states.clear();
+  modelEntryBaselines.clear();
+  latestEvaluations.clear();
+  latestValidEvaluations.clear();
+  lastEvidencePersistenceMs.clear();
+  return deleted;
 }
 
 export async function getSmartExitLifecycleLedger(limit = 100): Promise<{

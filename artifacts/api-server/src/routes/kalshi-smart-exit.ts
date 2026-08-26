@@ -9,11 +9,13 @@ import {
   getSmartExitLifecycleLedger,
   getSmartExitReplayReports,
   getSmartExitStatus,
+  resetSmartExitHistory,
   updateSmartExitConfig,
 } from "../lib/kalshi-smart-exit-service.ts";
 import type { SmartExitOwnerKind } from "../lib/kalshi-smart-exit-types.ts";
 
 const router = Router();
+export const SMART_EXIT_HISTORY_RESET_CONFIRMATION = "RESET SMART EXIT HISTORY";
 
 function requireSmartExitOperator(
   req: Request,
@@ -94,6 +96,27 @@ router.get("/crypto/smart-exit/replay", async (req, res): Promise<void> => {
     res.status(500).json({ error: "Failed to fetch Smart Exit replay reports" });
   }
 });
+
+router.post(
+  "/crypto/smart-exit/history/reset",
+  requireSmartExitOperator,
+  async (req, res): Promise<void> => {
+    if (req.body?.confirmation !== SMART_EXIT_HISTORY_RESET_CONFIRMATION) {
+      res.status(400).json({
+        ok: false,
+        error: `confirmation must exactly equal "${SMART_EXIT_HISTORY_RESET_CONFIRMATION}"`,
+      });
+      return;
+    }
+    try {
+      const deleted = await resetSmartExitHistory();
+      res.json({ ok: true, deleted });
+    } catch (error) {
+      req.log.error({ error }, "Failed to reset Smart Exit history");
+      res.status(500).json({ ok: false, error: "Failed to reset Smart Exit history" });
+    }
+  },
+);
 
 router.post(
   "/crypto/smart-exit/replay/calibrate",

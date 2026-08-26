@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Shield, AlertTriangle, PowerOff } from "lucide-react";
+import { Shield, AlertTriangle, PowerOff, Trash2 } from "lucide-react";
 import { API_BASE, fmt$, fmtDateTime } from "./utils";
 import type { SmartExitStatus, SmartExitEvaluation, SmartExitReplayReport, SmartExitCapability, SmartExitConfig, SmartExitComponentHealth, SmartExitLifecycleLedger, SmartExitSensitivity } from "./types";
 
@@ -9,6 +9,7 @@ const fmtConf = (n: number | undefined | null) => n != null ? `${(n * 100).toFix
 const sensitivityLabel = (value: SmartExitSensitivity | undefined) =>
   value === "more_aggressive" ? "More Aggressive"
     : value === "less_aggressive" ? "Less Aggressive" : "Default";
+const RESET_CONFIRMATION = "RESET SMART EXIT HISTORY";
 const fmtTime = (iso: string) => {
   if (!iso) return "—";
   try {
@@ -105,6 +106,11 @@ export function BotSmartExitPanel({ authPost }: Props) {
   const { getToken, isLoaded: authLoaded } = useAuth();
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetFeedback, setResetFeedback] = useState<{
+    kind: "success" | "error";
+    text: string;
+  } | null>(null);
   const [applyForm, setApplyForm] = useState({ symbol: "", owner: "", version: "" });
 
   const { data: capability } = useQuery<SmartExitCapability>({
@@ -169,6 +175,103 @@ export function BotSmartExitPanel({ authPost }: Props) {
       setApplyForm({ symbol: "", owner: "", version: "" });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function resetExitHistory() {
+    if (!capability?.canManage || busy || resetBusy) return;
+    const confirmation = window.prompt(
+      "This permanently deletes everything shown in Exit Lifecycle & Effectiveness, "
+      + "including all per-mode replay and calibration statistics.\n\n"
+      + "It does not delete Smart Exit settings/applied versions, positions, bets, orders, "
+      + "or execution requests.\n\n"
+      + `Type ${RESET_CONFIRMATION} to continue:`,
+    );
+    if (confirmation !== RESET_CONFIRMATION) {
+      if (confirmation !== null) {
+        setResetFeedback({ kind: "error", text: "Reset cancelled: confirmation text did not match." });
+      }
+      return;
+    }
+    setResetBusy(true);
+    setResetFeedback(null);
+    try {
+      const result = await authPost("/crypto/smart-exit/history/reset", {
+        confirmation: RESET_CONFIRMATION,
+      }) as {
+        ok?: boolean;
+        deleted?: Record<string, number>;
+        error?: string;
+      };
+      if (!result.ok || !result.deleted) {
+        throw new Error(result.error ?? "The server did not confirm the history reset.");
+      }
+      await Promise.all([
+        qc.cancelQueries({ queryKey: ["smart-exit-lifecycle"] }),
+        qc.cancelQueries({ queryKey: ["smart-exit-replay"] }),
+        qc.cancelQueries({ queryKey: ["smart-exit-status"] }),
+      ]);
+      const emptyAccounting = {
+        triggered: 0,
+        settled: 0,
+        scoreable: 0,
+        pending: 0,
+        helped: 0,
+        harmed: 0,
+        grossMoneySaved: 0,
+        grossMoneyForfeited: 0,
+        netValue: 0,
+      };
+      qc.setQueryData<SmartExitLifecycleLedger>(["smart-exit-lifecycle"], {
+        records: [],
+        coverage: [],
+        summary: {
+          triggered: 0,
+          sold: 0,
+          settled: 0,
+          helped: 0,
+          harmed: 0,
+          grossMoneySaved: 0,
+          grossMoneyForfeited: 0,
+          netValue: 0,
+          scoreable: 0,
+          pending: 0,
+          coverageTotal: 0,
+          unavailable: 0,
+          totalValueSaved: 0,
+          actual: emptyAccounting,
+          shadowObserved: emptyAccounting,
+        },
+      });
+      qc.setQueryData<{ reports: SmartExitReplayReport[] }>(
+        ["smart-exit-replay"],
+        { reports: [] },
+      );
+      qc.setQueryData<SmartExitStatus>(
+        ["smart-exit-status"],
+        current => current ? {
+          ...current,
+          evaluations: [],
+          health: { ...current.health, activeEvaluations: 0 },
+        } : current,
+      );
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["smart-exit-lifecycle"] }),
+        qc.invalidateQueries({ queryKey: ["smart-exit-replay"] }),
+        qc.invalidateQueries({ queryKey: ["smart-exit-status"] }),
+      ]);
+      const total = Object.values(result.deleted).reduce((sum, count) => sum + count, 0);
+      setResetFeedback({
+        kind: "success",
+        text: `Smart Exit history cleared (${total} historical rows deleted).`,
+      });
+    } catch (error) {
+      setResetFeedback({
+        kind: "error",
+        text: error instanceof Error ? error.message : "Smart Exit history could not be reset.",
+      });
+    } finally {
+      setResetBusy(false);
     }
   }
 
@@ -465,7 +568,34 @@ export function BotSmartExitPanel({ authPost }: Props) {
 
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(420px,1fr)] divide-y xl:divide-y-0 xl:divide-x divide-white/10">
         <div className="flex flex-col h-full bg-[#0d1017]">
-          <SectionHeader title={`Exit Lifecycle & Effectiveness · ${lifecycle?.summary.triggered ?? 0} triggered · ${lifecycle?.summary.sold ?? 0} sold · ${lifecycle?.summary.settled ?? 0} settled`} />
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-white/[0.02] px-4 py-2">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              Exit Lifecycle &amp; Effectiveness · {lifecycle?.summary.triggered ?? 0} triggered · {lifecycle?.summary.sold ?? 0} sold · {lifecycle?.summary.settled ?? 0} settled
+            </div>
+            <button
+              type="button"
+              data-testid="button-reset-smart-exit-history"
+              onClick={resetExitHistory}
+              disabled={busy || resetBusy || !capability?.canManage}
+              className="flex items-center gap-1.5 rounded-md border border-red-500/40 bg-red-950/30 px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider text-red-400 transition-colors hover:bg-red-900/40 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 className="h-3 w-3" />
+              {resetBusy ? "Resetting…" : "Reset Exit History"}
+            </button>
+          </div>
+          {resetFeedback && (
+            <div
+              data-testid="status-reset-smart-exit-history"
+              role="status"
+              className={`border-b px-4 py-2 text-[10px] font-mono ${
+                resetFeedback.kind === "success"
+                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                  : "border-red-500/20 bg-red-500/10 text-red-400"
+              }`}
+            >
+              {resetFeedback.text}
+            </div>
+          )}
           <div className="border-b border-white/10 bg-emerald-950/10 p-4">
             <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
               <div>

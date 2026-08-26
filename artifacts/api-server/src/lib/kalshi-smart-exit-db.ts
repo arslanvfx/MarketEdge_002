@@ -73,6 +73,14 @@ export interface SmartExitReplaySource {
   evaluations: SmartExitEvaluationRecord[];
 }
 
+export interface SmartExitHistoryDeleteCounts {
+  kalshi_smart_exit_lifecycles: number;
+  kalshi_smart_exit_evaluations: number;
+  kalshi_smart_exit_position_state: number;
+  kalshi_smart_exit_recovery_studies: number;
+  kalshi_smart_exit_replay_reports: number;
+}
+
 let migrated = false;
 let migrationPromise: Promise<void> | null = null;
 const SMART_EXIT_REPLAY_MAX_POSITIONS = 50;
@@ -201,6 +209,37 @@ async function ensureMigrated(): Promise<void> {
     throw error;
   });
   await migrationPromise;
+}
+
+/**
+ * Destructively clears only historical Smart Exit analysis. Config (including
+ * applied versions), execution requests, owner positions, bets, and orders are
+ * deliberately outside this transaction.
+ */
+export async function deleteSmartExitHistory(): Promise<SmartExitHistoryDeleteCounts> {
+  await ensureMigrated();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const lifecycles = await client.query("DELETE FROM kalshi_smart_exit_lifecycles");
+    const evaluations = await client.query("DELETE FROM kalshi_smart_exit_evaluations");
+    const positionState = await client.query("DELETE FROM kalshi_smart_exit_position_state");
+    const recoveryStudies = await client.query("DELETE FROM kalshi_smart_exit_recovery_studies");
+    const replayReports = await client.query("DELETE FROM kalshi_smart_exit_replay_reports");
+    await client.query("COMMIT");
+    return {
+      kalshi_smart_exit_lifecycles: lifecycles.rowCount ?? 0,
+      kalshi_smart_exit_evaluations: evaluations.rowCount ?? 0,
+      kalshi_smart_exit_position_state: positionState.rowCount ?? 0,
+      kalshi_smart_exit_recovery_studies: recoveryStudies.rowCount ?? 0,
+      kalshi_smart_exit_replay_reports: replayReports.rowCount ?? 0,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function loadSmartExitConfig(): Promise<SmartExitConfig> {
