@@ -12,6 +12,7 @@ import {
   INITIAL_SMART_EXIT_STATE,
   evaluateSmartExit,
   modelWinProbability,
+  resolveSmartExitSensitivity,
 } from "./kalshi-smart-exit-policy.ts";
 import { KalshiSmartExitEvidenceCollector } from "./kalshi-smart-exit-evidence.ts";
 import {
@@ -371,13 +372,20 @@ function currentVersion(position: SmartExitPosition): SmartExitAppliedVersion | 
 
 function effectiveConfigForPosition(position: SmartExitPosition): SmartExitConfig {
   const applied = currentVersion(position);
-  if (applied == null) return config;
+  const selected = resolveSmartExitSensitivity(config.sensitivity);
+  if (applied == null) return {
+    ...config,
+    sensitivity: selected.sensitivity,
+    debounceCount: selected.parameters.debounceCount,
+    confirmationLevel: selected.parameters.confirmationLevel,
+  };
   if (!hasCompleteSmartExitParameterSnapshot(applied)) {
     return { ...config, mode: "shadow" };
   }
   const parameters = applied.parameters;
   return {
     ...config,
+    sensitivity: parameters.sensitivity,
     debounceCount: parameters.debounceCount,
     confirmationLevel: parameters.confirmationLevel,
     minExitEdge: parameters.minExitEdge,
@@ -743,6 +751,7 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
       ? new Date(decision.nextState.holdUntilSeconds * 1_000).toISOString()
       : null,
     parameterVersion: currentVersion(position)?.version ?? null,
+    effectiveSensitivity: effectiveConfig.sensitivity,
     executed: false,
     executionStatus: "not_requested",
     recoveryStudy: decision.disposition === "EXIT_SIGNAL"
@@ -884,7 +893,14 @@ function startScheduler(): void {
 
 export async function initSmartExit(): Promise<void> {
   await runSmartExitMigrations();
-  config = { ...DEFAULT_SMART_EXIT_CONFIG, ...(await loadSmartExitConfig()) };
+  const loaded = { ...DEFAULT_SMART_EXIT_CONFIG, ...(await loadSmartExitConfig()) };
+  const selected = resolveSmartExitSensitivity(loaded.sensitivity);
+  config = {
+    ...loaded,
+    sensitivity: selected.sensitivity,
+    debounceCount: selected.parameters.debounceCount,
+    confirmationLevel: selected.parameters.confirmationLevel,
+  };
   const persistedStates = await listSmartExitPositionStates();
   for (const persisted of persistedStates) {
     modelEntryBaselines.set(
@@ -941,7 +957,7 @@ function boundedNumber(
 
 export async function updateSmartExitConfig(patch: Record<string, unknown>): Promise<SmartExitConfig> {
   const allowed = new Set([
-    "mode", "baseProbabilityDropThreshold", "confirmationLevel", "debounceCount",
+    "mode", "sensitivity", "baseProbabilityDropThreshold",
     "hysteresisSeconds", "hardStopProbabilityDrop", "hardStopWindowSeconds",
     "maxEvidenceAgeSeconds", "minVolatilityLogReturnPerSqrtSecond",
     "fatTailVolatilityMultiplier", "probabilityShrinkage", "rapidLossRatio", "minExitEdge",
@@ -949,6 +965,17 @@ export async function updateSmartExitConfig(patch: Record<string, unknown>): Pro
   ]);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`unsupported config field: ${key}`);
   const next: SmartExitConfig = { ...config };
+  if (patch.sensitivity !== undefined) {
+    if (!["more_aggressive", "default", "less_aggressive"].includes(String(patch.sensitivity))) {
+      throw new Error("invalid sensitivity");
+    }
+    const selected = resolveSmartExitSensitivity(patch.sensitivity);
+    Object.assign(next, {
+      sensitivity: selected.sensitivity,
+      debounceCount: selected.parameters.debounceCount,
+      confirmationLevel: selected.parameters.confirmationLevel,
+    });
+  }
   if (patch.mode !== undefined) {
     const mode = patch.mode;
     if (!["off", "shadow", "paper-exit", "live-exit"].includes(String(mode))) throw new Error("invalid mode");
@@ -1230,12 +1257,14 @@ export async function calibrateSmartExitFromDurableHistory(params: {
       };
     });
     const evaluations = group.flatMap((source) => source.evaluations);
+    const sensitivity = resolveSmartExitSensitivity(config.sensitivity);
     const candidateParameters = {
-      debounceCount: config.debounceCount,
-      confirmationLevel: config.confirmationLevel,
-      minMarketLossFraction: 0.25,
+      sensitivity: sensitivity.sensitivity,
+      debounceCount: sensitivity.parameters.debounceCount,
+      confirmationLevel: sensitivity.parameters.confirmationLevel,
+      minMarketLossFraction: sensitivity.parameters.minMarketLossFraction,
       minExitEdge: config.minExitEdge,
-      crossingReserveFraction: 0.2,
+      crossingReserveFraction: sensitivity.parameters.crossingReserveFraction,
       minCrossingReserveSeconds: 5,
       maxCrossingReserveSeconds: 30,
       deepLossHoldThreshold: config.deepLossHoldThreshold,
@@ -1254,6 +1283,7 @@ export async function calibrateSmartExitFromDurableHistory(params: {
     });
     const version = [
       "crossing-risk-v2",
+      sensitivity.sensitivity,
       `d${candidateParameters.debounceCount}`,
       `c${candidateParameters.confirmationLevel.toFixed(2)}`,
       `m${candidateParameters.minMarketLossFraction.toFixed(2)}`,
@@ -1318,6 +1348,8 @@ export async function applySmartExitParameterVersion(params: {
     reportParameters == null
     || !Number.isFinite(reportParameters.debounceCount)
     || !Number.isFinite(reportParameters.confirmationLevel)
+    || !Number.isFinite(reportParameters.minMarketLossFraction)
+    || !Number.isFinite(reportParameters.crossingReserveFraction)
     || !Number.isFinite(reportParameters.minExitEdge)
     || !Number.isFinite(reportParameters.deepLossHoldThreshold)
     || !Number.isFinite(reportParameters.terminalLossHoldThreshold)
@@ -1325,6 +1357,19 @@ export async function applySmartExitParameterVersion(params: {
   ) {
     throw new Error("validated report lacks a complete immutable parameter snapshot");
   }
+  const reportSensitivity = reportParameters.sensitivity;
+  if (
+    reportSensitivity !== "more_aggressive"
+    && reportSensitivity !== "default"
+    && reportSensitivity !== "less_aggressive"
+  ) throw new Error("validated report lacks a valid frozen sensitivity");
+  const canonical = resolveSmartExitSensitivity(reportSensitivity);
+  if (
+    reportParameters.debounceCount !== canonical.parameters.debounceCount
+    || reportParameters.confirmationLevel !== canonical.parameters.confirmationLevel
+    || reportParameters.minMarketLossFraction !== canonical.parameters.minMarketLossFraction
+    || reportParameters.crossingReserveFraction !== canonical.parameters.crossingReserveFraction
+  ) throw new Error("validated report sensitivity thresholds are malformed");
   const applied: SmartExitAppliedVersion = {
     owner: params.owner,
     symbol,
@@ -1332,8 +1377,11 @@ export async function applySmartExitParameterVersion(params: {
     liveEligible: payload.liveEligible === true,
     appliedAt: new Date().toISOString(),
     parameters: {
+      sensitivity: reportSensitivity,
       debounceCount: Math.floor(reportParameters.debounceCount!),
       confirmationLevel: reportParameters.confirmationLevel!,
+      minMarketLossFraction: reportParameters.minMarketLossFraction!,
+      crossingReserveFraction: reportParameters.crossingReserveFraction!,
       minExitEdge: reportParameters.minExitEdge!,
       deepLossHoldThreshold: reportParameters.deepLossHoldThreshold!,
       terminalLossHoldThreshold: reportParameters.terminalLossHoldThreshold!,

@@ -4,12 +4,48 @@ import type {
   SmartExitDecision,
   SmartExitEvidence,
   SmartExitPosition,
+  SmartExitSensitivity,
   SmartExitState,
 } from "./kalshi-smart-exit-types.ts";
+
+export interface SmartExitSensitivityParameters {
+  readonly debounceCount: number;
+  readonly confirmationLevel: number;
+  readonly minMarketLossFraction: number;
+  readonly crossingReserveFraction: number;
+}
+
+const SMART_EXIT_SENSITIVITY_PRESETS: Readonly<Record<SmartExitSensitivity, SmartExitSensitivityParameters>> =
+  Object.freeze({
+    more_aggressive: Object.freeze({
+      debounceCount: 2, confirmationLevel: 0.20,
+      minMarketLossFraction: 0.15, crossingReserveFraction: 0.10,
+    }),
+    default: Object.freeze({
+      debounceCount: 3, confirmationLevel: 0.35,
+      minMarketLossFraction: 0.25, crossingReserveFraction: 0.20,
+    }),
+    less_aggressive: Object.freeze({
+      debounceCount: 4, confirmationLevel: 0.50,
+      minMarketLossFraction: 0.35, crossingReserveFraction: 0.30,
+    }),
+  });
+
+/** Canonical immutable resolver. Unknown persisted values safely fall back to Default. */
+export function resolveSmartExitSensitivity(value: unknown): Readonly<{
+  sensitivity: SmartExitSensitivity;
+  parameters: SmartExitSensitivityParameters;
+}> {
+  const sensitivity: SmartExitSensitivity =
+    value === "more_aggressive" || value === "less_aggressive" || value === "default"
+      ? value : "default";
+  return Object.freeze({ sensitivity, parameters: SMART_EXIT_SENSITIVITY_PRESETS[sensitivity] });
+}
 
 export const DEFAULT_SMART_EXIT_CONFIG: SmartExitConfig = Object.freeze({
   enabled: false,
   mode: "shadow",
+  sensitivity: "default",
   totalWindowSeconds: 900,
   maxEvidenceAgeSeconds: 3,
   minVolatilityLogReturnPerSqrtSecond: 0.000001,
@@ -330,6 +366,7 @@ export function evaluateSmartExit(
   config: SmartExitConfig,
   nowSeconds: number,
 ): SmartExitDecision {
+  const sensitivity = resolveSmartExitSensitivity(config.sensitivity);
   if (!config.enabled || config.mode === "off") {
     return {
       disposition: "OFF", reason: "smart exit is disabled", mayExecuteExit: false,
@@ -374,10 +411,11 @@ export function evaluateSmartExit(
     adverseVelocityPerSecond: adverseVelocity,
     adverseAccelerationPerSecond2: adverseAcceleration,
     continuationScore: continuation,
-    confirmationLevel: config.confirmationLevel,
+    confirmationLevel: sensitivity.parameters.confirmationLevel,
     previousDirectionalCount: state.adverseSampleCount,
     sampleElapsedSeconds: elapsed,
-    debounceCount: config.debounceCount,
+    debounceCount: sensitivity.parameters.debounceCount,
+    crossingReserveFraction: resolveSmartExitSensitivity(config.sensitivity).parameters.crossingReserveFraction,
   });
   const {
     targetAlreadyCrossed: alreadyAcrossTarget,
@@ -468,7 +506,8 @@ export function evaluateSmartExit(
   const economicExit = minimumWinningPrice !== null
     && evidence.marketExecutablePrice !== null
     && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice;
-  const continuationAdverse = continuation !== null && continuation >= config.confirmationLevel;
+  const continuationAdverse = continuation !== null
+    && continuation >= sensitivity.parameters.confirmationLevel;
   const sustainedAdverseSample = directionalCount > 0;
   const nextBase: SmartExitState = {
     adverseSampleCount: directionalCount,
@@ -481,7 +520,8 @@ export function evaluateSmartExit(
   };
   const shared = { ...common, crossingRiskConfirmed };
   const probabilityDeteriorated = drop !== null && drop < -threshold;
-  const marketDeteriorated = marketLossFraction !== null && marketLossFraction >= 0.25;
+  const marketDeteriorated = marketLossFraction !== null
+    && marketLossFraction >= sensitivity.parameters.minMarketLossFraction;
   const meaningfulDeterioration = alreadyAcrossTarget
     || probabilityDeteriorated || fastDrop || highRisk || marketDeteriorated;
   const exitReady = crossingRiskConfirmed

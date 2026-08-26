@@ -38,8 +38,11 @@ const version: SmartExitAppliedVersion = {
   liveEligible: true,
   appliedAt: "2026-08-26T12:00:00.000Z",
   parameters: {
+    sensitivity: "default",
     debounceCount: DEFAULT_SMART_EXIT_CONFIG.debounceCount,
     confirmationLevel: DEFAULT_SMART_EXIT_CONFIG.confirmationLevel,
+    minMarketLossFraction: 0.25,
+    crossingReserveFraction: 0.20,
     minExitEdge: DEFAULT_SMART_EXIT_CONFIG.minExitEdge,
     deepLossHoldThreshold: DEFAULT_SMART_EXIT_CONFIG.deepLossHoldThreshold,
     terminalLossHoldThreshold: DEFAULT_SMART_EXIT_CONFIG.terminalLossHoldThreshold,
@@ -79,6 +82,13 @@ test("live execution requires exact scope and live-eligible applied version", ()
   assert.equal(authorizeSmartExitExecution({
     config: configured("live-exit"), position, recommendation: "exit",
     appliedVersion: legacyVersion,
+  }).authorized, false);
+  assert.equal(authorizeSmartExitExecution({
+    config: configured("live-exit"), position, recommendation: "exit",
+    appliedVersion: {
+      ...version,
+      parameters: { ...version.parameters!, debounceCount: 2 },
+    },
   }).authorized, false);
 });
 

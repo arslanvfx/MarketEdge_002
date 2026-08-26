@@ -3,11 +3,12 @@
  * This module scores supplied, settled lifecycles only.  It neither reads
  * persistence nor changes a Smart Exit configuration.
  */
-import type { SmartExitEvaluationRecord } from "./kalshi-smart-exit-types.ts";
+import type { SmartExitEvaluationRecord, SmartExitSensitivity } from "./kalshi-smart-exit-types.ts";
 import {
   assessSmartExitCrossingRisk,
   assessSmartExitDeepLossHold,
   SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
+  resolveSmartExitSensitivity,
 } from "./kalshi-smart-exit-policy.ts";
 
 export type SmartExitReplayOwner = "regular" | "scalper";
@@ -117,6 +118,7 @@ export interface SmartExitDurableSettlement {
 }
 
 export interface SmartExitCrossingCandidateOptions {
+  readonly sensitivity?: SmartExitSensitivity;
   readonly debounceCount?: number;
   readonly confirmationLevel?: number;
   readonly minMarketLossFraction?: number;
@@ -254,12 +256,13 @@ export function buildCrossingRiskReplayLifecycles(
   evaluations: readonly SmartExitEvaluationRecord[],
   options: SmartExitCrossingCandidateOptions = {},
 ): SmartExitReplayLifecycle[] {
+  const preset = resolveSmartExitSensitivity(options.sensitivity);
   const settings = {
-    debounceCount: options.debounceCount ?? 3,
-    confirmationLevel: options.confirmationLevel ?? 0.35,
-    minMarketLossFraction: options.minMarketLossFraction ?? 0.25,
+    debounceCount: options.debounceCount ?? preset.parameters.debounceCount,
+    confirmationLevel: options.confirmationLevel ?? preset.parameters.confirmationLevel,
+    minMarketLossFraction: options.minMarketLossFraction ?? preset.parameters.minMarketLossFraction,
     minExitEdge: options.minExitEdge ?? 0.01,
-    crossingReserveFraction: options.crossingReserveFraction ?? 0.2,
+    crossingReserveFraction: options.crossingReserveFraction ?? preset.parameters.crossingReserveFraction,
     minCrossingReserveSeconds: options.minCrossingReserveSeconds ?? 5,
     maxCrossingReserveSeconds: options.maxCrossingReserveSeconds ?? 30,
     fatTailVolatilityMultiplier: options.fatTailVolatilityMultiplier ?? 1.25,

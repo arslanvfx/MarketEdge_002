@@ -1340,11 +1340,14 @@ export interface ScalperContrarianReport {
 export interface SmartExitConfig {
   enabled: boolean;
   mode: "off" | "shadow" | "paper-exit" | "live-exit";
-  appliedVersions?: Record<string, { owner: string; symbol: string; version: string; liveEligible: boolean; appliedAt: string }>;
+  sensitivity: SmartExitSensitivity;
+  appliedVersions?: Record<string, { owner: string; symbol: string; version: string; liveEligible: boolean; appliedAt: string; parameters?: { sensitivity: SmartExitSensitivity } }>;
   deepLossHoldThreshold?: number;
   terminalLossHoldThreshold?: number;
   deepLossRecoveryMinSeconds?: number;
 }
+
+export type SmartExitSensitivity = "more_aggressive" | "default" | "less_aggressive";
 
 export interface SmartExitComponentHealth {
   status: "fresh" | "delayed" | "quiet" | "unavailable";
@@ -1391,6 +1394,7 @@ export interface SmartExitEvaluation {
   owner?: string;
   executed?: boolean;
   executionStatus?: "not_requested" | "requested" | "filled" | "blocked" | "unknown";
+  effectiveSensitivity?: SmartExitSensitivity;
 }
 
 export interface SmartExitHealth {

@@ -2,7 +2,7 @@
 // writes to either the regular bot or scalper schemas.
 import { pool } from "@workspace/db";
 import { logger } from "./logger.ts";
-import { DEFAULT_SMART_EXIT_CONFIG } from "./kalshi-smart-exit-policy.ts";
+import { DEFAULT_SMART_EXIT_CONFIG, resolveSmartExitSensitivity } from "./kalshi-smart-exit-policy.ts";
 import type {
   SmartExitConfig,
   SmartExitEvaluationRecord,
@@ -206,7 +206,15 @@ async function ensureMigrated(): Promise<void> {
 export async function loadSmartExitConfig(): Promise<SmartExitConfig> {
   await ensureMigrated();
   const result = await pool.query(`SELECT config FROM kalshi_smart_exit_config WHERE id = 'singleton'`);
-  return (result.rows[0]?.config ?? DEFAULT_SMART_EXIT_CONFIG) as SmartExitConfig;
+  const persisted = (result.rows[0]?.config ?? {}) as Partial<SmartExitConfig>;
+  const selected = resolveSmartExitSensitivity(persisted.sensitivity);
+  return {
+    ...DEFAULT_SMART_EXIT_CONFIG,
+    ...persisted,
+    sensitivity: selected.sensitivity,
+    debounceCount: selected.parameters.debounceCount,
+    confirmationLevel: selected.parameters.confirmationLevel,
+  };
 }
 
 export async function saveSmartExitConfig(config: SmartExitConfig): Promise<void> {

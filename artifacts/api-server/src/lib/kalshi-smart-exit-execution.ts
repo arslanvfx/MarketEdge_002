@@ -4,6 +4,7 @@ import type {
   SmartExitOwnerKind,
   SmartExitPosition,
 } from "./kalshi-smart-exit-types.ts";
+import { resolveSmartExitSensitivity } from "./kalshi-smart-exit-policy.ts";
 
 export function computeSmartExitExecutionLimit(params: {
   side: "yes" | "no";
@@ -86,10 +87,25 @@ export function hasCompleteSmartExitParameterSnapshot(
   parameters: NonNullable<SmartExitAppliedVersion["parameters"]>;
 } {
   const parameters = appliedVersion.parameters;
+  const canonical = parameters == null ? null : resolveSmartExitSensitivity(parameters.sensitivity);
   return parameters != null
     && Number.isInteger(parameters.debounceCount)
     && parameters.debounceCount >= 1
+    && (parameters.sensitivity === "more_aggressive"
+      || parameters.sensitivity === "default"
+      || parameters.sensitivity === "less_aggressive")
     && Number.isFinite(parameters.confirmationLevel)
+    && parameters.confirmationLevel >= 0
+    && Number.isFinite(parameters.minMarketLossFraction)
+    && parameters.minMarketLossFraction >= 0
+    && parameters.minMarketLossFraction <= 1
+    && Number.isFinite(parameters.crossingReserveFraction)
+    && parameters.crossingReserveFraction >= 0
+    && parameters.crossingReserveFraction <= 1
+    && parameters.debounceCount === canonical!.parameters.debounceCount
+    && parameters.confirmationLevel === canonical!.parameters.confirmationLevel
+    && parameters.minMarketLossFraction === canonical!.parameters.minMarketLossFraction
+    && parameters.crossingReserveFraction === canonical!.parameters.crossingReserveFraction
     && Number.isFinite(parameters.minExitEdge)
     && parameters.minExitEdge >= 0
     && Number.isFinite(parameters.deepLossHoldThreshold)

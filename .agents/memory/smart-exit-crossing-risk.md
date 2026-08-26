@@ -13,6 +13,8 @@ Deep-loss protection is based on fresh full-position executable sale proceeds ve
 
 Live authorization is per owner and symbol. Any applied version used for execution must carry the immutable parameter snapshot that replay validated; label-only legacy versions fail closed. Different symbols may be approved or rejected independently, but do not introduce a global target-cross delay from sparse outcomes.
 
+Sensitivity is exposed only through three canonical presets so crossing thresholds cannot drift into invalid combinations. More Aggressive uses 2 confirmations, 0.20 continuation, 0.15 market-loss confirmation, and 0.10 crossing reserve; Default preserves 3/0.35/0.25/0.20; Less Aggressive uses 4/0.50/0.35/0.30. Applied live versions freeze both the preset name and all resolved values; later global changes must not mutate already-authorized policy.
+
 **Why:** The user wants to stop Smart Exit from selling winners early when Kalshi reprices or the underlying makes ordinary noise, without losing protection when the target is genuinely likely to cross. Recent settled triggers showed immediate crossings helped BTC/ETH but shallow ZEC/XRP crossings recovered, so symbol-specific validation is safer than one universal delay.
 
-**How to apply:** Route all future live and replay exit paths through the shared crossing and deep-loss assessments. Treat repricing as confirmation only, preserve fail-closed full-position evidence, use actual remaining stake, and never auto-activate or execute an incomplete replay recommendation.
+**How to apply:** Route all future live and replay exit paths through the shared crossing and deep-loss assessments and canonical sensitivity resolver. Treat repricing as confirmation only, preserve fail-closed full-position evidence, use actual remaining stake, and never auto-activate or execute an incomplete replay recommendation.

@@ -141,6 +141,24 @@ test("durable one-second replay requires sustained realistic crossing before sel
   assert.match(replay[0]!.candidateExit?.reason ?? "", /sustained projected target crossing/);
 });
 
+test("durable replay uses the same sensitivity debounce boundaries as live policy", () => {
+  const settlement = {
+    owner: "regular" as const, positionId: "p", symbol: "BTC", regime: "trend",
+    entryTimestampSeconds: 10, expiryTimestampSeconds: 100,
+    entryContractCost: 0.8, quantity: 1, holdToExpiryPnl: -0.8,
+  };
+  const samples = [30, 31, 32, 33, 34].map((at) => durableEvaluation(at));
+  assert.equal(buildCrossingRiskReplayLifecycles(
+    [settlement], samples, { sensitivity: "more_aggressive" },
+  )[0]!.candidateExit?.timestampSeconds, 32);
+  assert.equal(buildCrossingRiskReplayLifecycles(
+    [settlement], samples, { sensitivity: "default" },
+  )[0]!.candidateExit?.timestampSeconds, 33);
+  assert.equal(buildCrossingRiskReplayLifecycles(
+    [settlement], samples, { sensitivity: "less_aggressive" },
+  )[0]!.candidateExit?.timestampSeconds, 34);
+});
+
 test("durable replay treats a fully executable actual crossing as immediate", () => {
   const replay = buildCrossingRiskReplayLifecycles([{
     owner: "regular",

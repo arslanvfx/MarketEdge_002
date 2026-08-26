@@ -10,6 +10,7 @@ export type UnderlyingKind = "crypto" | "commodity" | "other";
 export type SmartExitOwnerKind = "regular" | "scalper";
 export type SmartExitTradingMode = "paper" | "live";
 export type SmartExitRiskStage = "hold" | "watch" | "prepare_exit" | "exit";
+export type SmartExitSensitivity = "more_aggressive" | "default" | "less_aggressive";
 export type SmartExitComponentStatus = "fresh" | "quiet" | "delayed" | "unavailable";
 
 export type SmartExitComponentHealthMap = Readonly<Record<string, {
@@ -106,6 +107,8 @@ export interface SmartExitEvidence {
 export interface SmartExitConfig {
   readonly enabled: boolean;
   readonly mode: SmartExitMode;
+  /** Operator-selected canonical crossing-risk preset. Missing legacy values resolve to default. */
+  readonly sensitivity: SmartExitSensitivity;
   readonly totalWindowSeconds: number;
   readonly maxEvidenceAgeSeconds: number;
   readonly minVolatilityLogReturnPerSqrtSecond: number;
@@ -146,8 +149,11 @@ export interface SmartExitAppliedVersion {
   readonly appliedAt: string;
   /** Immutable policy values validated for this owner/symbol. */
   readonly parameters?: {
+    readonly sensitivity: SmartExitSensitivity;
     readonly debounceCount: number;
     readonly confirmationLevel: number;
+    readonly minMarketLossFraction: number;
+    readonly crossingReserveFraction: number;
     readonly minExitEdge: number;
     readonly deepLossHoldThreshold: number;
     readonly terminalLossHoldThreshold: number;
@@ -276,6 +282,7 @@ export interface SmartExitEvaluationRecord {
   readonly debounceTarget: number;
   readonly hysteresisUntil: string | null;
   readonly parameterVersion: string | null;
+  readonly effectiveSensitivity: SmartExitSensitivity;
   readonly executed: boolean;
   readonly executionStatus: "not_requested" | "requested" | "filled" | "zero_fill" | "unknown" | "blocked";
   readonly recoveryStudy: {

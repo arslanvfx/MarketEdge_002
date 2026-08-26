@@ -4,8 +4,27 @@ import {
   DEFAULT_SMART_EXIT_CONFIG, INITIAL_SMART_EXIT_STATE, adverseContinuationScore,
   assessSmartExitDeepLossHold,
   evaluateSmartExit, modelWinProbability, probabilityDropThreshold,
+  resolveSmartExitSensitivity,
 } from "./kalshi-smart-exit-policy.ts";
 import type { SmartExitEvidence, SmartExitPosition } from "./kalshi-smart-exit-types.ts";
+
+test("Smart Exit sensitivity resolver is canonical, immutable, and legacy-safe", () => {
+  assert.deepEqual(resolveSmartExitSensitivity("more_aggressive").parameters, {
+    debounceCount: 2, confirmationLevel: 0.20,
+    minMarketLossFraction: 0.15, crossingReserveFraction: 0.10,
+  });
+  assert.deepEqual(resolveSmartExitSensitivity("default").parameters, {
+    debounceCount: 3, confirmationLevel: 0.35,
+    minMarketLossFraction: 0.25, crossingReserveFraction: 0.20,
+  });
+  assert.deepEqual(resolveSmartExitSensitivity("less_aggressive").parameters, {
+    debounceCount: 4, confirmationLevel: 0.50,
+    minMarketLossFraction: 0.35, crossingReserveFraction: 0.30,
+  });
+  assert.equal(resolveSmartExitSensitivity(undefined).sensitivity, "default");
+  assert.equal(Object.isFrozen(resolveSmartExitSensitivity("default")), true);
+  assert.equal(Object.isFrozen(resolveSmartExitSensitivity("default").parameters), true);
+});
 
 const position: SmartExitPosition = {
   positionId: "p", owner: { kind: "regular", tradingMode: "paper" }, symbol: "BTC",
@@ -26,7 +45,7 @@ const evidence = (overrides: Partial<SmartExitEvidence> = {}): SmartExitEvidence
   marketBestBid: 0.3, marketBestAsk: 0.32, marketExecutablePrice: 0.3,
   marketExecutableQuantity: 10, ...overrides,
 });
-const config = { ...DEFAULT_SMART_EXIT_CONFIG, enabled: true, mode: "shadow" as const, debounceCount: 2, hysteresisSeconds: 0, probabilityShrinkage: 0, fatTailVolatilityMultiplier: 1 };
+const config = { ...DEFAULT_SMART_EXIT_CONFIG, enabled: true, mode: "shadow" as const, sensitivity: "more_aggressive" as const, debounceCount: 2, confirmationLevel: 0.20, hysteresisSeconds: 0, probabilityShrinkage: 0, fatTailVolatilityMultiplier: 1 };
 
 test("default is disabled and shadow safe", () => {
   assert.equal(DEFAULT_SMART_EXIT_CONFIG.enabled, false);

@@ -3,9 +3,12 @@ import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Shield, AlertTriangle, PowerOff } from "lucide-react";
 import { API_BASE, fmt$, fmtDateTime } from "./utils";
-import type { SmartExitStatus, SmartExitEvaluation, SmartExitReplayReport, SmartExitCapability, SmartExitConfig, SmartExitComponentHealth, SmartExitLifecycleLedger } from "./types";
+import type { SmartExitStatus, SmartExitEvaluation, SmartExitReplayReport, SmartExitCapability, SmartExitConfig, SmartExitComponentHealth, SmartExitLifecycleLedger, SmartExitSensitivity } from "./types";
 
 const fmtConf = (n: number | undefined | null) => n != null ? `${(n * 100).toFixed(1)}%` : "—";
+const sensitivityLabel = (value: SmartExitSensitivity | undefined) =>
+  value === "more_aggressive" ? "More Aggressive"
+    : value === "less_aggressive" ? "Less Aggressive" : "Default";
 const fmtTime = (iso: string) => {
   if (!iso) return "—";
   try {
@@ -240,6 +243,44 @@ export function BotSmartExitPanel({ authPost }: Props) {
       )}
 
       <div className="flex flex-col divide-y divide-white/10">
+        <div className="px-4 py-3 bg-[#0d1017]">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                Smart Exit sensitivity · {sensitivityLabel(status?.config?.sensitivity)}
+              </div>
+              <div className="mt-1 text-[10px] text-slate-500">
+                Changes how quickly credible target-crossing risk becomes actionable. All liquidity, economics, ownership, freshness, and loss guards remain enforced.
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-1 rounded-lg border border-white/10 bg-black/40 p-1">
+              {([
+                ["more_aggressive", "More Aggressive", "Fewer sustained samples; reacts to smaller credible deterioration."],
+                ["default", "Default", "Current balanced behavior."],
+                ["less_aggressive", "Less Aggressive", "Waits for stronger, sustained deterioration and more recovery room."],
+              ] as const).map(([value, label, description]) => (
+                <button
+                  key={value}
+                  type="button"
+                  title={description}
+                  aria-label={`${label}: ${description}`}
+                  onClick={() => updateConfig({ sensitivity: value })}
+                  disabled={busy || !capability?.canManage}
+                  className={`flex max-w-[150px] flex-col rounded-md px-2.5 py-1.5 text-left transition-colors disabled:opacity-50 ${
+                    (status?.config?.sensitivity ?? "default") === value
+                      ? "bg-indigo-600 text-white"
+                      : "text-slate-400 hover:bg-white/5 hover:text-white"
+                  }`}
+                >
+                  <span className="text-[9px] font-bold uppercase tracking-wide">{label}</span>
+                  <span className="mt-0.5 whitespace-normal text-[8px] font-normal leading-tight opacity-70">
+                    {description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
         
         {/* Full-width active area */}
         <div className="flex flex-col h-full bg-[#0d1017]">
@@ -363,6 +404,9 @@ export function BotSmartExitPanel({ authPost }: Props) {
                           }`}>
                             {ev.currentDataStatus || "UNK"}
                           </div>
+                         <div className="text-[9px] font-mono text-indigo-300">
+                           Sensitivity: {sensitivityLabel(ev.effectiveSensitivity)}
+                         </div>
                           <div className="text-[9px] font-mono text-slate-500 truncate flex-1" title={ev.currentUnavailableReason || ""}>
                             {ev.currentUnavailableReason || "Healthy"}
                           </div>
@@ -545,7 +589,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
                     <div key={sym} className="px-2.5 py-1 bg-black/40 border border-white/10 rounded-md text-[10px] flex items-center gap-2">
                       <span className="font-bold text-slate-200">{sym}</span>
                       <span className="text-white/50">|</span>
-                      <span className="text-indigo-400 font-mono">{meta.owner} / {meta.version}</span>
+                       <span className="text-indigo-400 font-mono">{meta.owner} / {meta.version} · {sensitivityLabel(meta.parameters?.sensitivity)}</span>
                     </div>
                   ))}
                 </div>
