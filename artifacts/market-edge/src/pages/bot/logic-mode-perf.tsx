@@ -12,7 +12,7 @@ interface LogicModePerfProps {
 }
 
 export function LogicModePerf({ logicPerfData, backtestData, btPerfTab, setBtPerfTab, activeMode }: LogicModePerfProps) {
-  const [open, setOpen] = React.useState(true);
+  const [open, setOpen] = React.useState(false);
   return (
     <>
         {/* ── Logic Mode Performance ── */}

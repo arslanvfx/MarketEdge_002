@@ -17,7 +17,7 @@ function fmtAge(ms: number): string {
 }
 
 export function ConvictionThresholdPanel({ data, currentLockPrice, activeMode, maxBetStats, convictionPollerRunning, convictionPriceAgeMs }: ConvictionThresholdPanelProps) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   const pollerKnown = convictionPollerRunning !== undefined;
   const pollerLive = convictionPollerRunning === true;

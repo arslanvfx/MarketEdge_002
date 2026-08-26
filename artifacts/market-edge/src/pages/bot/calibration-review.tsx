@@ -30,7 +30,7 @@ export function ScalperCalibrationReview({
   onRevert,
   symbols,
 }: CalibrationReviewProps) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
 
   const getSymbolData = (sym: string) => {

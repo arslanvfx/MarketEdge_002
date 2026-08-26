@@ -8,7 +8,7 @@ interface PerCoinGuardProps {
 }
 
 export function PerCoinGuard({ coinGuardData }: PerCoinGuardProps) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   if (!coinGuardData) return null;
   return (
           <div className="bg-card border border-border rounded-xl overflow-hidden">

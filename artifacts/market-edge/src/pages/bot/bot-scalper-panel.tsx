@@ -495,7 +495,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
   const { getToken, isLoaded: authLoaded, userId } = useAuth();
   const qc = useQueryClient();
   const [configDraft, setConfigDraft] = useState<Partial<ScalperConfig>>({});
-  const [perCoinOpen, setPerCoinOpen] = useState(true);
+  const [perCoinOpen, setPerCoinOpen] = useState(false);
   const [mutationBusy, setMutationBusy] = useState<MutationName | null>(null);
   const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -2755,7 +2755,7 @@ export function ContrarianSpikePanel({ authPost }: { authPost: (path: string, bo
   const [mutationBusy, setMutationBusy] = useState<string | null>(null);
   const [reconcileBusyId, setReconcileBusyId] = useState<string | null>(null);
   const [experimentNotice, setExperimentNotice] = useState<Notice | null>(null);
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   const { data: capability } = useQuery<ScalperCapability>({
     queryKey: ["bot-scalper-capability", userId ?? "signed-out"],

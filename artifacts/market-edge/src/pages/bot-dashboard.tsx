@@ -104,7 +104,7 @@ function ResetLiveStatsButton({ resetAt, onReset }: { resetAt: string | null; on
 }
 
 function PerfByCoin({ stats, activeMode }: { stats: BotStats; activeMode: "paper" | "live" }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
       <button
@@ -149,15 +149,15 @@ function PerfByCoin({ stats, activeMode }: { stats: BotStats; activeMode: "paper
 export default function BotDashboard() {
   const { getToken } = useAuth();
   const qc = useQueryClient();
-  const [configOpen, setConfigOpen] = useState(true);
+  const [configOpen, setConfigOpen] = useState(false);
   const [confirmLive, setConfirmLive] = useState(false);
   const [liveCheckboxChecked, setLiveCheckboxChecked] = useState(false);
   const [configDraft, setConfigDraft] = useState<Partial<BotConfig>>({});
   const [saving, setSaving] = useState(false);
   const [persistMsg, setPersistMsg] = useState<"saved" | "failed" | null>(null);
   const [persistError, setPersistError] = useState<string | null>(null);
-  const [perfOpen, setPerfOpen] = useState(true);
-  const [tuneLogOpen, setTuneLogOpen] = useState(true);
+  const [perfOpen, setPerfOpen] = useState(false);
+  const [tuneLogOpen, setTuneLogOpen] = useState(false);
   const [histPage, setHistPage] = useState(0);
   // historyMode is the mode shown in the Transaction History table and stats.
   // Defaults to the active bot mode but can be toggled independently so the

@@ -181,7 +181,7 @@ function MathBreakdown({ step, minConfidence }: { step: BotStepEntry; minConfide
 }
 
 export function BotStepsPanel({ steps, minConfidence, decisionMode, windowKey }: BotStepsPanelProps) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   const ordered = COIN_ORDER.filter(s => steps.some(st => st.sym === s))
     .map(s => steps.find(st => st.sym === s)!)
