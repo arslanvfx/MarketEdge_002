@@ -4,29 +4,30 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 
-const rawPort = process.env.PORT;
+export default defineConfig(async ({ command }) => {
+  const isBuild = command === "build";
+  const rawPort = process.env.PORT;
+  if (!isBuild && !rawPort) {
+    throw new Error(
+      "PORT environment variable is required when serving the app.",
+    );
+  }
+  const port = rawPort ? Number(rawPort) : 21073;
+  if (Number.isNaN(port) || port <= 0) {
+    throw new Error(`Invalid PORT value: "${rawPort}"`);
+  }
 
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
+  // Static production builds do not receive service runtime environment
+  // variables. The artifact is mounted at root, so "/" is the correct build
+  // default; development/preview still require the injected BASE_PATH.
+  const basePath = process.env.BASE_PATH ?? (isBuild ? "/" : null);
+  if (!basePath) {
+    throw new Error(
+      "BASE_PATH environment variable is required when serving the app.",
+    );
+  }
 
-const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
-
-const basePath = process.env.BASE_PATH;
-
-if (!basePath) {
-  throw new Error(
-    "BASE_PATH environment variable is required but was not provided.",
-  );
-}
-
-export default defineConfig({
+  return {
   base: basePath,
   plugins: [
     react(),
@@ -72,4 +73,5 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: true,
   },
+  };
 });
