@@ -3211,17 +3211,15 @@ describe("execution wiring (static source assertions)", () => {
     );
   });
 
-  it("order sizing starts from the reserved amount and may reduce to routed spendable cash", () => {
-    const sized = idx("const requestedSized = sizeOrderWithinReservedBudget(");
-    const routedSized = idx("sizeOrderWithinReservedBudget(\n          routedSpendableBudget,");
+  it("order sizing stays at the configured reserved amount instead of creating tiny scraps", () => {
+    const sized = idx("const sized = sizeOrderWithinReservedBudget(");
     const place = idx("await runtime.placeScalpOrderStrict(");
-    assert.ok(sized >= 0, "sizing must start from the durable reservedBudget");
-    assert.ok(routedSized >= 0, "live sizing must support routed-balance downsizing");
+    assert.ok(sized >= 0, "sizing must use the durable reservedBudget");
     assert.ok(sized < place, "sizing must precede submit");
-    assert.ok(routedSized < place, "routed downsizing must precede submit");
     // reservedBudget is snapshot.budgetDollars
     assert.match(svc, /const reservedBudget = snapshot\.budgetDollars/);
-    assert.match(svc, /Math\.max\(0, availableBalanceCents - 1\) \/ 100/);
+    assert.doesNotMatch(svc, /routedSpendableBudget/);
+    assert.doesNotMatch(svc, /downsizing IOC instead of skipping/);
   });
 
   it("uses the pinned band ceiling for IOC limit while retaining the authoritative quote", () => {

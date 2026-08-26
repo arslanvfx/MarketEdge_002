@@ -3385,52 +3385,21 @@ async function _executeScalpAttempt(
     latency.guardReadinessMs =
       runtime.nowMs() - guardReadinessStartedAtMs;
   }
-  // ── Size the order STRICTLY within the durable reserved budget ─────────────
+  // ── Size the order STRICTLY within the durable configured budget ───────────
   // Principal plus the upward-rounded worst-case taker fee at the band-capped
   // IOC limit is guaranteed to remain within reservedBudget.
   //
-  // In live mode, a routed exchange shard can have less immediately usable cash
-  // than the configured budget even when the overall Kalshi account is funded.
-  // Do not throw away an otherwise valid narrow-window candidate in that case:
-  // reserve the one-cent balance buffer up front and size to the largest IOC the
-  // routed cash can actually support. The final balance decision below remains
-  // authoritative and fail-closed.
-  const requestedSized = sizeOrderWithinReservedBudget(
+  // Never shrink a configured full-size Scalper order to whatever cash remains
+  // on the routed exchange. That creates misleading $1-$3 scraps after another
+  // candidate consumes the same routed cash. The final balance check below must
+  // authorize the complete configured order or skip it.
+  const sized = sizeOrderWithinReservedBudget(
     reservedBudget,
     winningAsk,
     snapshot.bandMax,
   );
-  const availableBalanceCents =
-    mode === "live"
-    && balanceResult.ok
-    && balanceResult.availableBalance != null
-    && Number.isFinite(balanceResult.availableBalance)
-    && balanceResult.availableBalance >= 0
-      ? Math.floor(balanceResult.availableBalance * 100 + 1e-9)
-      : null;
-  const routedSpendableBudget =
-    availableBalanceCents == null
-      ? reservedBudget
-      : Math.min(
-          reservedBudget,
-          Math.max(0, availableBalanceCents - 1) / 100,
-        );
-  const sized =
-    requestedSized.ok
-    && routedSpendableBudget + 1e-9 < requestedSized.budgetRequired
-      ? sizeOrderWithinReservedBudget(
-          routedSpendableBudget,
-          winningAsk,
-          snapshot.bandMax,
-        )
-      : requestedSized;
   if (!sized.ok) {
-    const sizingReason =
-      mode === "live"
-      && availableBalanceCents != null
-      && requestedSized.ok
-        ? "insufficient_balance_final"
-        : sized.reason ?? "sizing_failed";
+    const sizingReason = sized.reason ?? "sizing_failed";
     await runtime.updateReservationStatus(mode, symbol, windowKey, "skipped", sizingReason, true, {
       ..._timingEvidence(),
       requestedBudget: reservedBudget,
@@ -3467,27 +3436,6 @@ async function _executeScalpAttempt(
     safetyMargin: balanceDecision.safetyMarginCents / 100,
     totalRequired: balanceDecision.totalRequiredCents / 100,
   };
-  if (
-    mode === "live"
-    && requestedSized.ok
-    && contractCount < requestedSized.contractCount
-  ) {
-    logger.info(
-      {
-        symbol,
-        balanceExchangeIndex: balanceResult.exchangeIndex,
-        availableBalance: balanceResult.availableBalance,
-        requestedContracts: requestedSized.contractCount,
-        submittedContracts: contractCount,
-        requestedTotalRequired:
-          requestedSized.budgetRequired
-          + balanceDecision.safetyMarginCents / 100,
-        submittedTotalRequired: balanceDecision.totalRequiredCents / 100,
-      },
-      "[kalshi-scalper] routed balance below configured budget — downsizing IOC instead of skipping",
-    );
-  }
-
   // ── FINAL live balance check against ACTUAL worst-case submit exposure ─────
   if (mode === "live") {
     if (!balanceResult.ok || balanceResult.availableBalance == null) {
