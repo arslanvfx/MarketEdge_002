@@ -352,6 +352,61 @@ describe("claimReservationAndCap (DB concurrency)", { skip: !RUN_DB_TESTS ? "set
     assert.equal(r2.allowed, true, "headroom must be freed after release");
   });
 
+  it("reclaims a temporary open-cap denial after competing reservations release", async () => {
+    const base = `DBTEST-open-retry-${Date.now()}`;
+    const budget = 100;
+    const openCap = 230;
+    const firstWindow = `${base}-first`;
+    const secondWindow = `${base}-second`;
+    const deniedWindow = `${base}-denied`;
+
+    const first = await db.claimReservationAndCap(
+      `id-${base}-1`, MODE, "ETH", firstWindow, "T1", budget, null, openCap,
+    );
+    const second = await db.claimReservationAndCap(
+      `id-${base}-2`, MODE, "HYPE", secondWindow, "T2", budget, null, openCap,
+    );
+    const denied = await db.claimReservationAndCap(
+      `id-${base}-3`, MODE, "BNB", deniedWindow, "T3", budget, null, openCap,
+    );
+    assert.equal(first.allowed, true);
+    assert.equal(second.allowed, true);
+    assert.equal(denied.allowed, false);
+    assert.match(denied.reason ?? "", /^open_cap_exceeded \(open=200\.00 cap=230\)/);
+
+    await db.updateReservationStatus(
+      MODE, "ETH", firstWindow, "skipped", "final_quote_outside_band", true,
+    );
+    await db.updateReservationStatus(
+      MODE, "HYPE", secondWindow, "skipped", "final_quote_outside_band", true,
+    );
+
+    const cooling = await db.claimReservationAndCap(
+      `id-${base}-cooling`, MODE, "BNB", deniedWindow, "T3", budget, null, openCap,
+    );
+    assert.equal(cooling.claimed, false);
+    assert.equal(cooling.reason, "retry_cooldown");
+
+    const c = await pool.connect();
+    try {
+      await c.query(
+        `UPDATE kalshi_scalp_reservations
+         SET attempted_at = NOW() - INTERVAL '2 seconds'
+         WHERE mode = $1 AND symbol = 'BNB' AND window_key = $2`,
+        [MODE, deniedWindow],
+      );
+    } finally {
+      c.release();
+    }
+
+    const retried = await db.claimReservationAndCap(
+      `id-${base}-retry`, MODE, "BNB", deniedWindow, "T3", budget, null, openCap,
+    );
+    assert.equal(retried.claimed, true);
+    assert.equal(retried.allowed, true);
+    assert.equal(retried.reservationId, denied.reservationId);
+  });
+
   it("atomically re-claims a transient no-order skip after its cooldown", async () => {
     const wk = `DBTEST-rearm-${Date.now()}`;
     const first = await db.claimReservationAndCap(`id-${wk}`, MODE, "BTC", wk, "T", 2, null, OPEN_CAP);

@@ -2431,7 +2431,12 @@ async function _evaluateCandidate(
       return;
     }
     if (!claim.allowed || !claim.reservationId) {
-      _terminalAttemptKeys.add(key);
+      _rememberReservationOutcome(
+        key,
+        "skipped",
+        claim.reason,
+        claim.submittedOrders,
+      );
       logger.debug({ symbol, windowKey, reason: claim.reason }, "[kalshi-scalper] cap-denied, skipped");
       return;
     }

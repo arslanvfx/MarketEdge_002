@@ -990,7 +990,9 @@ export async function claimReservationAndCap(
     }
 
     if (blockedReason) {
-      // Persist cap denial as a terminal skip with no reserved budget.
+      // Persist cap denial with no reserved budget. Daily-cap denials remain
+      // terminal; open-cap denials may be re-claimed after the short policy
+      // cooldown because competing pre-submit reservations can release.
       const capEvidence: ScalpSkipEvidence = {
         timingPhase: closeTime != null && finalWindowSeconds != null
           ? resolveTimingPhase(closeTime, Date.now(), finalWindowSeconds, SCALP_PREFLIGHT_LEAD_SECONDS)

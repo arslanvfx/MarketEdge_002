@@ -14,3 +14,9 @@ Confirmed filled or Paper positions count toward open exposure only while their 
 **Why:** Once a short-window market has closed, its directional exposure is fixed even if Kalshi delays publishing the result. Treating settlement lag as open market risk can freeze later opportunities; relaxing truly unknown submissions could instead permit accidental overexposure.
 
 **How to apply:** Scope `filled`/`paper` open-exposure totals to the active window key, while continuing to count unresolved submissions and reservations globally. Daily spend still counts the confirmed fill regardless of settlement timing.
+
+An `open_cap_exceeded` denial is transient when the counted exposure comes from other candidates' pre-submit reservations. Re-arm that candidate after a short cooldown and make it repeat the same atomic claim-and-cap transaction; do not loosen the cap or bypass final guards. Daily-cap denials remain terminal.
+
+**Why:** Parallel candidates can temporarily reserve all headroom while performing final checks, then release it without placing orders. Treating the first denial as terminal starves otherwise eligible candidates even though capacity becomes available seconds later.
+
+**How to apply:** Persist the denial with zero reserved budget, schedule the shared bounded retry lifecycle, and rely on the per-mode advisory lock plus claim-time window check to prevent over-cap or late submissions. Unknown/submitting exposure remains non-retryable and fail-closed.

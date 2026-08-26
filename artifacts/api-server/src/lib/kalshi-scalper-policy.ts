@@ -451,10 +451,12 @@ const QUICK_RETRY_SKIP_REASONS = new Set([
  * Decide whether a durable reservation may be re-claimed.
  *
  * Only outcomes that prove no exposure was created can retry. Unknown,
- * submitting, filled, cap/risk/identity failures, and arbitrary errors are
- * terminal. A confirmed zero-fill may retry until the bounded submission
- * limit. Freefall and balance failures can retry more slowly, but every retry
- * still has to pass the same authoritative final checks.
+ * submitting, filled, daily-cap/risk/identity failures, and arbitrary errors
+ * are terminal. Open-cap denials may retry because headroom can be held only
+ * temporarily by another candidate's pre-submit reservation. A confirmed
+ * zero-fill may retry until the bounded submission limit. Freefall and balance
+ * failures can retry more slowly, but every retry still has to pass the same
+ * authoritative final checks.
  */
 export function evaluateScalpReservationRetry(input: {
   status: string;
@@ -481,6 +483,11 @@ export function evaluateScalpReservationRetry(input: {
   } else if (input.status === "skipped") {
     const reason = input.reason ?? "";
     if (QUICK_RETRY_SKIP_REASONS.has(reason)) {
+      cooldownMs = SCALP_AUTH_RETRY_COOLDOWN_MS;
+    } else if (reason.startsWith("open_cap_exceeded")) {
+      // Headroom can be temporarily occupied by another candidate's
+      // authoritative pre-submit reservation and released moments later.
+      // Every retry still re-enters the atomic claim-and-cap transaction.
       cooldownMs = SCALP_AUTH_RETRY_COOLDOWN_MS;
     } else if (
       reason.startsWith("freefall_")

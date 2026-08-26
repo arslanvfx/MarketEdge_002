@@ -944,6 +944,26 @@ describe("evaluateScalpReservationRetry", () => {
     assert.equal(balance.retryAfterMs, SCALP_BALANCE_RETRY_COOLDOWN_MS);
   });
 
+  it("re-arms temporary open-cap denials while keeping daily-cap denials terminal", () => {
+    const openCap = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "open_cap_exceeded (open=200.00 cap=230)",
+      elapsedMs: 0,
+      submittedOrders: 0,
+    });
+    assert.equal(openCap.terminal, false);
+    assert.equal(openCap.retryAfterMs, SCALP_AUTH_RETRY_COOLDOWN_MS);
+
+    const dailyCap = evaluateScalpReservationRetry({
+      status: "skipped",
+      reason: "daily_cap_exceeded (committed=6000.00 cap=6000)",
+      elapsedMs: 60_000,
+      submittedOrders: 0,
+    });
+    assert.equal(dailyCap.terminal, true);
+    assert.equal(dailyCap.retryAfterMs, null);
+  });
+
   it("allows confirmed zero fills only below the submission limit", () => {
     const second = evaluateScalpReservationRetry({
       status: "zero_fill",
@@ -965,7 +985,7 @@ describe("evaluateScalpReservationRetry", () => {
     assert.equal(exhausted.reason, "retry_limit_reached");
   });
 
-  it("never retries filled, unknown, submitting, cap, identity, or arbitrary errors", () => {
+  it("never retries filled, unknown, submitting, daily-cap, identity, or arbitrary errors", () => {
     for (const outcome of [
       { status: "filled", reason: null },
       { status: "unknown", reason: "manual_reconciliation_required" },
@@ -3535,6 +3555,16 @@ describe("execution wiring (static source assertions)", () => {
       /_rememberReservationOutcome\([\s\S]*?"zero_fill"[\s\S]*?priorSubmittedOrders \+ 1/,
     );
     assert.match(svc, /_terminalAttemptKeys\.add\(attemptKey\)/);
+  });
+
+  it("re-arms cap-denied candidates through the shared reservation retry policy", () => {
+    const evaluateStart = idx("async function _evaluateCandidate");
+    const executeStart = idx("async function _executeScalpAttempt");
+    const evaluate = svc.slice(evaluateStart, executeStart);
+    assert.match(
+      evaluate,
+      /if \(!claim\.allowed \|\| !claim\.reservationId\)[\s\S]*?_rememberReservationOutcome\([\s\S]*?claim\.reason/,
+    );
   });
 
   it("DB re-claim path locks the durable row and counts zero-fill submissions", () => {
