@@ -188,6 +188,25 @@ export function BotSmartExitPanel({ authPost }: Props) {
     "live-exit": "Live"
   };
 
+  const lifecycleRows = (() => {
+    const windowBands = new Map<string, number>();
+    let previousWindow: string | null = null;
+
+    return (lifecycle?.records ?? []).map((item) => {
+      if (!windowBands.has(item.ticker)) {
+        windowBands.set(item.ticker, windowBands.size);
+      }
+      const startsWindow = previousWindow !== null && previousWindow !== item.ticker;
+      previousWindow = item.ticker;
+
+      return {
+        item,
+        startsWindow,
+        windowBand: windowBands.get(item.ticker) ?? 0,
+      };
+    });
+  })();
+
   return (
     <div className="bg-[#0b0d13] border border-white/10 rounded-xl overflow-hidden mb-6 flex flex-col shadow-2xl [&_.text-slate-700]:!text-slate-400 [&_.text-slate-600]:!text-slate-400 [&_.text-slate-500]:!text-slate-300 [&_.text-slate-400]:!text-slate-200">
       <div className="px-4 py-3 border-b border-white/10 flex flex-wrap items-center justify-between gap-4 bg-white/[0.02]">
@@ -471,8 +490,15 @@ export function BotSmartExitPanel({ authPost }: Props) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {lifecycle?.records?.map(item => (
-                  <tr key={item.id} className="hover:bg-white/[0.02] transition-colors h-12">
+                {lifecycleRows.map(({ item, startsWindow, windowBand }) => (
+                  <tr
+                    key={item.id}
+                    className={`transition-colors h-12 ${
+                      windowBand % 2 === 0
+                        ? "bg-slate-950/25 hover:bg-slate-900/45"
+                        : "bg-indigo-950/20 hover:bg-indigo-900/30"
+                    } ${startsWindow ? "border-t-2 border-indigo-300/20" : ""}`}
+                  >
                     <td className="px-4 py-2 align-middle text-[10px] font-mono text-slate-500 tabular-nums">
                       <div>{fmtTime(item.triggeredAt)}</div>
                       <div className="mt-0.5 text-[8px] text-slate-400">
@@ -536,7 +562,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
                     </td>
                   </tr>
                 ))}
-                {!lifecycle?.records?.length && (
+                {!lifecycleRows.length && (
                   <tr><td colSpan={9} className="px-4 py-4 text-center text-slate-600 text-[10px] font-mono italic h-12 align-middle">No Smart Exit triggers recorded yet</td></tr>
                 )}
               </tbody>
