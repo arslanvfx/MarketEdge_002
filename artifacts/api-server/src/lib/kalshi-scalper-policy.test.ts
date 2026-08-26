@@ -3145,20 +3145,16 @@ describe("execution wiring (static source assertions)", () => {
     assert.match(preflight, /fetchKalshiTarget\(/);
     assert.match(
       preflight,
-      /rebalanceKalshiCashToShard\(\s*exchangeIndex,\s*0\.90,/,
+      /planScalperRouteFunding\(\s*aggregateBeforeFunding\.availableBalance,/,
     );
     assert.match(
       preflight,
-      /const cryptoTargets = targets\.filter\([\s\S]*?!target\.product\.startsWith\("PYTH:"\)/,
+      /rebalanceKalshiCashToRoutes\(\s*routeFundingPlan\.targets,/,
     );
-    assert.match(
-      preflight,
-      /const fundingDeadlineMs = cryptoTargets\.length > 0[\s\S]*?\.\.\.cryptoTargets\.map\(/,
-    );
-    assert.match(
-      preflight,
-      /cryptoTargets\.flatMap\([\s\S]*?validatedRoutes\.get\(target\.symbol\)/,
-    );
+    assert.match(preflight, /const fundingDeadlineMs = targets\.length > 0/);
+    assert.match(preflight, /validatedRoutes\.get\(target\.symbol\)/);
+    assert.doesNotMatch(preflight, /0\.90/);
+    assert.doesNotMatch(preflight, /target\.product\.startsWith\("PYTH:"\)\s*\?\s*0/);
     assert.match(preflight, /const aggregate = await getBalance\(\s*undefined,/);
     assert.match(preflight, /_collectPriceSample\([\s\S]*?"authoritative"/);
     assert.ok(!/checkFreefallGuard\(/.test(preflight), "preflight must never make an execution decision");
@@ -3500,6 +3496,26 @@ describe("execution wiring (static source assertions)", () => {
     const execute = svc.slice(executeStart, executeEnd);
     assert.doesNotMatch(execute, /getBalance\(/);
     assert.doesNotMatch(execute, /insufficient_balance_final/);
+  });
+
+  it("requires a verified routed-funding permit before claim and rechecks its route before submit", () => {
+    const evaluateStart = idx("async function _evaluateCandidate");
+    const executeStart = idx("async function _executeScalpAttempt");
+    const evaluate = svc.slice(evaluateStart, executeStart);
+    const permitBeforeClaim = evaluate.indexOf("_preflightFundingPermits.get(");
+    const claim = evaluate.indexOf("claimReservationAndCap(");
+    assert.ok(permitBeforeClaim >= 0 && permitBeforeClaim < claim);
+    assert.match(evaluate, /routed funding permit unavailable — candidate blocked before claim/);
+
+    const finalIdentityStart = svc.indexOf("const exchangeIndex = refreshed.exchangeIndex!", executeStart);
+    const routePermit = svc.indexOf("_preflightFundingPermits.get(", finalIdentityStart);
+    const intent = svc.indexOf("runtime.insertScalpOrderIntent(orderRecord)", finalIdentityStart);
+    const place = svc.indexOf("await runtime.placeScalpOrderStrict(", finalIdentityStart);
+    assert.ok(routePermit > finalIdentityStart && routePermit < intent && routePermit < place);
+    assert.match(
+      svc.slice(routePermit, intent),
+      /funded_exchange_index_changed_after_refresh/,
+    );
   });
 
   it("records guard readiness for blocked attempts through skip timing evidence", () => {

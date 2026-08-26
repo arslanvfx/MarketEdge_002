@@ -19,6 +19,10 @@ import {
   parseRegularFixedPointCount,
   regularCountHundredths,
 } from "./kalshi-regular-fixed-point.ts";
+import {
+  planKalshiRouteTransfers,
+  type KalshiRouteFundingTarget,
+} from "./kalshi-shard-allocation.ts";
 
 export {
   formatRegularFixedPointCount,
@@ -260,6 +264,13 @@ export interface KalshiShardRebalanceResult {
   aggregateAvailableBalance: number;
   destinationAvailableBalance: number;
   targetAvailableBalance: number;
+  transfers: Array<KalshiShardTransferPlan & { transferId: string }>;
+}
+
+export interface KalshiRouteRebalanceResult {
+  aggregateAvailableBalance: number;
+  availableBalanceByExchange: Map<number, number>;
+  targetAvailableBalanceByExchange: Map<number, number>;
   transfers: Array<KalshiShardTransferPlan & { transferId: string }>;
 }
 
@@ -544,6 +555,81 @@ export async function rebalanceKalshiCashToShard(
     targetAvailableBalance: Math.floor(
       balance.availableBalance * targetFraction * 10_000,
     ) / 10_000,
+    transfers,
+  };
+}
+
+export async function rebalanceKalshiCashToRoutes(
+  targets: readonly KalshiRouteFundingTarget[],
+  options: KalshiShardRebalanceOptions = {},
+): Promise<KalshiRouteRebalanceResult> {
+  const remainingBeforeDeadline = (): number => {
+    if (options.deadlineMs == null) return 10_000;
+    const remaining = Math.floor(options.deadlineMs - Date.now());
+    if (remaining <= 0) {
+      throw new Error("Kalshi route funding deadline passed before transfer");
+    }
+    return Math.min(10_000, remaining);
+  };
+  const balance = await getBalance(undefined, remainingBeforeDeadline());
+  if (!balance.balanceBreakdown || balance.balanceBreakdown.length === 0) {
+    throw new Error("Kalshi aggregate balance response missing exchange balance breakdown");
+  }
+  const plan = planKalshiRouteTransfers(
+    balance.availableBalance,
+    balance.balanceBreakdown,
+    targets,
+  );
+  if (plan.length > 0) {
+    const pendingTransfers = await getRecentKalshiShardTransfers(
+      remainingBeforeDeadline(),
+    );
+    const pendingDestinations = new Set(
+      pendingTransfers
+        .filter((transfer) => transfer.status === "pending")
+        .map((transfer) => transfer.destinationExchangeIndex),
+    );
+    if (plan.some((transfer) =>
+      pendingDestinations.has(transfer.destinationExchangeIndex)
+    )) {
+      throw new Error("Kalshi route funding transfer is still pending");
+    }
+  }
+
+  const transfers: KalshiRouteRebalanceResult["transfers"] = [];
+  for (const transfer of plan) {
+    remainingBeforeDeadline();
+    if (options.claimTransfer && !(await options.claimTransfer(transfer))) {
+      continue;
+    }
+    const raw = await kalshiFetch<Record<string, unknown>>(
+      "POST",
+      "/portfolio/intra_exchange_instance_transfer",
+      buildKalshiShardTransferBody(transfer),
+      remainingBeforeDeadline(),
+    );
+    const transferId = raw["transfer_id"];
+    if (typeof transferId !== "string" || transferId.trim() === "") {
+      throw new Error("Kalshi route transfer response missing transfer_id");
+    }
+    await options.recordTransferAccepted?.(transfer, transferId);
+    transfers.push({ ...transfer, transferId });
+  }
+
+  return {
+    aggregateAvailableBalance: balance.availableBalance,
+    availableBalanceByExchange: new Map(
+      balance.balanceBreakdown.map((entry) => [
+        entry.exchangeIndex,
+        entry.availableBalance,
+      ]),
+    ),
+    targetAvailableBalanceByExchange: new Map(
+      targets.map((target) => [
+        target.exchangeIndex,
+        target.targetAvailableBalance,
+      ]),
+    ),
     transfers,
   };
 }

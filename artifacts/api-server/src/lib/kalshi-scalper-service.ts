@@ -16,10 +16,15 @@ import { getKalshiCachedData, fetchOrderbookPrices, fetchKalshiTarget } from "./
 // boundary (placeScalpOrderStrict) and NEVER imports/calls placeOrder.
 import {
   getBalance,
-  rebalanceKalshiCashToShard,
+  rebalanceKalshiCashToRoutes,
   fetchKalshiMarketResult,
   fetchKalshiSettledMarkets,
 } from "./kalshi-trader.ts";
+import {
+  applyVerifiedFundingSnapshot,
+  hasCompleteKalshiRouteBalances,
+  planScalperRouteFunding,
+} from "./kalshi-shard-allocation.ts";
 import {
   isDefinitiveScalpOrderRejection,
   parseDefinitiveScalpOrderRejection,
@@ -227,6 +232,15 @@ const _nextAttemptAt = new Map<string, number>();
 const _preflightIdentityReady = new Set<string>();
 const _preflightSampleReady = new Set<string>();
 const _preflightRoutedBalanceReady = new Map<string, {
+  exchangeIndex: number;
+  availableBalance: number;
+  targetAvailableBalance: number;
+  checkedAt: number;
+}>();
+const _preflightFundingPermits = new Map<string, {
+  mode: ScalpMode;
+  windowKey: string;
+  symbol: string;
   exchangeIndex: number;
   availableBalance: number;
   targetAvailableBalance: number;
@@ -676,6 +690,7 @@ function _resetPreflightState(): void {
   _preflightIdentityReady.clear();
   _preflightSampleReady.clear();
   _preflightRoutedBalanceReady.clear();
+  _preflightFundingPermits.clear();
   _preflightRegularPositions.clear();
   _lastPreflightStartedAt = 0;
   _preflightStatus = {
@@ -1442,15 +1457,17 @@ async function _runPreflight(
   startsInSeconds: number,
 ): Promise<void> {
   const mode = _config.mode;
-  // The shared scanner registry also includes Pyth commodities on shard 0.
-  // Treasury routing and its deadline must use the exact same crypto-only set;
-  // otherwise an earlier commodity window can suppress shard-2 funding.
-  const cryptoTargets = targets.filter(
-    (target) => !target.product.startsWith("PYTH:"),
+  const fundingPermitKeys = targets.map(
+    (target) => `${mode}:${windowKey}:${target.symbol}`,
   );
-  const fundingDeadlineMs = cryptoTargets.length > 0
+  const nextVerifiedFundingPermits = new Map<
+    string,
+    (typeof _preflightFundingPermits extends Map<string, infer T> ? T : never)
+  >();
+  let fundingSnapshotVerified = false;
+  const fundingDeadlineMs = targets.length > 0
     ? Math.min(
-      ...cryptoTargets.map(
+      ...targets.map(
       (target) =>
         Date.parse(target.closeTime)
         - target.params.finalWindowSeconds * 1_000
@@ -1459,6 +1476,7 @@ async function _runPreflight(
     )
     : null;
   const validatedRoutes = new Map<string, number>();
+  let routeFundingPlan: ReturnType<typeof planScalperRouteFunding> | null = null;
   _warmRegularPositionReadView(mode, windowKey);
   const accountPromise = getScalpCommittedTotals(mode, windowKey);
 
@@ -1503,68 +1521,71 @@ async function _runPreflight(
     && fundingDeadlineMs != null
     && Date.now() < fundingDeadlineMs
   ) {
-    const routeIndexes = [
-      ...new Set(
-        cryptoTargets.flatMap((target) => {
+    try {
+      const remainingFundingMs = Math.floor(fundingDeadlineMs - Date.now());
+      if (remainingFundingMs <= 0) {
+        throw new Error("preflight funding deadline passed before allocation");
+      }
+      const aggregateBeforeFunding = await getBalance(
+        undefined,
+        Math.min(10_000, remainingFundingMs),
+      );
+      routeFundingPlan = planScalperRouteFunding(
+        aggregateBeforeFunding.availableBalance,
+        targets.flatMap((target) => {
           const exchangeIndex = validatedRoutes.get(target.symbol);
           return Number.isInteger(exchangeIndex) && exchangeIndex! >= 0
-            ? [exchangeIndex!]
+            ? [{
+                symbol: target.symbol,
+                exchangeIndex: exchangeIndex!,
+                requiredBalance: target.params.budgetDollars,
+              }]
             : [];
         }),
-      ),
-    ];
-    if (routeIndexes.length === 1) {
-      const exchangeIndex = routeIndexes[0]!;
-      try {
-        // The trader reconciles Kalshi's durable pending-transfer history before
-        // issuing another POST, so restart or an ambiguous timeout cannot create
-        // a duplicate funding transfer.
-        const funding = await rebalanceKalshiCashToShard(
-          exchangeIndex,
-          0.90,
-          {
-            deadlineMs: fundingDeadlineMs,
-            claimTransfer: (transfer) =>
-              claimScalpShardFundingTransfer({
-                windowKey,
-                sourceExchangeIndex: transfer.sourceExchangeIndex,
-                destinationExchangeIndex: transfer.destinationExchangeIndex,
-                amountCenticents: transfer.amountCenticents,
-              }),
-            recordTransferAccepted: (transfer, transferId) =>
-              markScalpShardFundingTransferAccepted({
-                windowKey,
-                sourceExchangeIndex: transfer.sourceExchangeIndex,
-                destinationExchangeIndex: transfer.destinationExchangeIndex,
-                transferId,
-              }),
-          },
-        );
-        logger.info(
-          {
-            windowKey,
-            exchangeIndex,
-            aggregateAvailableBalance: funding.aggregateAvailableBalance,
-            destinationAvailableBalance: funding.destinationAvailableBalance,
-            targetAvailableBalance: funding.targetAvailableBalance,
-            transferCount: funding.transfers.length,
-            transferAmount: funding.transfers.reduce(
-              (sum, transfer) => sum + transfer.amountCenticents / 10_000,
-              0,
-            ),
-          },
-          "[kalshi-scalper] preflight crypto-shard funding prepared",
-        );
-      } catch (err) {
-        logger.warn(
-          { err, windowKey, exchangeIndex },
-          "[kalshi-scalper] preflight crypto-shard funding request failed or remains pending",
-        );
-      }
-    } else if (routeIndexes.length > 1) {
-      logger.error(
-        { windowKey, routeIndexes },
-        "[kalshi-scalper] multiple crypto shards discovered — automatic 90% allocation skipped",
+      );
+      // One multi-route plan protects every destination target at once. A later
+      // route can never pull cash back below an earlier route's reserve.
+      const funding = await rebalanceKalshiCashToRoutes(
+        routeFundingPlan.targets,
+        {
+          deadlineMs: fundingDeadlineMs,
+          claimTransfer: (transfer) =>
+            claimScalpShardFundingTransfer({
+              windowKey,
+              sourceExchangeIndex: transfer.sourceExchangeIndex,
+              destinationExchangeIndex: transfer.destinationExchangeIndex,
+              amountCenticents: transfer.amountCenticents,
+            }),
+          recordTransferAccepted: (transfer, transferId) =>
+            markScalpShardFundingTransferAccepted({
+              windowKey,
+              sourceExchangeIndex: transfer.sourceExchangeIndex,
+              destinationExchangeIndex: transfer.destinationExchangeIndex,
+              transferId,
+            }),
+        },
+      );
+      logger.info(
+        {
+          windowKey,
+          aggregateAvailableBalance: funding.aggregateAvailableBalance,
+          routeTargets: Object.fromEntries(
+            funding.targetAvailableBalanceByExchange,
+          ),
+          fundedSymbols: [...routeFundingPlan.fundedSymbols],
+          blockedSymbols: [...routeFundingPlan.blockedSymbols],
+          transferCount: funding.transfers.length,
+          transferAmount: funding.transfers.reduce(
+            (sum, transfer) => sum + transfer.amountCenticents / 10_000,
+            0,
+          ),
+        },
+        "[kalshi-scalper] preflight route funding prepared",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, windowKey },
+        "[kalshi-scalper] preflight route funding failed or remains pending",
       );
     }
 
@@ -1580,6 +1601,18 @@ async function _runPreflight(
         undefined,
         Math.min(10_000, remainingFundingMs),
       );
+      if (
+        routeFundingPlan == null
+        || !hasCompleteKalshiRouteBalances(
+          aggregate.balanceBreakdown,
+          routeFundingPlan.targets,
+        )
+      ) {
+        throw new Error(
+          "preflight aggregate balance verification returned an incomplete route breakdown",
+        );
+      }
+      fundingSnapshotVerified = true;
       for (const target of targets) {
         const exchangeIndex = validatedRoutes.get(target.symbol);
         if (!Number.isInteger(exchangeIndex) || exchangeIndex! < 0) continue;
@@ -1587,18 +1620,30 @@ async function _runPreflight(
           ?.filter((entry) => entry.exchangeIndex === exchangeIndex)
           .reduce((sum, entry) => sum + entry.availableBalance, 0);
         if (routedAvailable == null || !Number.isFinite(routedAvailable)) continue;
+        const routeTarget = routeFundingPlan?.targets.find(
+          (entry) => entry.exchangeIndex === exchangeIndex,
+        )?.targetAvailableBalance;
         _preflightRoutedBalanceReady.set(`${windowKey}:${target.symbol}`, {
           exchangeIndex: exchangeIndex!,
           availableBalance: routedAvailable,
-          // The 90% treasury target applies only to crypto shard 2. Commodity
-          // markets remain independently executable on shard 0 and must not
-          // make crypto funding look invalid merely because they share this
-          // scanner's broad market registry.
-          targetAvailableBalance: target.product.startsWith("PYTH:")
-            ? 0
-            : Math.floor(aggregate.availableBalance * 0.90 * 10_000) / 10_000,
+          targetAvailableBalance: routeTarget ?? target.params.budgetDollars,
           checkedAt: Date.now(),
         });
+        if (
+          routeFundingPlan?.fundedSymbols.has(target.symbol)
+          && routeTarget != null
+          && routedAvailable + 0.0001 >= routeTarget
+        ) {
+          nextVerifiedFundingPermits.set(`${mode}:${windowKey}:${target.symbol}`, {
+            mode,
+            windowKey,
+            symbol: target.symbol,
+            exchangeIndex: exchangeIndex!,
+            availableBalance: routedAvailable,
+            targetAvailableBalance: routeTarget,
+            checkedAt: Date.now(),
+          });
+        }
       }
     } catch (err) {
       logger.warn(
@@ -1607,6 +1652,11 @@ async function _runPreflight(
       );
     }
   }
+  applyVerifiedFundingSnapshot(
+    _preflightFundingPermits,
+    fundingPermitKeys,
+    fundingSnapshotVerified ? nextVerifiedFundingPermits : null,
+  );
 
   const { dailyCommitted, openCommitted } = await accountPromise;
   if (windowKey !== currentWindowKey() || mode !== _config.mode) return;
@@ -1624,6 +1674,11 @@ async function _runPreflight(
       reason = "circuit_breaker_active";
     } else if (!_preflightIdentityReady.has(readinessKey)) {
       reason = "market_identity_not_ready";
+    } else if (
+      mode === "live"
+      && routeFundingPlan?.blockedSymbols.has(target.symbol)
+    ) {
+      reason = "aggregate_funding_exhausted";
     } else if (mode === "live" && routedBalance == null) {
       reason = "balance_unavailable";
     } else if (
@@ -2316,6 +2371,25 @@ async function _evaluateCandidate(
       { symbol, windowKey, ticker, closeTime },
     );
     const budget = snapshot.budgetDollars;
+    if (mode === "live") {
+      const fundingPermit = _preflightFundingPermits.get(
+        `${mode}:${windowKey}:${symbol}`,
+      );
+      if (
+        !fundingPermit
+        || fundingPermit.windowKey !== windowKey
+        || fundingPermit.symbol !== symbol
+        || fundingPermit.availableBalance + 0.0001
+          < fundingPermit.targetAvailableBalance
+        || fundingPermit.targetAvailableBalance + 0.0001 < budget
+      ) {
+        logger.info(
+          { symbol, windowKey, fundingPermit: fundingPermit ?? null },
+          "[kalshi-scalper] routed funding permit unavailable — candidate blocked before claim",
+        );
+        return;
+      }
+    }
     _recordScalpFunnelEvent(mode, windowKey, symbol, "preparation_started");
     // Read-only market preparation is safe to overlap with the durable cap
     // claim. Its result is discarded unless the reservation wins; no intent or
@@ -2782,6 +2856,36 @@ async function _executeScalpAttempt(
   // Pin routing from this attempt's authoritative force refresh. A same-lifecycle
   // zero-fill retry re-enters this function and obtains a fresh value.
   const exchangeIndex = refreshed.exchangeIndex!;
+  if (mode === "live" && runtime === LIVE_SCALP_ATTEMPT_RUNTIME) {
+    const fundingPermit = _preflightFundingPermits.get(
+      `${mode}:${windowKey}:${symbol}`,
+    );
+    if (
+      !fundingPermit
+      || fundingPermit.exchangeIndex !== exchangeIndex
+      || fundingPermit.availableBalance + 0.0001
+        < fundingPermit.targetAvailableBalance
+      || fundingPermit.targetAvailableBalance + 0.0001 < reservedBudget
+    ) {
+      await runtime.updateReservationStatus(
+        mode,
+        symbol,
+        windowKey,
+        "skipped",
+        fundingPermit
+          ? "funded_exchange_index_changed_after_refresh"
+          : "route_funding_not_ready_after_refresh",
+        true,
+        {
+          ..._timingEvidence(),
+          balanceExchangeIndex: fundingPermit?.exchangeIndex ?? null,
+          availableBalance: fundingPermit?.availableBalance ?? null,
+          totalRequired: fundingPermit?.targetAvailableBalance ?? null,
+        },
+      );
+      return;
+    }
+  }
   if (refreshed.ticker !== ticker || refreshed.closeTime !== closeTime) {
     logger.info(
       { symbol, reservedTicker: ticker, refreshedTicker: refreshed.ticker },
