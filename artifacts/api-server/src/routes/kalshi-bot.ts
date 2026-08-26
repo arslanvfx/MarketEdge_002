@@ -49,6 +49,7 @@ import {
 } from "../lib/kalshi-regular-order-reconcile";
 import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
 import { getDailyPnlSimulation, getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
+import { getRegularPlacementFunnelSnapshot } from "../lib/kalshi-regular-placement-funnel.ts";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -556,6 +557,11 @@ function pipelineStatusHandler(_req: any, res: any) {
 router.get("/crypto/bot/pipeline-status", pipelineStatusHandler);
 // Alias matching the task spec path
 router.get("/bot/pipeline-status", pipelineStatusHandler);
+router.get("/crypto/bot/regular-placement-funnel", requireAuth, (req, res) => {
+  const parsed = Number.parseInt(String(req.query.limit ?? "50"), 10);
+  const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 200)) : 50;
+  res.json(getRegularPlacementFunnelSnapshot(limit));
+});
 
 // GET /crypto/bot/coin-guard-state?mode=paper|live — per-coin streak / daily-loss / slippage state (public — read only)
 router.get("/crypto/bot/coin-guard-state", (req, res) => {

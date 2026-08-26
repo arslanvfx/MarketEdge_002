@@ -136,3 +136,4 @@
 - [Smart Exit ownership boundary](smart-exit-ownership-boundary.md) — recommendations never own positions; execution requires durable owner delegation and final pre-submit revalidation.
 - [Transaction history row limits](transaction-history-row-limits.md) — filter transactions vs. high-volume skip telemetry in SQL before limiting rows, or real bets disappear from the UI.
 - [Publish diff boolean checks](publish-diff-boolean-checks.md) — bare boolean CHECK expressions may serialize as nested CHECK; use explicit equality forms.
+- [Regular placement funnel safety](regular-placement-funnel-safety.md) — paper parity uses identical read-only live predicates; hot-path telemetry must be hard-bounded, idempotent, and non-throwing.

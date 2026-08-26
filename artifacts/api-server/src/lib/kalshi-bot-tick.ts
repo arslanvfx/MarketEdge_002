@@ -53,6 +53,7 @@ import {
   evaluateRegularFreefallPreSubmitGuard,
 } from "./kalshi-regular-freefall-guard";
 import { shouldPersistRegularFreefallSkip } from "./kalshi-freefall-telemetry";
+import { regularPlacementFunnel, type RegularPlacementTerminalOutcome } from "./kalshi-regular-placement-funnel";
 import crypto from "crypto";
 import { decideRemainderAttempt } from "./kalshi-entry-remainder";
 import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
@@ -2293,6 +2294,29 @@ async function _runBotTick(
     finalQuoteReadyAt = Date.now();
   }
 
+  let placementCandidateId: string | null = null;
+  const ensurePlacementCandidate = (mode: BotMode = effectiveMode): string => {
+    if (placementCandidateId == null) {
+      placementCandidateId = regularPlacementFunnel.identify({
+        mode,
+        symbol: sym,
+        windowKey,
+        side: direction,
+      }, convictionHotPathStartedAt).id;
+    }
+    return placementCandidateId;
+  };
+  let paperLiveEligibilityReason: string | null = null;
+  const markPlacementTerminal = (
+    outcome: RegularPlacementTerminalOutcome,
+    reason: string,
+  ): void => {
+    regularPlacementFunnel.terminal(ensurePlacementCandidate(), outcome, Date.now(), reason);
+  };
+  const markPaperLiveIneligible = (reason: string): void => {
+    paperLiveEligibilityReason ??= reason;
+  };
+
   // Trajectory gate — regular bets: block if price is trending dangerously into target.
   // Use live-patched last candle close — always fresher than predCache.price.
   if (
@@ -2314,6 +2338,9 @@ async function _runBotTick(
       );
       setTickAbortReason(sym, windowKey,
         `trajectory gate: price momentum too close to target (projected margin ${traj.projectedMarginPct.toFixed(3)}%)`);
+      const trajectoryReason = traj.reason ?? "regular trajectory guard";
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), trajectoryReason);
+      markPlacementTerminal("proximity", trajectoryReason);
       return;
     }
     logger.info(
@@ -2371,6 +2398,8 @@ async function _runBotTick(
       );
       setTickAbortReason(sym, windowKey,
         `strike-proximity re-check: gap ${_prox.gapPct?.toFixed(3) ?? '?'}% < threshold ${_prox.effectiveThreshold.toFixed(3)}%`);
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "strike proximity guard");
+      markPlacementTerminal("proximity", "strike proximity guard");
       void persistBetRecord({
         symbol: sym,
         windowKey,
@@ -2435,6 +2464,8 @@ async function _runBotTick(
       );
       setTickAbortReason(sym, windowKey,
         `direction guard: price moving toward strike (slope ${_pDir.slopePrice?.toFixed(2) ?? "?"}/candle) — order aborted`);
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "pipeline direction guard");
+      markPlacementTerminal("direction", "pipeline direction guard");
       return;
     }
     logger.info(
@@ -2485,6 +2516,8 @@ async function _runBotTick(
     );
     releaseConvictionEntryReservation("final smart-hours block");
     setTickAbortReason(sym, windowKey, "smart hours: current hour is silenced — order rejected at placement time");
+    regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "final smart-hours block");
+    markPlacementTerminal("smart_hours", "final smart-hours block");
     return;
   }
 
@@ -2507,6 +2540,8 @@ async function _runBotTick(
         releaseConvictionEntryReservation("final smart-hours reduced sizing below one contract");
         setTickAbortReason(sym, windowKey,
           `smart hours: hour turned reduced (${qhFinal.reducedPct}%) — budget no longer buys 1 contract; order rejected at placement time`);
+        regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "smart-hours reduced sizing below one contract");
+        markPlacementTerminal("smart_hours", "smart-hours reduced sizing below one contract");
         return;
       }
       logger.warn(
@@ -2530,6 +2565,7 @@ async function _runBotTick(
   // stay live-correct because closePosition uses pos.entryMode (not S.botMode
   // or these flags).
   const entryMode: BotMode = (shadowQhBypassActive || qhFinal.forcedPaper) ? "paper" : S.botMode;
+  ensurePlacementCandidate(entryMode);
   if (qhFinal.forcedPaper && !shadowQhBypassActive) {
     logger.info(
       { sym, windowKey, direction, utcHour: qhFinal.utcHour, source: "pre-order-final-gate" },
@@ -2579,6 +2615,8 @@ async function _runBotTick(
       toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
     });
     if (entryMode === "live") {
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), evidence);
+      markPlacementTerminal("freefall", evidence);
       setTickAbortReason(sym, windowKey, evidence);
       releaseConvictionEntryReservation(evidence);
       logger.warn(
@@ -2628,11 +2666,13 @@ async function _runBotTick(
       if (S.config.shadowPaperBets) persistSkip("paper");
       return;
     }
+    markPaperLiveIneligible(evidence);
   } else {
     convictionDirectionGuardBlockedMap.delete(sym);
   }
 
   if (entryMode === "live") {
+    regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), true, Date.now());
     // Persist and submit the exact same YES-side limit. Older fallback paths
     // stored NULL and let placeOrder derive the price internally, which made an
     // uncertain order impossible to match strictly during reconciliation.
@@ -2665,6 +2705,8 @@ async function _runBotTick(
         maxTotalExposure: S.config.maxTotalExposure,
       });
       if (!claim.claimed) {
+        regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
+        markPlacementTerminal("intent_denied", claim.reason ?? "durable reservation denied");
         // An unresolved intent already exists for this symbol/window — a prior
         // attempt is in flight or was left UNKNOWN. Never place a second live
         // order; block and retain that reservation until reconciliation.
@@ -2678,6 +2720,7 @@ async function _runBotTick(
         return;
       }
       _intentClaimed = true;
+      regularPlacementFunnel.reservation(ensurePlacementCandidate(), true, Date.now());
       logger.info(
         {
           sym,
@@ -2690,6 +2733,9 @@ async function _runBotTick(
         "[kalshi-bot] conviction entry latency: final checks and atomic reservation complete",
       );
     } catch (claimErr) {
+      const claimReason = claimErr instanceof Error ? claimErr.message : "durable intent persist failed";
+      regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claimReason);
+      markPlacementTerminal("intent_error", claimReason);
       // Could not persist the durable intent — fail CLOSED. Placing a live order
       // without a durable record would risk an unrecoverable rogue order.
       releaseConvictionEntryReservation("durable intent persist failed");
@@ -2738,6 +2784,7 @@ async function _runBotTick(
       );
 
       const exchangeSubmitStartedAt = Date.now();
+      regularPlacementFunnel.submit(ensurePlacementCandidate(), exchangeSubmitStartedAt);
       const fokResult = await placeEntryOrderWithSizeFallback(
         {
           clientOrderId: _intentReservationId,
@@ -2755,6 +2802,8 @@ async function _runBotTick(
         undefined,
         { disableHalfSizeRetry: true },
       );
+      const exchangeResponseAt = Date.now();
+      regularPlacementFunnel.response(ensurePlacementCandidate(), exchangeResponseAt);
       logger.info(
         {
           sym,
@@ -2768,6 +2817,8 @@ async function _runBotTick(
       );
 
       if (fokResult.filledCount === 0) {
+        regularPlacementFunnel.fill(ensurePlacementCandidate(), 0, exchangeResponseAt);
+        markPlacementTerminal("zero_fill", "entry order returned zero fills");
         // FOK returned 0 fills — no resting contracts at our price right now.
         // Allow up to 2 attempts (spaced by ~30 s bot ticks) before blocking the
         // coin for the rest of the window. Gives the book time to build
@@ -2937,6 +2988,8 @@ async function _runBotTick(
       // result is indeterminate: treat as UNKNOWN LIVE EXPOSURE, retain the
       // reservation, and halt (do NOT auto-close, do NOT place an opposite order).
       if (result.avgPrice == null) {
+        regularPlacementFunnel.fill(ensurePlacementCandidate(), result.filledCount, Date.now());
+        markPlacementTerminal("unknown", "confirmed fill returned no average price");
         void markRegularOrderIntentUnknown({
           clientOrderId: _intentReservationId,
           reason: "confirmed fill with missing avg price",
@@ -3042,7 +3095,10 @@ async function _runBotTick(
       }
       // Invalidate the cached balance so the next entry guard fetches a fresh value.
       invalidateBalanceCache();
+      regularPlacementFunnel.fill(ensurePlacementCandidate(), result.filledCount, Date.now());
+      markPlacementTerminal("filled", `confirmed ${result.filledCount} contract fill`);
     } catch (err) {
+      regularPlacementFunnel.response(ensurePlacementCandidate(), Date.now());
       // ── UNKNOWN LIVE EXPOSURE (Task #667 req #2/#3/#7) ────────────────────
       // An UncertainOrderError means the broker returned an HTTP-2xx body we
       // could not trust (malformed fill_count/order_id/price, overfill, etc.), OR
@@ -3053,6 +3109,10 @@ async function _runBotTick(
       // UNKNOWN (retain the reservation → blocks re-entry) and halt.
       const uncertain = isUncertainOrderError(err);
       if (uncertain) {
+        markPlacementTerminal(
+          "unknown",
+          `uncertain order outcome: ${(err as { reason?: string }).reason ?? "unknown"}`,
+        );
         const coid = (err as { clientOrderId?: string }).clientOrderId ?? null;
         void markRegularOrderIntentUnknown({
           clientOrderId: _intentReservationId,
@@ -3074,6 +3134,10 @@ async function _runBotTick(
       // request, auth failure, invalid ticker): no order was accepted, so it is
       // safe to release the durable reservation and allow a retry next tick.
       logger.error({ err, sym }, "[kalshi-bot] order placement failed");
+      markPlacementTerminal(
+        "definite_error",
+        err instanceof Error ? err.message : "definite order placement error",
+      );
       void resolveRegularOrderIntent({
         clientOrderId: _intentReservationId,
         status: "skipped",
@@ -3087,6 +3151,68 @@ async function _runBotTick(
         `order placement failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown error"}`);
       return;
     }
+  } else {
+    // Paper never claims a durable intent or submits an order. It does perform
+    // a read-only preview of the remaining live-only predicates so funnel
+    // comparisons use executable opportunities rather than all synthetic fills.
+    if (paperLiveEligibilityReason == null) {
+      const slipInfo = coinSlippageStrikes.get(sym);
+      if (checkSlippageStrikeGuard(slipInfo, windowKey)) {
+        markPaperLiveIneligible("slippage strike guard would block live entry");
+      }
+    }
+    if (
+      paperLiveEligibilityReason == null
+      && (S.config.convictionMaxDailySpend ?? 0) > 0
+      && S.dailySpendAmount + contractCount * expectedFillCost > S.config.convictionMaxDailySpend!
+    ) {
+      markPaperLiveIneligible("live daily spend cap would be exceeded");
+    }
+    if (paperLiveEligibilityReason == null) {
+      try {
+        const previewBalance = await getCachedKalshiBalance();
+        const minBalance = S.config.minAccountBalance ?? 5;
+        if (checkBalanceGuard(previewBalance, minBalance)) {
+          markPaperLiveIneligible(
+            `balance $${previewBalance.toFixed(2)} below $${minBalance.toFixed(2)} minimum`,
+          );
+        }
+      } catch {
+        markPaperLiveIneligible("live balance unavailable");
+      }
+    }
+    if (paperLiveEligibilityReason == null) {
+      const openExposure = Array.from(openPositions.values())
+        .reduce((sum, position) => sum + position.betAmount, 0);
+      if (checkExposureGuard(
+        openExposure,
+        contractCount * expectedFillCost,
+        S.config.maxTotalExposure ?? 5,
+      )) {
+        markPaperLiveIneligible("live exposure cap would be exceeded");
+      }
+    }
+    if (paperLiveEligibilityReason == null) {
+      try {
+        if (await hasUnresolvedRegularIntent("live", sym, windowKey)) {
+          markPaperLiveIneligible("unresolved live intent exists");
+        }
+      } catch {
+        markPaperLiveIneligible("live intent preview unavailable");
+      }
+    }
+    const paperEligible = paperLiveEligibilityReason == null;
+    regularPlacementFunnel.finalEligibility(
+      ensurePlacementCandidate(),
+      paperEligible,
+      Date.now(),
+      paperLiveEligibilityReason,
+    );
+    regularPlacementFunnel.paperLiveEligibility(
+      ensurePlacementCandidate(),
+      paperEligible,
+      paperLiveEligibilityReason,
+    );
   }
 
   const id = `${sym}:${windowKey}:${Date.now()}`;
@@ -3181,6 +3307,14 @@ async function _runBotTick(
     // Max-bet flag: true when the stability gate + probability roll upgraded this bet.
     isMaxBet: boostBetSize != null,
   });
+
+  if (entryMode === "paper") {
+    regularPlacementFunnel.paperSynthetic(
+      ensurePlacementCandidate(),
+      Date.now(),
+      paperLiveEligibilityReason ?? "paper synthetic fill",
+    );
+  }
 
   // Resolve the live intent only AFTER the open position and bet row exist.
   // A crash before this point leaves the intent reserved, which blocks the
