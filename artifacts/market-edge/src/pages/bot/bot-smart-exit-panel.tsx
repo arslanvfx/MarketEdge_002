@@ -3,7 +3,12 @@ import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Shield, AlertTriangle, PowerOff, Trash2 } from "lucide-react";
 import { API_BASE, fmt$, fmtDateTime } from "./utils";
-import type { SmartExitStatus, SmartExitEvaluation, SmartExitReplayReport, SmartExitCapability, SmartExitConfig, SmartExitComponentHealth, SmartExitLifecycleLedger, SmartExitSensitivity } from "./types";
+import type {
+  ScalperSmartExitConfig, ScalperSmartExitLifecycleLedger, ScalperSmartExitReplayReport,
+  ScalperSmartExitStatus, SmartExitStatus, SmartExitEvaluation, SmartExitReplayReport,
+  SmartExitCapability, SmartExitConfig, SmartExitComponentHealth, SmartExitLifecycleLedger,
+  SmartExitSensitivity,
+} from "./types";
 
 const fmtConf = (n: number | undefined | null) => n != null ? `${(n * 100).toFixed(1)}%` : "—";
 const sensitivityLabel = (value: SmartExitSensitivity | undefined) =>
@@ -100,6 +105,181 @@ function SectionHeader({ title }: { title: string }) {
 
 interface Props {
   authPost: (path: string, body: object) => Promise<unknown>;
+}
+
+function ScalperSmartExitSection({
+  authPost,
+  canManage,
+}: {
+  authPost: Props["authPost"];
+  canManage: boolean;
+}) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const { data: status } = useQuery<ScalperSmartExitStatus>({
+    queryKey: ["scalper-smart-exit-status"],
+    queryFn: () => fetch(`${API_BASE}/crypto/scalper/smart-exit/status`).then((r) => r.json()),
+    refetchInterval: 1_000,
+  });
+  const { data: lifecycle } = useQuery<ScalperSmartExitLifecycleLedger>({
+    queryKey: ["scalper-smart-exit-lifecycle"],
+    queryFn: () => fetch(`${API_BASE}/crypto/scalper/smart-exit/lifecycle?limit=100`).then((r) => r.json()),
+    refetchInterval: 15_000,
+  });
+  const { data: replay } = useQuery<{
+    reports: ScalperSmartExitReplayReport[];
+    disclaimer: string;
+  }>({
+    queryKey: ["scalper-smart-exit-replay"],
+    queryFn: () => fetch(`${API_BASE}/crypto/scalper/smart-exit/replay`).then((r) => r.json()),
+    refetchInterval: 60_000,
+  });
+  const update = async (patch: Partial<ScalperSmartExitConfig>) => {
+    if (!canManage || busy) return;
+    setBusy(true);
+    try {
+      await authPost("/crypto/scalper/smart-exit/config", patch);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["scalper-smart-exit-status"] }),
+        qc.invalidateQueries({ queryKey: ["scalper-smart-exit-lifecycle"] }),
+      ]);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const activateMode = (mode: ScalperSmartExitConfig["mode"]) => {
+    // Live activation deliberately carries both fields in one authenticated request.
+    void update({ mode, enabled: mode !== "off" });
+  };
+  const actual = lifecycle?.summary.actual;
+  const shadow = lifecycle?.summary.shadowObserved;
+
+  return (
+    <div className="mb-6 overflow-hidden rounded-xl border border-amber-300/25 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.11),transparent_38%),#070706] shadow-[0_18px_60px_rgba(0,0,0,0.45)]">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-amber-200/15 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-amber-300/30 bg-amber-400/10 shadow-[inset_0_0_18px_rgba(251,191,36,0.08)]">
+            <Shield className="h-4 w-4 text-amber-200" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold tracking-tight text-amber-50">High-Value Scalper · Fast Smart Exit</h2>
+            <p className="mt-0.5 text-[10px] text-amber-100/50">
+              Dedicated 1-second owner, ledger, authenticated depth and reconciliation boundary.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-lg border border-amber-200/15 bg-black/50 p-0.5">
+            {(["off", "shadow", "paper-exit", "live-exit"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                disabled={busy || !canManage}
+                onClick={() => activateMode(mode)}
+                className={`rounded-md px-2.5 py-1 text-[9px] font-black uppercase tracking-wider transition ${
+                  status?.config.mode === mode
+                    ? mode === "live-exit"
+                      ? "bg-red-500 text-white"
+                      : "bg-amber-300 text-black"
+                    : "text-amber-100/45 hover:bg-amber-200/10 hover:text-amber-50"
+                } disabled:opacity-40`}
+              >
+                {mode.replace("-", " ")}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            disabled={busy || !canManage || !status?.config.enabled}
+            onClick={() => void authPost("/crypto/scalper/smart-exit/emergency-disable", {})
+              .then(() => qc.invalidateQueries({ queryKey: ["scalper-smart-exit-status"] }))}
+            className="rounded-lg border border-red-400/30 bg-red-500/10 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-wider text-red-200 disabled:opacity-40"
+          >
+            E-Stop
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-0 lg:grid-cols-[1.2fr_0.8fr]">
+        <div className="border-b border-amber-200/10 lg:border-b-0 lg:border-r">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200/10 px-4 py-3">
+            <div>
+              <div className="text-[9px] font-black uppercase tracking-[0.18em] text-amber-200/65">Current fast evaluations</div>
+              <div className="mt-1 font-mono text-[9px] text-amber-50/35">
+                {status?.started ? "MONITOR ONLINE" : "MONITOR OFFLINE"} · {status?.schedulerMs ?? 1_000}ms · v{status?.configVersion ?? 0}
+              </div>
+            </div>
+            <div className="flex rounded-md border border-amber-200/10 bg-black/40 p-0.5">
+              {(["more_aggressive", "default", "less_aggressive"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  disabled={busy || !canManage}
+                  onClick={() => void update({ sensitivity: value })}
+                  className={`rounded px-2 py-1 text-[8px] font-bold uppercase ${
+                    status?.config.sensitivity === value
+                      ? "bg-amber-300 text-black"
+                      : "text-amber-100/45 hover:text-amber-50"
+                  } disabled:opacity-40`}
+                >
+                  {value.replace("_", " ")}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="max-h-64 overflow-auto">
+            <table className="w-full min-w-[720px] text-left text-[10px]">
+              <thead className="sticky top-0 bg-[#0a0907] text-[8px] uppercase tracking-wider text-amber-100/35">
+                <tr><th className="px-4 py-2">Market</th><th className="px-3 py-2">Decision</th><th className="px-3 py-2">Velocity / Accel</th><th className="px-3 py-2">Crossing</th><th className="px-3 py-2">Kalshi</th><th className="px-3 py-2">Qty</th></tr>
+              </thead>
+              <tbody>
+                {(status?.evaluations ?? []).map((evaluation) => (
+                  <tr key={evaluation.orderId} className="border-t border-amber-200/[0.06] text-amber-50/75">
+                    <td className="px-4 py-2"><span className="font-bold text-amber-100">{evaluation.symbol}</span><div className="max-w-32 truncate font-mono text-[8px] text-amber-100/35">{evaluation.ticker}</div></td>
+                    <td className="px-3 py-2"><span className={`rounded border px-1.5 py-0.5 font-black uppercase ${evaluation.disposition === "exit" ? "border-red-400/40 bg-red-500/15 text-red-200" : evaluation.disposition === "blocked" ? "border-amber-400/30 bg-amber-400/10 text-amber-200" : "border-white/10 bg-white/5 text-white/55"}`}>{evaluation.disposition}</span><div className="mt-1 max-w-48 truncate text-[8px] text-amber-50/35" title={evaluation.reason}>{evaluation.reason}</div></td>
+                    <td className="px-3 py-2 font-mono">{evaluation.adverseVelocityPerSecond?.toFixed(3) ?? "—"} / {evaluation.adverseAccelerationPerSecond2?.toFixed(3) ?? "—"}</td>
+                    <td className="px-3 py-2 font-mono">{evaluation.projectedCrossingSeconds?.toFixed(1) ?? "—"}s <span className="text-amber-100/30">/ {evaluation.secondsRemaining.toFixed(1)}s</span></td>
+                    <td className="px-3 py-2 font-mono">{evaluation.marketDeterioration == null ? "—" : `${(evaluation.marketDeterioration * 100).toFixed(1)}¢`}</td>
+                    <td className="px-3 py-2 font-mono">{evaluation.remainingQuantity}</td>
+                  </tr>
+                ))}
+                {!status?.evaluations?.length && <tr><td colSpan={6} className="px-4 py-8 text-center font-mono text-amber-50/30">No filled Scalper positions are currently being monitored.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="p-4">
+          <div className="text-[9px] font-black uppercase tracking-[0.18em] text-amber-200/65">Effectiveness ledger</div>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            {[
+              ["ACTUAL NET", actual?.netValue, actual?.scoreable ?? 0],
+              ["SHADOW NET", shadow?.netValue, shadow?.scoreable ?? 0],
+              ["GROSS SAVED", actual?.grossMoneySaved, actual?.helped ?? 0],
+              ["FORFEITED", actual?.grossMoneyForfeited, actual?.harmed ?? 0],
+            ].map(([label, value, count]) => (
+              <div key={String(label)} className="rounded-lg border border-amber-200/10 bg-amber-100/[0.035] p-3">
+                <div className="text-[8px] font-bold uppercase tracking-wider text-amber-100/40">{label}</div>
+                <div className={`mt-1 font-mono text-sm font-black ${Number(value ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}>{value == null ? "—" : fmt$(Number(value))}</div>
+                <div className="mt-0.5 text-[8px] text-amber-100/30">{count} scoreable outcomes</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 text-[9px] font-black uppercase tracking-[0.18em] text-amber-200/65">Same-snapshot replay</div>
+          <div className="mt-2 space-y-1.5">
+            {(replay?.reports ?? []).map((report) => (
+              <div key={report.sensitivity} className="flex items-center justify-between rounded-md border border-amber-200/10 bg-black/30 px-2.5 py-2 text-[9px]">
+                <span className="font-bold uppercase text-amber-100/60">{report.sensitivity.replace("_", " ")}</span>
+                <span className="font-mono text-amber-50/45">{report.triggered} exits · {report.helped} helped · {report.harmed} harmed</span>
+                <span className={`font-mono font-black ${report.netValue >= 0 ? "text-emerald-300" : "text-red-300"}`}>{fmt$(report.netValue)}</span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-[8px] leading-relaxed text-amber-100/30">{replay?.disclaimer ?? "Replay waits for settled positions with persisted post-entry evidence."}</p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function BotSmartExitPanel({ authPost }: Props) {
@@ -317,13 +497,9 @@ export function BotSmartExitPanel({ authPost }: Props) {
     && report.symbol === "GLOBAL"
     && report.version === "global-counterfactual-v1",
   )?.globalComparison;
-  const counterfactualModes = ([
-    "more_aggressive",
-    "default",
-    "less_aggressive",
-  ] as const).map((sensitivity) => counterfactual?.comparisons[sensitivity]).filter(Boolean);
 
   return (
+    <>
     <div className="bg-[#0b0d13] border border-white/10 rounded-xl overflow-hidden mb-6 flex flex-col shadow-2xl [&_.text-slate-700]:!text-slate-400 [&_.text-slate-600]:!text-slate-400 [&_.text-slate-500]:!text-slate-300 [&_.text-slate-400]:!text-slate-200">
       <div className="px-4 py-3 border-b border-white/10 flex flex-wrap items-center justify-between gap-4 bg-white/[0.02]">
         <div className="flex items-center gap-3">
@@ -596,40 +772,85 @@ export function BotSmartExitPanel({ authPost }: Props) {
               {resetFeedback.text}
             </div>
           )}
-          <div className="border-b border-white/10 bg-emerald-950/10 p-4">
-            <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
+          <div className="border-b border-white/10 bg-[#0a0d14] p-5 lg:p-6">
+            <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
               <div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Actual results</div>
-                <div className="mt-0.5 text-[9px] text-slate-400">Observed Smart Exit lifecycle outcomes; not replay estimates.</div>
+                <div className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-200">
+                  Actual Results &amp; Mode Replay
+                </div>
+                <div className="mt-1 text-[10px] text-slate-500">
+                  Confirmed fills stay separate from shadow observations and same-snapshot estimates.
+                </div>
               </div>
-              <div className="text-[9px] font-mono text-slate-400">
-                Confirmed fills: {actualLifecycle?.scoreable ?? 0} scoreable · {actualLifecycle?.pending ?? 0} pending
+              <div className="flex flex-wrap gap-1.5 text-[8px] font-bold uppercase tracking-wider">
+                <span className="rounded-full border border-emerald-400/20 bg-emerald-400/5 px-2 py-1 text-emerald-300">Actual · confirmed</span>
+                <span className="rounded-full border border-indigo-400/20 bg-indigo-400/5 px-2 py-1 text-indigo-300">Shadow · observed</span>
+                <span className="rounded-full border border-amber-300/20 bg-amber-300/5 px-2 py-1 text-amber-200">Replay · estimated</span>
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
               {([
-                ["Gross money saved", actualLifecycle?.grossMoneySaved ?? 0, "text-emerald-400"],
-                ["Gross money forfeited", actualLifecycle?.grossMoneyForfeited ?? 0, "text-red-400"],
-                ["Net value", actualLifecycle?.netValue ?? 0,
-                  (actualLifecycle?.netValue ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"],
-              ] as const).map(([label, value, color]) => (
-                <div key={label} className="rounded-md border border-white/10 bg-black/20 px-3 py-2">
-                  <div className="text-[8px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
-                  <div className={`mt-1 font-mono text-sm font-bold tabular-nums ${color}`}>{fmt$(value)}</div>
+                ["ACTUAL NET", actualLifecycle?.netValue ?? 0, actualLifecycle?.scoreable ?? 0, "metric-actual-net"],
+                ["SHADOW NET", shadowObserved?.netValue ?? 0, shadowObserved?.scoreable ?? 0, "metric-shadow-net"],
+                ["GROSS SAVED", actualLifecycle?.grossMoneySaved ?? 0, actualLifecycle?.scoreable ?? 0, "metric-gross-saved"],
+                ["FORFEITED", actualLifecycle?.grossMoneyForfeited ?? 0, actualLifecycle?.scoreable ?? 0, "metric-forfeited"],
+              ] as const).map(([label, value, outcomes, testId]) => (
+                <div key={label} className="rounded-lg border border-white/[0.04] bg-[#11141c] p-4 shadow-sm transition-colors hover:bg-[#141822]">
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2.5">{label}</div>
+                  <div className={`font-mono text-[22px] leading-none font-bold tabular-nums ${
+                    label === "FORFEITED" || value < 0 ? "text-rose-400" : "text-[#4ade80]"
+                  }`} data-testid={testId}>
+                    {fmt$(value)}
+                  </div>
+                  <div className="mt-2.5 text-[10px] text-slate-600 font-medium">
+                    {outcomes} scoreable outcomes
+                  </div>
                 </div>
               ))}
             </div>
-            <div className="mt-3 rounded-md border border-indigo-400/15 bg-indigo-950/10 px-3 py-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-300">Observed shadow simulations · not actual exits</span>
-                <span className={`font-mono text-[11px] font-bold ${(shadowObserved?.netValue ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  Net {(shadowObserved?.netValue ?? 0) > 0 ? "+" : ""}{fmt$(shadowObserved?.netValue ?? 0)}
+
+            <div className="mb-4 text-[11px] font-bold uppercase tracking-[0.18em] text-[#d6b976]">
+              SAME-SNAPSHOT REPLAY
+            </div>
+
+            {counterfactual ? (
+              <div className="flex flex-col gap-2.5">
+                {([
+                { key: "more_aggressive", label: "MORE AGGRESSIVE" },
+                { key: "default", label: "DEFAULT" },
+                { key: "less_aggressive", label: "LESS AGGRESSIVE" },
+              ] as const).map(({ key, label }) => {
+                const modeData = counterfactual?.comparisons?.[key];
+                return (
+                  <div key={key} className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-white/[0.04] bg-[#11141c] px-4 py-3.5 shadow-sm transition-colors hover:bg-[#141822]" data-testid={`replay-row-${key.replace('_', '-')}`}>
+                    <span className="text-[11px] font-bold tracking-wider text-slate-300 w-[140px] shrink-0">{label}</span>
+                    <span className="text-[11px] font-mono text-slate-500 flex-1 text-center sm:text-left whitespace-nowrap">
+                      {modeData?.triggered ?? 0} exits <span className="text-slate-700 mx-1.5">·</span> {modeData?.helped ?? 0} helped <span className="text-slate-700 mx-1.5">·</span> {modeData?.harmed ?? 0} harmed
+                    </span>
+                    <span className={`text-sm font-mono font-bold tabular-nums w-[80px] text-right shrink-0 ${(modeData?.netValue ?? 0) < 0 ? "text-red-400" : "text-[#4ade80]"}`}>
+                      {fmt$(modeData?.netValue ?? 0)}
+                    </span>
+                  </div>
+                );
+                })}
+              </div>
+            ) : (
+              <div
+                className="rounded-lg border border-dashed border-white/10 bg-[#11141c]/60 px-4 py-6 text-center text-[10px] font-mono text-slate-500"
+                data-testid="status-smart-exit-replay-empty"
+              >
+                No like-for-like replay snapshot is available yet. Mode results will appear after settled positions have full executable evidence.
+              </div>
+            )}
+
+            <div className="mt-5 text-[10px] leading-relaxed text-slate-500 max-w-4xl">
+              Replay uses only persisted authenticated executable snapshots. Historical positions without post-entry evidence, including the August 26 ETH and DOGE losses, are excluded rather than assigned fabricated savings.
+              {counterfactual && (
+                <span className="block mt-1.5 opacity-80">
+                  Shared coverage: {counterfactual.sharedCoverage.scoreable}/{counterfactual.sharedCoverage.eligible} eligible situations 
+                  (Period {counterfactual.sharedCoverage.period.from ? fmtEasternDate(counterfactual.sharedCoverage.period.from) : "—"}–{counterfactual.sharedCoverage.period.to ? fmtEasternDate(counterfactual.sharedCoverage.period.to) : "—"}).
                 </span>
-              </div>
-              <div className="mt-1 text-[9px] font-mono text-slate-400">
-                {shadowObserved?.scoreable ?? 0} scoreable · {shadowObserved?.pending ?? 0} pending · {shadowObserved?.helped ?? 0} helped · {shadowObserved?.harmed ?? 0} harmed
-                {" · "}saved {fmt$(shadowObserved?.grossMoneySaved ?? 0)} · forfeited {fmt$(shadowObserved?.grossMoneyForfeited ?? 0)}
-              </div>
+              )}
             </div>
           </div>
           <div className="overflow-x-auto overflow-y-auto max-h-[360px]">
@@ -784,39 +1005,6 @@ export function BotSmartExitPanel({ authPost }: Props) {
 
         {/* Right Column: Config & Replay */}
         <div className="flex flex-col h-full bg-[#0d1017]">
-          <SectionHeader title="Counterfactual replay · Same settled snapshot" />
-          <div className="border-b border-white/10 bg-indigo-950/10 p-4">
-            {counterfactual ? (
-              <>
-                <div className="mb-3 text-[9px] font-mono text-slate-400">
-                  Period {counterfactual.sharedCoverage.period.from ? fmtEasternDate(counterfactual.sharedCoverage.period.from) : "—"}–{counterfactual.sharedCoverage.period.to ? fmtEasternDate(counterfactual.sharedCoverage.period.to) : "—"}
-                  {" · "}{counterfactual.sharedCoverage.eligible} eligible · {counterfactual.sharedCoverage.excluded} excluded/unscoreable
-                  {" "}({counterfactual.sharedCoverage.missingSettlement} missing settlement, {counterfactual.sharedCoverage.insufficientEvidence} insufficient executable evidence)
-                </div>
-                <div className="grid grid-cols-1 gap-2">
-                  {counterfactualModes.map((modeSummary) => modeSummary && (
-                    <div key={modeSummary.sensitivity} className="rounded-md border border-indigo-400/15 bg-black/20 p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-300">{sensitivityLabel(modeSummary.sensitivity)}</span>
-                        <span className={`font-mono text-xs font-bold ${modeSummary.netValue >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                          Net {modeSummary.netValue > 0 ? "+" : ""}{fmt$(modeSummary.netValue)}
-                        </span>
-                      </div>
-                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] font-mono text-slate-400">
-                        <span>Saved <strong className="text-emerald-400">{fmt$(modeSummary.grossMoneySaved)}</strong></span>
-                        <span>Forfeited <strong className="text-red-400">{fmt$(modeSummary.grossMoneyForfeited)}</strong></span>
-                        <span>{modeSummary.triggered} triggered</span>
-                        <span>{modeSummary.helped} helped · {modeSummary.harmed} harmed</span>
-                        <span className="col-span-2">Coverage {counterfactual.sharedCoverage.scoreable}/{counterfactual.sharedCoverage.eligible} shared scoreable situations</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="text-[10px] font-mono italic text-slate-500">No like-for-like counterfactual snapshot has been calibrated yet.</div>
-            )}
-          </div>
           <SectionHeader title="Parameters & Config" />
           <div className="p-4 flex flex-col gap-5 border-b border-white/10 bg-white/[0.01]">
             <div className="flex flex-col gap-2">
@@ -919,5 +1107,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
       </div>
       </div>
     </div>
+    <ScalperSmartExitSection authPost={authPost} canManage={capability?.canManage === true} />
+    </>
   );
 }

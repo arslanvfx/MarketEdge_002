@@ -8,6 +8,7 @@ import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPn
 import { pool, startPoolPinger } from "@workspace/db";
 import { initScalper } from "./lib/kalshi-scalper-service";
 import { initSmartExit } from "./lib/kalshi-smart-exit-service";
+import { initScalperSmartExit } from "./lib/kalshi-scalper-smart-exit-service";
 import { loadConfigFromDB as loadStockConfig } from "./lib/stock/config";
 import { initStockMLFromDB } from "./lib/stock/ml";
 import { runScan as runStockScan, initLastScanAt, lastScanTime } from "./lib/stock/scanner";
@@ -705,6 +706,9 @@ app.listen(port, (err) => {
       // scheduler and cannot observe or mutate either trading subsystem.
       initSmartExit().catch((err) =>
         logger.warn({ err }, "[kalshi-smart-exit] startup failed (non-fatal)"),
+      );
+      initScalperSmartExit().catch((err) =>
+        logger.warn({ err }, "[kalshi-scalper-exit] startup failed (non-fatal)"),
       );
 
       // Bring up the stock trading vertical independently — a failure here must

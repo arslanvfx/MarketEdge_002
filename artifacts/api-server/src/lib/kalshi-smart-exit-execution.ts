@@ -81,6 +81,8 @@ export type SmartExitExecutionAuthorization =
   | { authorized: true; parameterVersion: string }
   | { authorized: false; reason: string };
 
+export const BASELINE_SMART_EXIT_PARAMETER_VERSION = "built-in-default";
+
 export function hasCompleteSmartExitParameterSnapshot(
   appliedVersion: SmartExitAppliedVersion,
 ): appliedVersion is SmartExitAppliedVersion & {
@@ -133,7 +135,21 @@ export function authorizeSmartExitExecution(params: {
   if (!config.enabled || config.mode === "off") return { authorized: false, reason: "disabled" };
   if (config.mode === "shadow") return { authorized: false, reason: "shadow mode never executes" };
   if (recommendation !== "exit") return { authorized: false, reason: "no exit recommendation" };
-  if (!appliedVersion) return { authorized: false, reason: "no operator-applied parameter version" };
+  if (position.owner.kind === "scalper") {
+    return { authorized: false, reason: "scalper early-close lifecycle unavailable" };
+  }
+  if (config.mode === "paper-exit" && position.owner.tradingMode !== "paper") {
+    return { authorized: false, reason: "paper-exit cannot close a live position" };
+  }
+  if (config.mode === "live-exit" && position.owner.tradingMode !== "live") {
+    return { authorized: false, reason: "live-exit cannot close a paper position" };
+  }
+  // The built-in policy selected by the operator is a complete executable
+  // policy. Applied versions are optional calibrated overrides, not a
+  // prerequisite that silently disables every baseline paper/live exit.
+  if (!appliedVersion) {
+    return { authorized: true, parameterVersion: BASELINE_SMART_EXIT_PARAMETER_VERSION };
+  }
   if (!hasCompleteSmartExitParameterSnapshot(appliedVersion)) {
     return { authorized: false, reason: "parameter version lacks an immutable policy snapshot" };
   }
@@ -141,16 +157,7 @@ export function authorizeSmartExitExecution(params: {
     appliedVersion.owner !== position.owner.kind
     || appliedVersion.symbol.toUpperCase() !== position.symbol.toUpperCase()
   ) return { authorized: false, reason: "parameter version scope mismatch" };
-  if (position.owner.kind === "scalper") {
-    return { authorized: false, reason: "scalper early-close lifecycle unavailable" };
-  }
-  if (config.mode === "paper-exit" && position.owner.tradingMode !== "paper") {
-    return { authorized: false, reason: "paper-exit cannot close a live position" };
-  }
   if (config.mode === "live-exit") {
-    if (position.owner.tradingMode !== "live") {
-      return { authorized: false, reason: "live-exit cannot close a paper position" };
-    }
     if (!appliedVersion.liveEligible) {
       return { authorized: false, reason: "parameter version is not live eligible" };
     }

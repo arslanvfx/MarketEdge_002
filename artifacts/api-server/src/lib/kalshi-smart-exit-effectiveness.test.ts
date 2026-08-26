@@ -4,6 +4,7 @@ import {
   computeSmartExitEffectiveness,
   computeSmartExitEffectivenessFromProceeds,
   getSmartExitShadowProceeds,
+  isSmartExitCounterfactualScoreable,
 } from "./kalshi-smart-exit-types.ts";
 
 test("Smart Exit records loss saved for a losing YES exit", () => {
@@ -70,4 +71,23 @@ test("shadow proceeds require full executable evidence", () => {
     liquidityCoverage: 1,
     remainingQuantity: 10,
   }, 10), 7);
+});
+
+test("shadow, blocked, and zero-fill triggers remain counterfactually scoreable", () => {
+  assert.equal(isSmartExitCounterfactualScoreable({
+    advisoryOnly: true,
+    executionStatus: "advisory",
+  }), true);
+  assert.equal(isSmartExitCounterfactualScoreable({
+    advisoryOnly: false,
+    executionStatus: "blocked",
+  }), true);
+  assert.equal(isSmartExitCounterfactualScoreable({
+    advisoryOnly: false,
+    executionStatus: "zero_fill",
+  }), true);
+  assert.equal(isSmartExitCounterfactualScoreable({
+    advisoryOnly: false,
+    executionStatus: "unknown",
+  }), false);
 });

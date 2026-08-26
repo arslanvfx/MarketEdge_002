@@ -1,7 +1,7 @@
 import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save, Thermometer, Waves, Crosshair, Timer, Users, Link2 } from "lucide-react";
 import React from "react";
 import { fmt$, fmtPct, fmtDateTime, fmtCrypto, fmtContracts, fmtDuration, wkToEst } from "./utils";
-import type { EntryGuardEvidence, HistoryRecord } from "./types";
+import type { EntryGuardEvidence, HistoryRecord, ScalperSmartExitLifecycleRecord } from "./types";
 import { describeEntryGuardEvidence } from "./scalper-ledger";
 
 const HIST_PAGE_SIZE = 20;
@@ -158,7 +158,15 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                    return null;
                  }
                  const isRegularMarketBet = !isScalper && !isShadow && !isSkip;
+                  const sigs = r.signals as Record<string, unknown> | null;
                  const smartExit = r.smartExit;
+                  const scalperSmartExit = isScalper
+                    ? sigs?.scalperSmartExit as ScalperSmartExitLifecycleRecord | null ?? null
+                    : null;
+                  const isScalperExitExecuted = scalperSmartExit != null
+                    && scalperSmartExit.status !== "advisory"
+                    && (scalperSmartExit.exitFillQuantity ?? 0) > 0;
+                  const isScalperExitShadow = scalperSmartExit?.status === "advisory";
                  const isExecutedPaperSmartExit = smartExit != null
                    && smartExit.owner === "regular"
                    && smartExit.tradingMode === "paper"
@@ -169,7 +177,6 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                 const isPendingEval = !isOpen && !isShadow && !isSkip && r.outcome == null;
                 const isWin = r.outcome === "win";
                 const isLoss = r.outcome === "loss";
-                const sigs = r.signals as Record<string, unknown> | null;
                 const closePx = sigs?.closePriceAtEval as number | null ?? null;
                 const endPx = closePx ?? (r.cryptoPriceAtExit != null ? parseFloat(r.cryptoPriceAtExit) : null);
                 const strike = r.kalshiTarget != null ? parseFloat(r.kalshiTarget) : null;
@@ -214,6 +221,16 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                        {isSmartExitAdvisory && (
                          <span className="flex items-center gap-1 rounded-full border border-indigo-400/40 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-bold text-indigo-200">
                            <Shield className="h-3 w-3" /> SMART EXIT · SHADOW / ADVISORY
+                         </span>
+                       )}
+                       {isScalperExitExecuted && (
+                         <span className="flex items-center gap-1 rounded-full border border-red-300/55 bg-red-500/25 px-2.5 py-1 text-xs font-black tracking-wide text-red-50 shadow-[0_0_16px_rgba(239,68,68,0.2)]">
+                           <Shield className="h-3.5 w-3.5" /> SCALPER SMART EXIT · STOP LOSS
+                         </span>
+                       )}
+                       {isScalperExitShadow && (
+                         <span className="flex items-center gap-1 rounded-full border border-amber-300/35 bg-amber-300/10 px-2 py-0.5 text-[10px] font-black text-amber-100">
+                           <Shield className="h-3 w-3" /> SCALPER SMART EXIT · SHADOW
                          </span>
                        )}
 
@@ -536,6 +553,57 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                          </div>
                        );
                      })()}
+
+                      {scalperSmartExit && (
+                        <div
+                          data-testid={`scalper-smart-exit-history-${r.id}`}
+                          className={`mb-3 rounded-xl border p-3 ${
+                            isScalperExitExecuted
+                              ? "border-red-300/35 bg-[linear-gradient(135deg,rgba(127,29,29,0.28),rgba(245,158,11,0.06))]"
+                              : "border-amber-300/25 bg-amber-300/[0.055]"
+                          }`}
+                        >
+                          <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <div className="text-[10px] font-black uppercase tracking-[0.16em] text-amber-100">
+                                {isScalperExitExecuted ? "Dedicated reducing-order lifecycle" : "Shadow advisory — no reducing order submitted"}
+                              </div>
+                              <div className="mt-0.5 text-[10px] text-amber-50/45">
+                                Triggered {fmtDateTime(scalperSmartExit.triggeredAt)}
+                                {scalperSmartExit.soldAt ? ` · Sold ${fmtDateTime(scalperSmartExit.soldAt)}` : ""}
+                              </div>
+                            </div>
+                            <span className={`rounded px-2 py-1 text-[9px] font-black uppercase ${
+                              scalperSmartExit.verdict === "saved_loss"
+                                ? "bg-emerald-500/20 text-emerald-200"
+                                : scalperSmartExit.verdict === "pending"
+                                  ? "bg-amber-500/15 text-amber-100"
+                                  : "bg-red-500/15 text-red-100"
+                            }`}>{scalperSmartExit.verdict.replace(/_/g, " ")}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            {[
+                              ["Entry / stake", scalperSmartExit.entryWinningPrice == null ? "—" : `${(scalperSmartExit.entryWinningPrice * 100).toFixed(1)}¢ · ${fmt$(scalperSmartExit.entryStake ?? 0)}`],
+                              ["Exit fill / qty", scalperSmartExit.exitWinningPrice == null ? "—" : `${(scalperSmartExit.exitWinningPrice * 100).toFixed(1)}¢ · ${scalperSmartExit.exitFillQuantity ?? 0}/${scalperSmartExit.quantity}`],
+                              ["Exit proceeds / P&L", scalperSmartExit.proceeds == null ? "—" : `${fmt$(scalperSmartExit.proceeds)} · ${scalperSmartExit.exitPnl != null && scalperSmartExit.exitPnl >= 0 ? "+" : ""}${scalperSmartExit.exitPnl == null ? "—" : fmt$(scalperSmartExit.exitPnl)}`],
+                              ["Hold result / P&L", `${scalperSmartExit.settlementResult?.toUpperCase() ?? "Pending"} · ${scalperSmartExit.holdPnl == null ? "—" : `${scalperSmartExit.holdPnl >= 0 ? "+" : ""}${fmt$(scalperSmartExit.holdPnl)}`}`],
+                              ["Gross saved", scalperSmartExit.valueSaved != null && scalperSmartExit.valueSaved > 0 ? fmt$(scalperSmartExit.valueSaved) : fmt$(0)],
+                              ["Forfeited", scalperSmartExit.valueSaved != null && scalperSmartExit.valueSaved < 0 ? fmt$(Math.abs(scalperSmartExit.valueSaved)) : fmt$(0)],
+                              ["Net value", scalperSmartExit.valueSaved == null ? "—" : `${scalperSmartExit.valueSaved >= 0 ? "+" : ""}${fmt$(scalperSmartExit.valueSaved)}`],
+                              ["Lifecycle", scalperSmartExit.status.replace(/_/g, " ").toUpperCase()],
+                            ].map(([label, value]) => (
+                              <div key={label} className={SCALPER_METRIC_CLASS + " rounded-lg p-2"}>
+                                <div className="text-[9px] uppercase text-amber-200/60">{label}</div>
+                                <div className="mt-0.5 font-mono text-xs text-amber-50">{value}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-2 text-[10px] text-amber-50/55">
+                            <span className="font-bold uppercase tracking-wide">Trigger reason:</span>{" "}
+                            {scalperSmartExit.triggerReason ?? "No trigger reason recorded"}
+                          </div>
+                        </div>
+                      )}
 
                     {/* Footer row */}
                      <div className={`flex items-center gap-3 text-[11px] flex-wrap ${isScalper ? "text-amber-100/65" : isRegularMarketBet ? "text-sky-100/65" : "text-muted-foreground"}`}>

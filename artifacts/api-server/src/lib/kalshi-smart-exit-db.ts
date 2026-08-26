@@ -721,7 +721,12 @@ export async function listUnsettledSmartExitLifecycles(limit = 25): Promise<Smar
   await ensureMigrated();
   const result = await pool.query(
     `SELECT payload FROM kalshi_smart_exit_lifecycles
-     WHERE settled_at IS NULL ORDER BY triggered_at ASC LIMIT $1`,
+      WHERE settled_at IS NULL
+        OR (
+          payload->>'verdict'='pending'
+          AND payload->>'settlementResult' IN ('yes','no')
+        )
+      ORDER BY triggered_at ASC LIMIT $1`,
     [Math.min(100, Math.max(1, limit))],
   );
   return result.rows.map((row: { payload: SmartExitLifecycleRecord }) => row.payload);

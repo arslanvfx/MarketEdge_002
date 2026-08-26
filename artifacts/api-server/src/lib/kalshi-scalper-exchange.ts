@@ -8,6 +8,7 @@
 
 import { logger } from "./logger.ts";
 import { parseScalpOrderResponse, type ParsedScalpFill } from "./kalshi-scalper-policy.ts";
+import { fetchKalshiAuthenticatedHistoryPages } from "./kalshi-trader.ts";
 import { submitKalshiCreateOrderV2 } from "./kalshi-trader.ts";
 
 export interface ScalpSubmitParams {
@@ -171,6 +172,76 @@ export async function placeScalpOrderStrict(
   return parsed;
 }
 
+export interface ScalpExitSubmitParams {
+  ticker: string; exchangeIndex: number; originalSide: "yes" | "no";
+  /** Minimum proceeds per held winning contract, represented in winning-side dollars. */
+  minimumWinningPrice: number; count: number; clientOrderId: string; timeoutMs?: number;
+}
+export function computeScalpExitYesLimitPrice(
+  originalSide: "yes" | "no",
+  minimumWinningPrice: number,
+): number {
+  if (!Number.isFinite(minimumWinningPrice) || minimumWinningPrice <= 0 || minimumWinningPrice >= 1) {
+    throw new Error("invalid scalp exit floor");
+  }
+  return originalSide === "yes"
+    ? Math.ceil(minimumWinningPrice * 100) / 100
+    : Math.floor((1 - minimumWinningPrice) * 100) / 100;
+}
+
+export function buildScalpExitOrderBody(
+  params: ScalpExitSubmitParams,
+): Record<string, unknown> {
+  if (!Number.isInteger(params.exchangeIndex) || params.exchangeIndex < 0) {
+    throw new Error("invalid scalp exit exchangeIndex");
+  }
+  const countHundredths = Math.round(params.count * 100);
+  if (
+    !Number.isFinite(params.count)
+    || params.count <= 0
+    || !Number.isSafeInteger(countHundredths)
+    || Math.abs(params.count * 100 - countHundredths) > 1e-8
+  ) throw new Error("invalid scalp exit count");
+  if (typeof params.clientOrderId !== "string" || params.clientOrderId.length < 8 || params.clientOrderId.length > 100) {
+    throw new Error("invalid persisted scalp exit clientOrderId");
+  }
+  const bookSide = params.originalSide === "yes" ? "ask" : "bid";
+  const yesPrice = computeScalpExitYesLimitPrice(
+    params.originalSide,
+    params.minimumWinningPrice,
+  );
+  return {
+    client_order_id: params.clientOrderId,
+    ticker: params.ticker,
+    exchange_index: params.exchangeIndex,
+    side: bookSide,
+    count: (countHundredths / 100).toFixed(2),
+    price: yesPrice.toFixed(2),
+    time_in_force: "fill_or_kill",
+    self_trade_prevention_type: "taker_at_cross",
+  };
+}
+/**
+ * Dedicated reducing exit boundary. Kalshi V2 has no action field: selling a
+ * YES position is an ASK (acquire NO exposure), while selling a NO position is
+ * a BID (acquire YES exposure). The YES-side limit preserves the winning-side
+ * proceeds floor: YES sell -> yes price >= floor; NO sell -> yes price <= 1-floor.
+ * Full authenticated depth is proven immediately before this all-or-nothing FOK
+ * request. This boundary never imports regular closePosition.
+ */
+export async function placeScalpExitOrderStrict(params: ScalpExitSubmitParams): Promise<ParsedScalpFill> {
+  const body = buildScalpExitOrderBody(params);
+  let raw: unknown;
+  try {
+    raw = await submitKalshiCreateOrderV2(body, params.timeoutMs ?? 10_000);
+  } catch (err) {
+    const definitive = parseDefinitiveScalpOrderRejection(err);
+    if (definitive) throw new DefinitiveScalpOrderRejectionError(definitive);
+    throw err;
+  }
+  return parseScalpOrderResponse(raw, params.count);
+}
+
 // ---------------------------------------------------------------------------
 // Authoritative read-side reconciliation
 // ---------------------------------------------------------------------------
@@ -180,6 +251,9 @@ const LEGACY_MATCH_WINDOW_MS = 10_000;
 export interface ScalpReconciliationInput {
   ticker: string;
   side: "yes" | "no";
+  /** Defaults to the entry-side book direction. Exit reconciliation overrides both fields. */
+  expectedBookSide?: "bid" | "ask";
+  expectedOutcomeSide?: "yes" | "no";
   count: number;
   limitPrice: number;
   clientOrderId: string | null;
@@ -248,13 +322,17 @@ function asObject(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function orderDirectionMatches(order: Record<string, unknown>, side: "yes" | "no"): boolean {
+function orderDirectionMatches(
+  order: Record<string, unknown>,
+  side: "yes" | "no",
+  expectedBookSide = side === "yes" ? "bid" : "ask",
+  expectedOutcomeSide = side,
+): boolean {
   const outcomeSide = order["outcome_side"];
   const bookSide = order["book_side"];
-  const expectedBookSide = side === "yes" ? "bid" : "ask";
-  if (outcomeSide != null && outcomeSide !== side) return false;
+  if (outcomeSide != null && outcomeSide !== expectedOutcomeSide) return false;
   if (bookSide != null && bookSide !== expectedBookSide) return false;
-  return outcomeSide === side || bookSide === expectedBookSide;
+  return outcomeSide === expectedOutcomeSide || bookSide === expectedBookSide;
 }
 
 function orderIdentityMatches(
@@ -262,7 +340,12 @@ function orderIdentityMatches(
   input: ScalpReconciliationInput,
 ): boolean {
   if (order["ticker"] !== input.ticker) return false;
-  if (!orderDirectionMatches(order, input.side)) return false;
+  if (!orderDirectionMatches(
+    order,
+    input.side,
+    input.expectedBookSide,
+    input.expectedOutcomeSide,
+  )) return false;
   const initialCount = fixedCountHundredths(order["initial_count_fp"]);
   const requestedCount = fixedCountHundredths(input.count);
   if (initialCount == null || requestedCount == null || initialCount !== requestedCount) return false;
@@ -392,7 +475,12 @@ export function resolveScalpReconciliationEvidence(
       !fillId
       || fillIds.has(fillId)
       || fill["ticker"] !== input.ticker
-      || !orderDirectionMatches(fill, input.side)
+      || !orderDirectionMatches(
+        fill,
+        input.side,
+        input.expectedBookSide,
+        input.expectedOutcomeSide,
+      )
       || count == null
       || count <= 0n
       || yesPrice == null
@@ -473,43 +561,6 @@ export function resolveScalpReconciliationEvidence(
   };
 }
 
-async function fetchSignedJson(path: string): Promise<unknown> {
-  const res = await fetch(`${KALSHI_TRADE_BASE}${path}`, {
-    method: "GET",
-    headers: makeSignedHeaders("GET", path),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Kalshi GET ${path.split("?")[0]} → ${res.status}: ${text.slice(0, 300)}`);
-  }
-  return res.json();
-}
-
-async function fetchAllPages(
-  path: "/portfolio/orders" | "/historical/orders" | "/portfolio/fills" | "/historical/fills",
-  params: Record<string, string>,
-  arrayField: "orders" | "fills",
-): Promise<unknown[]> {
-  const rows: unknown[] = [];
-  let cursor = "";
-  const seenCursors = new Set<string>();
-  while (true) {
-    const query = new URLSearchParams({ ...params, limit: "1000" });
-    if (cursor) query.set("cursor", cursor);
-    const raw = asObject(await fetchSignedJson(`${path}?${query.toString()}`));
-    if (!raw || !Array.isArray(raw[arrayField])) {
-      throw new Error(`Kalshi ${path} returned malformed ${arrayField} page`);
-    }
-    rows.push(...raw[arrayField] as unknown[]);
-    cursor = typeof raw["cursor"] === "string" ? raw["cursor"] : "";
-    if (!cursor) return rows;
-    if (seenCursors.has(cursor)) {
-      throw new Error(`Kalshi ${path} pagination repeated a cursor`);
-    }
-    seenCursors.add(cursor);
-  }
-}
-
 /**
  * Fetch complete authenticated order/fill evidence and classify it. Any
  * transport, pagination, shape, identity, or terminal-state uncertainty remains
@@ -526,8 +577,8 @@ export async function reconcileScalpOrderStrict(
       max_ts: String(createdAtSec + 30),
     };
     const [currentOrders, historicalOrders] = await Promise.all([
-      fetchAllPages("/portfolio/orders", orderParams, "orders"),
-      fetchAllPages("/historical/orders", orderParams, "orders"),
+      fetchKalshiAuthenticatedHistoryPages("/portfolio/orders", orderParams, "orders"),
+      fetchKalshiAuthenticatedHistoryPages("/historical/orders", orderParams, "orders"),
     ]);
     const orderMap = new Map<string, unknown>();
     for (const raw of [...currentOrders, ...historicalOrders]) {
@@ -555,8 +606,8 @@ export async function reconcileScalpOrderStrict(
 
     const fillParams = { order_id: matchedOrderId };
     const [currentFills, historicalFills] = await Promise.all([
-      fetchAllPages("/portfolio/fills", fillParams, "fills"),
-      fetchAllPages("/historical/fills", fillParams, "fills"),
+      fetchKalshiAuthenticatedHistoryPages("/portfolio/fills", fillParams, "fills"),
+      fetchKalshiAuthenticatedHistoryPages("/historical/fills", fillParams, "fills"),
     ]);
     const fillMap = new Map<string, unknown>();
     for (const raw of [...currentFills, ...historicalFills]) {
@@ -569,6 +620,156 @@ export async function reconcileScalpOrderStrict(
     logger.error(
       { err, ticker: input.ticker, clientOrderId: input.clientOrderId, exchangeOrderId: input.exchangeOrderId },
       "[kalshi-scalper] authoritative reconciliation lookup failed",
+    );
+    return {
+      outcome: "ambiguous",
+      reason: "exchange_reconciliation_lookup_failed",
+      candidateCount: 0,
+      evidence: { source: "kalshi_authenticated_history", lookupFailed: true },
+    };
+  }
+}
+
+export interface ScalpExitReconciliationInput {
+  ticker: string;
+  exchangeIndex: number;
+  originalSide: "yes" | "no";
+  count: number;
+  yesLimitPrice: number;
+  clientOrderId: string;
+  exchangeOrderId: string | null;
+  createdAt: Date;
+}
+
+export type ScalpExitReconciliationResult =
+  | {
+      outcome: "zero_fill";
+      reason: string;
+      orderId: string | null;
+      filledCount: 0;
+      avgYesFillPrice: null;
+      winningPrice: null;
+      proceeds: 0;
+      evidence: Record<string, unknown>;
+    }
+  | {
+      outcome: "confirmed_fill";
+      reason: string;
+      orderId: string;
+      filledCount: number;
+      avgYesFillPrice: number;
+      winningPrice: number;
+      proceeds: number;
+      evidence: Record<string, unknown>;
+    }
+  | {
+      outcome: "ambiguous";
+      reason: string;
+      candidateCount: number;
+      evidence: Record<string, unknown>;
+    };
+
+/**
+ * Classifies a reducing exit from exact authenticated order/fill history.
+ * Original YES is reduced by ASK/NO exposure; original NO by BID/YES exposure.
+ */
+export function resolveScalpExitReconciliationEvidence(
+  input: ScalpExitReconciliationInput,
+  orders: unknown[],
+  fills: unknown[],
+): ScalpExitReconciliationResult {
+  const acquiredSide = input.originalSide === "yes" ? "no" : "yes";
+  // Exit ownership is stricter than legacy entry recovery: when both durable
+  // identifiers exist, both must match the same exchange row.
+  const exactOrders = orders.filter((row) => {
+    const order = asObject(row);
+    return order != null
+      && order["client_order_id"] === input.clientOrderId
+      && Number(order["exchange_index"]) === input.exchangeIndex
+      && (input.exchangeOrderId == null || order["order_id"] === input.exchangeOrderId);
+  });
+  const base = resolveScalpReconciliationEvidence({
+    ticker: input.ticker,
+    side: acquiredSide,
+    expectedBookSide: input.originalSide === "yes" ? "ask" : "bid",
+    expectedOutcomeSide: acquiredSide,
+    count: input.count,
+    limitPrice: input.yesLimitPrice,
+    clientOrderId: input.clientOrderId,
+    exchangeOrderId: input.exchangeOrderId,
+    createdAt: input.createdAt,
+  }, exactOrders, fills);
+  if (base.outcome === "ambiguous") return base;
+  if (base.outcome === "zero_fill") {
+    return {
+      ...base,
+      avgYesFillPrice: null,
+      winningPrice: null,
+      proceeds: 0,
+    };
+  }
+  const winningPrice = input.originalSide === "yes"
+    ? base.avgFillPrice
+    : 1 - base.avgFillPrice;
+  return {
+    outcome: "confirmed_fill",
+    reason: base.reason,
+    orderId: base.orderId,
+    filledCount: base.filledCount,
+    avgYesFillPrice: base.avgFillPrice,
+    winningPrice,
+    proceeds: winningPrice * base.filledCount,
+    evidence: base.evidence,
+  };
+}
+
+export async function reconcileScalpExitOrderStrict(
+  input: ScalpExitReconciliationInput,
+): Promise<ScalpExitReconciliationResult> {
+  try {
+    const createdAtSec = Math.floor(input.createdAt.getTime() / 1_000);
+    const orderParams = {
+      ticker: input.ticker,
+      min_ts: String(createdAtSec - 30),
+      max_ts: String(createdAtSec + 30),
+    };
+    const [currentOrders, historicalOrders] = await Promise.all([
+      fetchKalshiAuthenticatedHistoryPages("/portfolio/orders", orderParams, "orders"),
+      fetchKalshiAuthenticatedHistoryPages("/historical/orders", orderParams, "orders"),
+    ]);
+    const byOrderId = new Map<string, Record<string, unknown>>();
+    for (const row of [...currentOrders, ...historicalOrders]) {
+      if (typeof row["order_id"] === "string") byOrderId.set(row["order_id"], row);
+    }
+    const orders = [...byOrderId.values()];
+    const preliminary = resolveScalpExitReconciliationEvidence(input, orders, []);
+    if (
+      preliminary.outcome === "ambiguous"
+      && preliminary.reason !== "authoritative_fills_missing"
+    ) return preliminary;
+    if (preliminary.outcome === "zero_fill") return preliminary;
+    const orderId = typeof preliminary.evidence["orderId"] === "string"
+      ? preliminary.evidence["orderId"]
+      : null;
+    if (!orderId) return preliminary;
+    const fillParams = { order_id: orderId };
+    const [currentFills, historicalFills] = await Promise.all([
+      fetchKalshiAuthenticatedHistoryPages("/portfolio/fills", fillParams, "fills"),
+      fetchKalshiAuthenticatedHistoryPages("/historical/fills", fillParams, "fills"),
+    ]);
+    const byFillId = new Map<string, Record<string, unknown>>();
+    for (const row of [...currentFills, ...historicalFills]) {
+      if (typeof row["fill_id"] === "string") byFillId.set(row["fill_id"], row);
+    }
+    return resolveScalpExitReconciliationEvidence(
+      input,
+      orders,
+      [...byFillId.values()],
+    );
+  } catch (err) {
+    logger.error(
+      { err, ticker: input.ticker, clientOrderId: input.clientOrderId },
+      "[kalshi-scalper-exit] authoritative reconciliation lookup failed",
     );
     return {
       outcome: "ambiguous",

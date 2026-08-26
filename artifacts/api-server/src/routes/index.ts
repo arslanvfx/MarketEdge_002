@@ -8,6 +8,7 @@ import kalshiBotRouter from "./kalshi-bot";
 import stocksRouter from "./stocks";
 import kalshiScalperRouter from "./kalshi-scalper";
 import kalshiSmartExitRouter from "./kalshi-smart-exit";
+import kalshiScalperSmartExitRouter from "./kalshi-scalper-smart-exit";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(kalshiBotRouter);
 router.use(stocksRouter);
 router.use(kalshiScalperRouter);
 router.use(kalshiSmartExitRouter);
+router.use(kalshiScalperSmartExitRouter);
 
 export default router;

@@ -49,6 +49,7 @@ function preferOrder(current: ScalpOrder, candidate: ScalpOrder): ScalpOrder {
 }
 
 function toPosition(order: ScalpOrder): OpenPosition {
+  const remainingQuantity = order.remainingQuantity ?? order.filledCount;
   return {
     id: `scalper:${order.id}`,
     symbol: order.symbol,
@@ -56,8 +57,8 @@ function toPosition(order: ScalpOrder): OpenPosition {
     ticker: order.ticker,
     direction: order.side,
     entryYesPrice: order.avgFillPrice!,
-    contractCount: order.filledCount,
-    betAmount: order.budgetSpent,
+    contractCount: remainingQuantity,
+    betAmount: order.budgetSpent * (remainingQuantity / order.filledCount),
     kalshiTarget: 0,
     openedAt: new Date(order.createdAt).getTime(),
     cryptoPriceAtEntry: null,
@@ -72,13 +73,16 @@ function toPosition(order: ScalpOrder): OpenPosition {
 }
 
 function toHistory(order: ScalpOrder, outcome: DisplayScalpOutcome): HistoryRecord {
+  const remainingQuantity = order.remainingQuantity ?? order.filledCount;
   return {
     id: `scalper:${order.id}`,
     symbol: order.symbol,
     windowKey: order.windowKey,
     ticker: order.ticker,
     direction: order.side,
-    action: outcome === "open" ? "bet" : "expired",
+    action: outcome === "open"
+      ? remainingQuantity > 0 ? "bet" : "scalper_exit"
+      : "expired",
     mode: order.mode,
     signals: {
       scalper: true,
@@ -89,6 +93,8 @@ function toHistory(order: ScalpOrder, outcome: DisplayScalpOutcome): HistoryReco
       layeredRegularPositionId: order.layeredRegularPositionId,
       layeredRegularSide: order.layeredRegularSide,
       entryGuardEvidence: order.entryGuardEvidence ?? null,
+      scalperSmartExit: order.scalperSmartExit ?? null,
+      remainingQuantity,
     },
     entryPrice: String(order.avgFillPrice),
     exitPrice: null,
@@ -130,7 +136,9 @@ export function normalizeScalpOrders(
     const outcome = displayOutcome(order);
     if (!outcome) continue;
     history.push(toHistory(order, outcome));
-    if (outcome === "open") positions.push(toPosition(order));
+    if (outcome === "open" && (order.remainingQuantity ?? order.filledCount) > 0) {
+      positions.push(toPosition(order));
+    }
   }
   return { positions, history };
 }

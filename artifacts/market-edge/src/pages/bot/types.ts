@@ -929,6 +929,7 @@ export interface ScalpOrder {
   budgetSpent: number;
   orderId: string | null;
   filledCount: number;
+  remainingQuantity?: number;
   avgFillPrice: number | null;
   limitPrice: number;
   status: string;
@@ -940,8 +941,111 @@ export interface ScalpOrder {
   layeredRegularPositionId: string | null;
   layeredRegularSide: "yes" | "no" | null;
   entryGuardEvidence: EntryGuardEvidence | null;
+  scalperSmartExit?: ScalperSmartExitLifecycleRecord | null;
   createdAt: string;
   settledAt: string | null;
+}
+
+export type ScalperSmartExitMode = "off" | "shadow" | "paper-exit" | "live-exit";
+export type ScalperSmartExitSensitivity = "more_aggressive" | "default" | "less_aggressive";
+
+export interface ScalperSmartExitConfig {
+  enabled: boolean;
+  mode: ScalperSmartExitMode;
+  sensitivity: ScalperSmartExitSensitivity;
+  maxEvidenceAgeSeconds: number;
+}
+
+export interface ScalperSmartExitEvaluation {
+  orderId: string;
+  symbol: string;
+  ticker: string;
+  side: "yes" | "no";
+  mode: ScalperSmartExitMode;
+  remainingQuantity: number;
+  disposition: "off" | "blocked" | "watch" | "exit";
+  reason: string;
+  adverseVelocityPerSecond: number | null;
+  adverseAccelerationPerSecond2: number | null;
+  distancePct: number | null;
+  projectedCrossingSeconds: number | null;
+  secondsRemaining: number;
+  marketDeterioration: number | null;
+  confirmationCount: number;
+  updatedAt: string;
+}
+
+export interface ScalperSmartExitStatus {
+  started: boolean;
+  config: ScalperSmartExitConfig;
+  configVersion: number;
+  lastError: string | null;
+  schedulerMs: number;
+  evaluations: ScalperSmartExitEvaluation[];
+  isolation: string;
+}
+
+export interface ScalperSmartExitLifecycleRecord {
+  id: string;
+  scalpOrderId: string;
+  mode: ScalperSmartExitMode;
+  symbol: string;
+  ticker: string;
+  windowKey: string;
+  side: "yes" | "no";
+  quantity: number;
+  status: string;
+  triggerReason: string | null;
+  executableQuantity: number | null;
+  executablePrice: number | null;
+  exitFillQuantity: number | null;
+  totalExitFillQuantity?: number;
+  totalExitPnl?: number;
+  exitWinningPrice: number | null;
+  proceeds: number | null;
+  exitPnl: number | null;
+  entryWinningPrice: number | null;
+  entryStake: number | null;
+  settlementResult: "yes" | "no" | null;
+  holdValue: number | null;
+  holdPnl: number | null;
+  valueSaved: number | null;
+  verdict: string;
+  triggeredAt: string;
+  soldAt: string | null;
+  settledAt: string | null;
+}
+
+export interface ScalperSmartExitAccounting {
+  triggered: number;
+  settled: number;
+  scoreable: number;
+  pending: number;
+  helped: number;
+  harmed: number;
+  grossMoneySaved: number;
+  grossMoneyForfeited: number;
+  netValue: number;
+}
+
+export interface ScalperSmartExitLifecycleLedger {
+  records: ScalperSmartExitLifecycleRecord[];
+  summary: {
+    actual: ScalperSmartExitAccounting;
+    shadowObserved: ScalperSmartExitAccounting;
+  };
+}
+
+export interface ScalperSmartExitReplayReport {
+  sensitivity: ScalperSmartExitSensitivity;
+  triggered: number;
+  helped: number;
+  harmed: number;
+  unchanged: number;
+  grossMoneySaved: number;
+  grossMoneyForfeited: number;
+  netValue: number;
+  sharedCoverage: { eligibleOrders: number; excludedSnapshots: number };
 }
 
 export interface ScalperPerformanceBySymbol {

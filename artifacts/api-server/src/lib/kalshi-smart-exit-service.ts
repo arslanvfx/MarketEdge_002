@@ -74,6 +74,7 @@ import type {
 import {
   computeSmartExitEffectivenessFromProceeds,
   getSmartExitShadowProceeds,
+  isSmartExitCounterfactualScoreable,
   normalizeSmartExitComponentHealth,
 } from "./kalshi-smart-exit-types.ts";
 
@@ -551,9 +552,10 @@ async function recordLifecycleTrigger(
 ): Promise<void> {
   if (await getSmartExitLifecycle(position.owner.kind, position.positionId)) return;
   const advisoryOnly = config.mode === "shadow";
-  const simulatedExitProceeds = advisoryOnly
-    ? getSmartExitShadowProceeds(evaluation, position.remainingQuantity)
-    : null;
+  const simulatedExitProceeds = getSmartExitShadowProceeds(
+    evaluation,
+    position.remainingQuantity,
+  );
   await upsertSmartExitLifecycle({
     id: randomUUID(),
     owner: position.owner.kind,
@@ -595,14 +597,16 @@ async function reconcileSmartExitLifecycles(): Promise<void> {
   const records = await listUnsettledSmartExitLifecycles(25);
   const recoveredEvaluations = await getSmartExitEvaluationsByIds(
     records
-      .filter((record) => record.advisoryOnly && record.simulatedExitProceeds == null)
+      .filter((record) =>
+        isSmartExitCounterfactualScoreable(record)
+        && record.simulatedExitProceeds == null)
       .map((record) => record.triggerEvaluationId),
   );
   const recoveredById = new Map(recoveredEvaluations.map((evaluation) => [evaluation.id, evaluation]));
   for (const record of records) {
-    const result = await fetchKalshiMarketResult(record.ticker);
-    if (result.result == null) continue;
-    const settlementResult = result.result;
+    const settlementResult = record.settlementResult
+      ?? (await fetchKalshiMarketResult(record.ticker)).result;
+    if (settlementResult == null) continue;
     const entryStake = record.entryStake
       ?? record.entryWinningPrice * record.quantity;
     const simulatedExitProceeds = record.simulatedExitProceeds
@@ -622,7 +626,7 @@ async function reconcileSmartExitLifecycles(): Promise<void> {
             : record.winningFillPrice * record.quantity,
           settlementResult,
         })
-      : record.advisoryOnly
+      : isSmartExitCounterfactualScoreable(record)
         ? computeSmartExitEffectivenessFromProceeds({
             side: record.side,
             quantity: record.quantity,
@@ -1138,7 +1142,9 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
     listSmartExitCoverageEvaluations({ limit: Math.min(1_000, Math.max(100, limit * 4)) }),
   ]);
   const missingTriggerIds = rawRecords
-    .filter((record) => record.advisoryOnly && record.simulatedExitProceeds == null)
+    .filter((record) =>
+      isSmartExitCounterfactualScoreable(record)
+      && record.simulatedExitProceeds == null)
     .map((record) => record.triggerEvaluationId);
   const triggerEvaluations = await getSmartExitEvaluationsByIds(missingTriggerIds);
   const triggerById = new Map(triggerEvaluations.map((evaluation) => [evaluation.id, evaluation]));
@@ -1147,7 +1153,7 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
     const entryStake = record.entryStake
       ?? record.entryWinningPrice * record.quantity;
     const simulatedExitProceeds = record.simulatedExitProceeds
-      ?? (record.advisoryOnly
+      ?? (isSmartExitCounterfactualScoreable(record)
         ? getSmartExitShadowProceeds(trigger ?? {
             executionEvidenceReady: false,
             estimatedSaleValue: null,
@@ -1157,7 +1163,7 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
         : null);
     const simulatedExitPnl = record.simulatedExitPnl
       ?? (simulatedExitProceeds == null ? null : simulatedExitProceeds - entryStake);
-    const effectiveness = record.advisoryOnly
+    const effectiveness = isSmartExitCounterfactualScoreable(record)
       && record.settlementResult != null
       && simulatedExitProceeds != null
       && record.valueSaved == null
@@ -1181,7 +1187,7 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
   });
   const legacyBackfills = records.filter((record, index) => {
     const original = rawRecords[index]!;
-    return original.advisoryOnly
+    return isSmartExitCounterfactualScoreable(original)
       && original.simulatedExitProceeds == null
       && record.simulatedExitProceeds != null;
   });

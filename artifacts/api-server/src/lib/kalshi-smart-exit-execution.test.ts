@@ -3,6 +3,7 @@ import test from "node:test";
 import { DEFAULT_SMART_EXIT_CONFIG } from "./kalshi-smart-exit-policy.ts";
 import {
   authorizeSmartExitExecution,
+  BASELINE_SMART_EXIT_PARAMETER_VERSION,
   computeSmartExitExecutionLimit,
   smartExitIdentityMatches,
 } from "./kalshi-smart-exit-execution.ts";
@@ -66,7 +67,25 @@ test("disabled and shadow modes cannot cross the owner boundary", () => {
   }
 });
 
-test("live execution requires exact scope and live-eligible applied version", () => {
+test("built-in policy executes without a calibration override", () => {
+  assert.deepEqual(authorizeSmartExitExecution({
+    config: configured("live-exit"), position, recommendation: "exit", appliedVersion: null,
+  }), {
+    authorized: true,
+    parameterVersion: BASELINE_SMART_EXIT_PARAMETER_VERSION,
+  });
+  assert.deepEqual(authorizeSmartExitExecution({
+    config: configured("paper-exit"),
+    position: { ...position, owner: { kind: "regular", tradingMode: "paper" } },
+    recommendation: "exit",
+    appliedVersion: null,
+  }), {
+    authorized: true,
+    parameterVersion: BASELINE_SMART_EXIT_PARAMETER_VERSION,
+  });
+});
+
+test("custom live execution requires exact scope and live-eligible applied version", () => {
   assert.equal(authorizeSmartExitExecution({
     config: configured("live-exit"), position, recommendation: "exit", appliedVersion: version,
   }).authorized, true);

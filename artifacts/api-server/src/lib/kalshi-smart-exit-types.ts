@@ -384,6 +384,14 @@ export function getSmartExitShadowProceeds(
     : null;
 }
 
+export function isSmartExitCounterfactualScoreable(
+  lifecycle: Pick<SmartExitLifecycleRecord, "advisoryOnly" | "executionStatus">,
+): boolean {
+  return lifecycle.advisoryOnly
+    || lifecycle.executionStatus === "blocked"
+    || lifecycle.executionStatus === "zero_fill";
+}
+
 export function computeSmartExitEffectivenessFromProceeds(params: {
   side: BinarySide;
   quantity: number;

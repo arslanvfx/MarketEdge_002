@@ -182,6 +182,7 @@ import {
   claimScalpShardFundingTransfer,
   markScalpShardFundingTransferAccepted,
 } from "./kalshi-scalper-db.ts";
+import { getScalperSmartExitHistoryProjection } from "./kalshi-scalper-smart-exit-service.ts";
 import { calculateScalpPerformance } from "./kalshi-scalper-performance.ts";
 import {
   buildScalpCalibrationRecommendation,
@@ -5264,7 +5265,30 @@ export async function getScalpStatus(requestedMode?: ScalpMode) {
 
 export async function getScalpHistory(opts: { mode?: ScalpMode; symbol?: string; limit?: number }) {
   const orders = await getScalpOrders(opts);
-  return { orders: orders.map(serializeScalpOrder), total: orders.length };
+  const exits = await getScalperSmartExitHistoryProjection(orders.map((order) => order.id));
+  return {
+    orders: orders.map((order) => {
+      const scalperSmartExit = exits.get(order.id) ?? null;
+      const exitedQuantity = Number(scalperSmartExit?.totalExitFillQuantity) || 0;
+      const remainingQuantity = Math.max(0, order.filledCount - exitedQuantity);
+      let projectedPnl = order.pnl;
+      if (order.settlementResult && exitedQuantity > 0) {
+        const entryWinningPrice = order.winningContractCost
+          ?? (order.side === "yes" ? order.entryYesPrice : 1 - order.entryYesPrice);
+        const remainingHoldPnl = (
+          order.settlementResult === order.side ? 1 - entryWinningPrice : -entryWinningPrice
+        ) * remainingQuantity;
+        projectedPnl = (Number(scalperSmartExit?.totalExitPnl) || 0) + remainingHoldPnl;
+      }
+      return {
+        ...serializeScalpOrder(order),
+        remainingQuantity,
+        pnl: projectedPnl,
+        scalperSmartExit,
+      };
+    }),
+    total: orders.length,
+  };
 }
 
 export async function getScalpPerformance(mode: ScalpMode): Promise<ScalpPerformance> {
