@@ -489,8 +489,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
       };
     });
   })();
-  const actualLifecycle = lifecycle?.summary.actual;
-  const shadowObserved = lifecycle?.summary.shadowObserved;
+  const exitSummary = lifecycle?.summary;
   const counterfactual = replay?.reports?.find((report) =>
     report.kind === "global_counterfactual"
     && report.owner === "regular"
@@ -776,34 +775,49 @@ export function BotSmartExitPanel({ authPost }: Props) {
             <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
               <div>
                 <div className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-200">
-                  Actual Results &amp; Mode Replay
+                  Exit Decision Scorecard
                 </div>
                 <div className="mt-1 text-[10px] text-slate-500">
-                  Confirmed fills stay separate from shadow observations and same-snapshot estimates.
+                  Compares each exit signal with what holding that same position to settlement produced.
                 </div>
               </div>
               <div className="flex flex-wrap gap-1.5 text-[8px] font-bold uppercase tracking-wider">
-                <span className="rounded-full border border-emerald-400/20 bg-emerald-400/5 px-2 py-1 text-emerald-300">Actual · confirmed</span>
-                <span className="rounded-full border border-indigo-400/20 bg-indigo-400/5 px-2 py-1 text-indigo-300">Shadow · observed</span>
-                <span className="rounded-full border border-amber-300/20 bg-amber-300/5 px-2 py-1 text-amber-200">Replay · estimated</span>
+                <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-1 text-slate-300">
+                  {exitSummary?.scoreable ?? 0} settled &amp; scoreable
+                </span>
+                {(exitSummary?.pending ?? 0) > 0 && (
+                  <span className="rounded-full border border-amber-300/20 bg-amber-300/5 px-2 py-1 text-amber-200">
+                    {exitSummary?.pending ?? 0} pending
+                  </span>
+                )}
               </div>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
               {([
-                ["ACTUAL NET", actualLifecycle?.netValue ?? 0, actualLifecycle?.scoreable ?? 0, "metric-actual-net"],
-                ["SHADOW NET", shadowObserved?.netValue ?? 0, shadowObserved?.scoreable ?? 0, "metric-shadow-net"],
-                ["GROSS SAVED", actualLifecycle?.grossMoneySaved ?? 0, actualLifecycle?.scoreable ?? 0, "metric-gross-saved"],
-                ["FORFEITED", actualLifecycle?.grossMoneyForfeited ?? 0, actualLifecycle?.scoreable ?? 0, "metric-forfeited"],
-              ] as const).map(([label, value, outcomes, testId]) => (
+                [
+                  "TOTAL SAVED",
+                  exitSummary?.grossMoneySaved ?? 0,
+                  exitSummary?.helped ?? 0,
+                  "Loss avoided by exiting instead of holding to settlement.",
+                  "metric-total-saved",
+                ],
+                [
+                  "PROFIT LEFT ON THE TABLE",
+                  exitSummary?.grossMoneyForfeited ?? 0,
+                  exitSummary?.harmed ?? 0,
+                  "Extra profit holding would have produced when an exit was premature.",
+                  "metric-profit-left-on-table",
+                ],
+              ] as const).map(([label, value, outcomes, description, testId]) => (
                 <div key={label} className="rounded-lg border border-white/[0.04] bg-[#11141c] p-4 shadow-sm transition-colors hover:bg-[#141822]">
                   <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2.5">{label}</div>
-                  <div className={`font-mono text-[22px] leading-none font-bold tabular-nums ${
-                    label === "FORFEITED" || value < 0 ? "text-rose-400" : "text-[#4ade80]"
+                  <div className={`font-mono text-[24px] leading-none font-bold tabular-nums ${
+                    label === "PROFIT LEFT ON THE TABLE" ? "text-rose-400" : "text-[#4ade80]"
                   }`} data-testid={testId}>
                     {fmt$(value)}
                   </div>
-                  <div className="mt-2.5 text-[10px] text-slate-600 font-medium">
-                    {outcomes} scoreable outcomes
+                  <div className="mt-3 text-[10px] font-medium text-slate-500">
+                    {outcomes} of {exitSummary?.scoreable ?? 0} exits · {description}
                   </div>
                 </div>
               ))}
@@ -822,13 +836,20 @@ export function BotSmartExitPanel({ authPost }: Props) {
               ] as const).map(({ key, label }) => {
                 const modeData = counterfactual?.comparisons?.[key];
                 return (
-                  <div key={key} className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-white/[0.04] bg-[#11141c] px-4 py-3.5 shadow-sm transition-colors hover:bg-[#141822]" data-testid={`replay-row-${key.replace('_', '-')}`}>
-                    <span className="text-[11px] font-bold tracking-wider text-slate-300 w-[140px] shrink-0">{label}</span>
-                    <span className="text-[11px] font-mono text-slate-500 flex-1 text-center sm:text-left whitespace-nowrap">
+                  <div key={key} className="grid grid-cols-1 gap-3 rounded-lg border border-white/[0.04] bg-[#11141c] px-4 py-3.5 shadow-sm transition-colors hover:bg-[#141822] sm:grid-cols-[150px_minmax(0,1fr)_120px_150px] sm:items-center" data-testid={`replay-row-${key.replace('_', '-')}`}>
+                    <span className="text-[11px] font-bold tracking-wider text-slate-300">{label}</span>
+                    <span className="text-[10px] font-mono text-slate-500">
                       {modeData?.triggered ?? 0} exits <span className="text-slate-700 mx-1.5">·</span> {modeData?.helped ?? 0} helped <span className="text-slate-700 mx-1.5">·</span> {modeData?.harmed ?? 0} harmed
                     </span>
-                    <span className={`text-sm font-mono font-bold tabular-nums w-[80px] text-right shrink-0 ${(modeData?.netValue ?? 0) < 0 ? "text-red-400" : "text-[#4ade80]"}`}>
-                      {fmt$(modeData?.netValue ?? 0)}
+                    <span className="text-[10px] font-mono text-slate-500 sm:text-right">
+                      Saved <strong className="ml-1 text-[#4ade80]" data-testid={`metric-replay-saved-${key.replace("_", "-")}`}>
+                        {fmt$(modeData?.grossMoneySaved ?? 0)}
+                      </strong>
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500 sm:text-right">
+                      Left on table <strong className="ml-1 text-rose-400" data-testid={`metric-replay-left-${key.replace("_", "-")}`}>
+                        {fmt$(modeData?.grossMoneyForfeited ?? 0)}
+                      </strong>
                     </span>
                   </div>
                 );
@@ -844,7 +865,8 @@ export function BotSmartExitPanel({ authPost }: Props) {
             )}
 
             <div className="mt-5 text-[10px] leading-relaxed text-slate-500 max-w-4xl">
-              Replay uses only persisted authenticated executable snapshots. Historical positions without post-entry evidence, including the August 26 ETH and DOGE losses, are excluded rather than assigned fabricated savings.
+              Replay uses only persisted authenticated executable snapshots. Positions without settlement or full post-entry evidence are excluded rather than assigned fabricated savings.
+              Headline totals use confirmed proceeds when an exit filled; replay always uses the executable quote frozen at the policy trigger, so the default replay can differ from the headline.
               {counterfactual && (
                 <span className="block mt-1.5 opacity-80">
                   Shared coverage: {counterfactual.sharedCoverage.scoreable}/{counterfactual.sharedCoverage.eligible} eligible situations 

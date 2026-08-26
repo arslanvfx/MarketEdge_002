@@ -1265,15 +1265,45 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
   };
 }
 
+let canonicalReplayRefresh: Promise<void> | null = null;
+
 export async function getSmartExitReplayReports(): Promise<Array<Record<string, unknown>>> {
-  const [reports, canonicalGlobal] = await Promise.all([
+  let [reports, canonicalGlobal, lifecycles] = await Promise.all([
     listSmartExitReplayReports({ limit: 100 }),
     getSmartExitReplayReportByIdentity({
       owner: "regular",
       symbol: "GLOBAL",
       version: "global-counterfactual-v1",
     }),
+    listSmartExitLifecycles(100),
   ]);
+  const latestSettledAt = Math.max(
+    0,
+    ...lifecycles
+      .filter((record) => record.settlementResult != null && record.settledAt != null)
+      .map((record) => Date.parse(record.settledAt!))
+      .filter(Number.isFinite),
+  );
+  const canonicalCreatedAt = canonicalGlobal?.createdAt?.getTime() ?? 0;
+  if (latestSettledAt > canonicalCreatedAt) {
+    canonicalReplayRefresh ??= calibrateSmartExitFromDurableHistory()
+      .then(() => undefined)
+      .catch((error) => {
+        logger.warn({ error }, "[kalshi-smart-exit] automatic counterfactual refresh failed");
+      })
+      .finally(() => {
+        canonicalReplayRefresh = null;
+      });
+    await canonicalReplayRefresh;
+    [reports, canonicalGlobal] = await Promise.all([
+      listSmartExitReplayReports({ limit: 100 }),
+      getSmartExitReplayReportByIdentity({
+        owner: "regular",
+        symbol: "GLOBAL",
+        version: "global-counterfactual-v1",
+      }),
+    ]);
+  }
   const ordered = canonicalGlobal
     ? [canonicalGlobal, ...reports.filter((report) => report.id !== canonicalGlobal.id)]
     : reports;
