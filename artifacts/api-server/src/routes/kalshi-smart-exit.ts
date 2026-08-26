@@ -107,10 +107,15 @@ router.post(
       res.status(400).json({ ok: false, error: "owner must be regular or scalper" });
       return;
     }
-    const requestedLimit = Number(req.body?.limitPositions);
-    const limitPositions = Number.isFinite(requestedLimit)
-      ? Math.min(50, Math.max(1, Math.floor(requestedLimit)))
-      : 50;
+    const rawLimit = req.body?.limitPositions;
+    const requestedLimit = rawLimit === undefined ? undefined : Number(rawLimit);
+    if (requestedLimit !== undefined && !Number.isFinite(requestedLimit)) {
+      res.status(400).json({ ok: false, error: "limitPositions must be a finite number" });
+      return;
+    }
+    const limitPositions = requestedLimit === undefined
+      ? undefined
+      : Math.min(50, Math.max(1, Math.floor(requestedLimit)));
     try {
       const reports = await calibrateSmartExitFromDurableHistory({
         owner,

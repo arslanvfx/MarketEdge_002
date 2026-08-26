@@ -19,6 +19,7 @@ import {
   applyValidatedSmartExitParameterVersion,
   claimSmartExitRequest,
   getValidatedSmartExitParameterReport,
+  getSmartExitReplayReportByIdentity,
   getSmartExitLifecycle,
   getSmartExitEvaluationsByIds,
   insertSmartExitEvaluation,
@@ -45,6 +46,7 @@ import {
 import {
   buildCrossingRiskReplayLifecycles,
   calibrateSmartExit,
+  summarizeSmartExitComparison,
 } from "./kalshi-smart-exit-replay.ts";
 import { fetchKalshiMarketResult } from "./kalshi-trader.ts";
 import { requestSmartExitFromOwner } from "./kalshi-smart-exit-owners.ts";
@@ -66,11 +68,24 @@ import type {
   SmartExitCoverageRecord,
   SmartExitState,
 } from "./kalshi-smart-exit-types.ts";
+
 import {
   computeSmartExitEffectivenessFromProceeds,
   getSmartExitShadowProceeds,
   normalizeSmartExitComponentHealth,
 } from "./kalshi-smart-exit-types.ts";
+
+interface SmartExitLifecycleAccounting {
+  readonly triggered: number;
+  readonly settled: number;
+  readonly scoreable: number;
+  readonly pending: number;
+  readonly helped: number;
+  readonly harmed: number;
+  readonly grossMoneySaved: number;
+  readonly grossMoneyForfeited: number;
+  readonly netValue: number;
+}
 
 const SCHEDULER_MS = 1_000;
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
@@ -533,7 +548,7 @@ async function recordLifecycleTrigger(
   if (await getSmartExitLifecycle(position.owner.kind, position.positionId)) return;
   const advisoryOnly = config.mode === "shadow";
   const simulatedExitProceeds = advisoryOnly
-    ? getSmartExitShadowProceeds(evaluation)
+    ? getSmartExitShadowProceeds(evaluation, position.remainingQuantity)
     : null;
   await upsertSmartExitLifecycle({
     id: randomUUID(),
@@ -590,7 +605,9 @@ async function reconcileSmartExitLifecycles(): Promise<void> {
       ?? getSmartExitShadowProceeds(recoveredById.get(record.triggerEvaluationId) ?? {
         executionEvidenceReady: false,
         estimatedSaleValue: null,
-      });
+        liquidityCoverage: null,
+        remainingQuantity: 0,
+      }, record.quantity);
     const effectiveness = record.executionStatus === "filled"
       ? computeSmartExitEffectivenessFromProceeds({
           side: record.side,
@@ -1090,7 +1107,17 @@ export async function getSmartExitHistory(limit = 50): Promise<SmartExitEvaluati
 export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
   records: SmartExitLifecycleRecord[];
   coverage: SmartExitCoverageRecord[];
-  summary: { triggered: number; sold: number; settled: number; helped: number; harmed: number; totalValueSaved: number };
+  summary: {
+    triggered: number; sold: number; settled: number; helped: number; harmed: number;
+    grossMoneySaved: number; grossMoneyForfeited: number; netValue: number;
+    scoreable: number; pending: number; coverageTotal: number; unavailable: number;
+    /** Legacy signed alias for netValue. */
+    totalValueSaved: number;
+    /** Confirmed filled exits only; never includes shadow simulations. */
+    actual: SmartExitLifecycleAccounting;
+    /** Observed advisory shadow economics, kept separate from actual fills. */
+    shadowObserved: SmartExitLifecycleAccounting;
+  };
 }> {
   const [rawRecords, evaluations] = await Promise.all([
     listSmartExitLifecycles(limit),
@@ -1110,7 +1137,9 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
         ? getSmartExitShadowProceeds(trigger ?? {
             executionEvidenceReady: false,
             estimatedSaleValue: null,
-          })
+            liquidityCoverage: null,
+            remainingQuantity: 0,
+          }, record.quantity)
         : null);
     const simulatedExitPnl = record.simulatedExitPnl
       ?? (simulatedExitProceeds == null ? null : simulatedExitProceeds - entryStake);
@@ -1174,6 +1203,25 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
       entryStake,
     };
   });
+  const accounting = (included: SmartExitLifecycleRecord[]): SmartExitLifecycleAccounting => {
+    const scoreable = included.filter((record) => record.valueSaved != null);
+    const grossMoneySaved = scoreable.reduce((sum, record) => sum + Math.max(0, record.valueSaved!), 0);
+    const grossMoneyForfeited = scoreable.reduce((sum, record) => sum + Math.max(0, -record.valueSaved!), 0);
+    return {
+      triggered: included.length,
+      settled: included.filter((record) => record.settlementResult != null).length,
+      scoreable: scoreable.length,
+      pending: included.length - scoreable.length,
+      helped: scoreable.filter((record) => record.valueSaved! > 0.005).length,
+      harmed: scoreable.filter((record) => record.valueSaved! < -0.005).length,
+      grossMoneySaved,
+      grossMoneyForfeited,
+      netValue: grossMoneySaved - grossMoneyForfeited,
+    };
+  };
+  const actual = accounting(records.filter((record) => record.executionStatus === "filled"));
+  const shadowObserved = accounting(records.filter((record) => record.advisoryOnly));
+  const legacy = accounting(records);
   return {
     records,
     coverage,
@@ -1181,16 +1229,35 @@ export async function getSmartExitLifecycleLedger(limit = 100): Promise<{
       triggered: records.length,
       sold: records.filter((r) => r.executionStatus === "filled").length,
       settled: records.filter((r) => r.settlementResult != null).length,
-      helped: records.filter((r) => r.verdict === "saved_loss").length,
-      harmed: records.filter((r) => r.verdict === "missed_win" || r.verdict === "reduced_profit").length,
-      totalValueSaved: records.reduce((sum, r) => sum + (r.valueSaved ?? 0), 0),
+      helped: legacy.helped,
+      harmed: legacy.harmed,
+      grossMoneySaved: legacy.grossMoneySaved,
+      grossMoneyForfeited: legacy.grossMoneyForfeited,
+      netValue: legacy.netValue,
+      scoreable: legacy.scoreable,
+      pending: legacy.pending,
+      coverageTotal: coverage.length,
+      unavailable: coverage.filter((item) => item.status === "unavailable").length,
+      totalValueSaved: legacy.netValue,
+      actual,
+      shadowObserved,
     },
   };
 }
 
 export async function getSmartExitReplayReports(): Promise<Array<Record<string, unknown>>> {
-  const reports = await listSmartExitReplayReports({ limit: 100 });
-  return reports.map((report) => ({ id: report.id, owner: report.owner, symbol: report.symbol,
+  const [reports, canonicalGlobal] = await Promise.all([
+    listSmartExitReplayReports({ limit: 100 }),
+    getSmartExitReplayReportByIdentity({
+      owner: "regular",
+      symbol: "GLOBAL",
+      version: "global-counterfactual-v1",
+    }),
+  ]);
+  const ordered = canonicalGlobal
+    ? [canonicalGlobal, ...reports.filter((report) => report.id !== canonicalGlobal.id)]
+    : reports;
+  return ordered.map((report) => ({ id: report.id, owner: report.owner, symbol: report.symbol,
     version: report.version, status: report.status, createdAt: report.createdAt, ...report.payload }));
 }
 
@@ -1228,9 +1295,100 @@ export async function calibrateSmartExitFromDurableHistory(params: {
     }));
     for (const [ticker, result] of results) settlementByTicker.set(ticker, result);
   }
+  const isUnfilteredCalibration = isSmartExitGlobalCalibration(params);
+  const snapshotId = randomUUID();
+  const hasScoreableEvidence = (source: (typeof settledSources)[number]) =>
+    source.evaluations.some((evaluation) =>
+      evaluation.executionEvidenceReady
+      && evaluation.estimatedSaleValue != null
+      && Number.isFinite(evaluation.estimatedSaleValue)
+      && evaluation.remainingQuantity === source.quantity
+      && evaluation.liquidityCoverage != null
+      && evaluation.liquidityCoverage >= 1);
+  const toSettlement = (source: (typeof settledSources)[number]) => {
+    const settlementResult = settlementByTicker.get(source.ticker)!;
+    const holdValue = settlementResult === source.side ? source.quantity : 0;
+    return {
+      owner: source.owner,
+      positionId: source.positionId,
+      symbol: source.symbol,
+      regime: "unclassified",
+      entryTimestampSeconds: source.entryTimestampSeconds,
+      expiryTimestampSeconds: source.expiryTimestampSeconds,
+      entryContractCost: source.entryContractCost,
+      quantity: source.quantity,
+      holdToExpiryPnl: holdValue - source.entryContractCost * source.quantity,
+    };
+  };
+  const buildComparisons = (
+    comparisonSettlements: ReturnType<typeof toSettlement>[],
+    comparisonEvaluations: SmartExitEvaluationRecord[],
+  ) => Object.fromEntries(([
+    "more_aggressive",
+    "default",
+    "less_aggressive",
+  ] as const).map((canonicalSensitivity) => {
+    const modeLifecycles = buildCrossingRiskReplayLifecycles(
+      comparisonSettlements,
+      comparisonEvaluations,
+      {
+        sensitivity: canonicalSensitivity,
+        minExitEdge: config.minExitEdge,
+        minCrossingReserveSeconds: 5,
+        maxCrossingReserveSeconds: 30,
+        deepLossHoldThreshold: config.deepLossHoldThreshold,
+        terminalLossHoldThreshold: config.terminalLossHoldThreshold,
+        deepLossRecoveryMinSeconds: config.deepLossRecoveryMinSeconds,
+      },
+    );
+    return [canonicalSensitivity, {
+      sensitivity: canonicalSensitivity,
+      ...summarizeSmartExitComparison(modeLifecycles),
+    }];
+  }));
+  const authoritativeSnapshot = settledSources.filter((source) =>
+    settlementByTicker.get(source.ticker) != null);
+  const scoreableSnapshot = authoritativeSnapshot.filter(hasScoreableEvidence);
+  const globalSettlements = scoreableSnapshot.map(toSettlement);
+  const globalPeriod = {
+    from: globalSettlements.length
+      ? new Date(Math.min(...globalSettlements.map((item) => item.entryTimestampSeconds)) * 1_000).toISOString()
+      : null,
+    to: globalSettlements.length
+      ? new Date(Math.max(...globalSettlements.map((item) => item.expiryTimestampSeconds)) * 1_000).toISOString()
+      : null,
+  };
+  const globalComparison = {
+    snapshotId,
+    comparisons: buildComparisons(
+      globalSettlements,
+      scoreableSnapshot.flatMap((source) => source.evaluations),
+    ),
+    sharedCoverage: {
+      eligible: globalSettlements.length,
+      scoreable: globalSettlements.length,
+      excluded: settledSources.length - globalSettlements.length,
+      missingSettlement: settledSources.length - authoritativeSnapshot.length,
+      insufficientEvidence: authoritativeSnapshot.length - scoreableSnapshot.length,
+      period: globalPeriod,
+    },
+  };
+  if (isUnfilteredCalibration) {
+    await insertSmartExitReplayReport({
+      id: "smart-exit:global-counterfactual-v1",
+      owner: "regular",
+      symbol: "GLOBAL",
+      version: "global-counterfactual-v1",
+      status: "insufficient_data",
+      payload: {
+        kind: "global_counterfactual",
+        advisoryOnly: true,
+        globalComparison,
+      },
+    });
+  }
   const groups = new Map<string, typeof settledSources>();
   for (const source of settledSources) {
-    if (!settlementByTicker.get(source.ticker)) continue;
     const key = `${source.owner}:${source.symbol}`;
     (groups.get(key) ?? (() => {
       const value: typeof settledSources = [];
@@ -1239,24 +1397,23 @@ export async function calibrateSmartExitFromDurableHistory(params: {
     })()).push(source);
   }
   const reports: Array<Record<string, unknown>> = [];
+  if (isUnfilteredCalibration) {
+    reports.push({
+      owner: "regular",
+      symbol: "GLOBAL",
+      version: "global-counterfactual-v1",
+      status: "insufficient_data",
+      kind: "global_counterfactual",
+      advisoryOnly: true,
+      globalComparison,
+    });
+  }
   for (const group of groups.values()) {
     const first = group[0]!;
-    const settlements = group.map((source) => {
-      const settlementResult = settlementByTicker.get(source.ticker)!;
-      const holdValue = settlementResult === source.side ? source.quantity : 0;
-      return {
-        owner: source.owner,
-        positionId: source.positionId,
-        symbol: source.symbol,
-        regime: "unclassified",
-        entryTimestampSeconds: source.entryTimestampSeconds,
-        expiryTimestampSeconds: source.expiryTimestampSeconds,
-        entryContractCost: source.entryContractCost,
-        quantity: source.quantity,
-        holdToExpiryPnl: holdValue - source.entryContractCost * source.quantity,
-      };
-    });
-    const evaluations = group.flatMap((source) => source.evaluations);
+    const authoritative = group.filter((source) => settlementByTicker.get(source.ticker) != null);
+    const scoreableSources = authoritative.filter(hasScoreableEvidence);
+    const settlements = scoreableSources.map(toSettlement);
+    const evaluations = scoreableSources.flatMap((source) => source.evaluations);
     const sensitivity = resolveSmartExitSensitivity(config.sensitivity);
     const candidateParameters = {
       sensitivity: sensitivity.sensitivity,
@@ -1281,6 +1438,23 @@ export async function calibrateSmartExitFromDurableHistory(params: {
       maxTotalPnlSacrifice: 0,
       maxSlippageTotalPnlSacrifice: 0,
     });
+    const comparisons = buildComparisons(settlements, evaluations);
+    const period = {
+      from: settlements.length
+        ? new Date(Math.min(...settlements.map((item) => item.entryTimestampSeconds)) * 1_000).toISOString()
+        : null,
+      to: settlements.length
+        ? new Date(Math.max(...settlements.map((item) => item.expiryTimestampSeconds)) * 1_000).toISOString()
+        : null,
+    };
+    const sharedCoverage = {
+      eligible: settlements.length,
+      scoreable: settlements.length,
+      excluded: group.length - settlements.length,
+      missingSettlement: group.length - authoritative.length,
+      insufficientEvidence: authoritative.length - scoreableSources.length,
+      period,
+    };
     const version = [
       "crossing-risk-v2",
       sensitivity.sensitivity,
@@ -1307,6 +1481,8 @@ export async function calibrateSmartExitFromDurableHistory(params: {
       training: calibration.training,
       holdout: calibration.holdout,
       slippage: calibration.report.slippage,
+      comparisons,
+      sharedCoverage,
     };
     await insertSmartExitReplayReport({
       id: `${first.owner}:${first.symbol}:${version}`,
@@ -1325,6 +1501,17 @@ export async function calibrateSmartExitFromDurableHistory(params: {
     });
   }
   return reports;
+}
+
+/** Only a full, owner-and-symbol-unfiltered run may replace the global replay snapshot. */
+export function isSmartExitGlobalCalibration(params: {
+  owner?: SmartExitOwnerKind;
+  symbol?: string;
+  limitPositions?: number;
+}): boolean {
+  return params.owner === undefined
+    && params.symbol === undefined
+    && params.limitPositions === undefined;
 }
 
 export async function applySmartExitParameterVersion(params: {

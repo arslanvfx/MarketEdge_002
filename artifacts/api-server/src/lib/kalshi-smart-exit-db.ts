@@ -507,6 +507,27 @@ export async function listSmartExitReplayReports(params: {
   }));
 }
 
+/** Canonical global replay is addressed by immutable identity, never by recency. */
+export async function getSmartExitReplayReportByIdentity(params: {
+  owner: SmartExitOwnerKind;
+  symbol: string;
+  version: string;
+}): Promise<SmartExitReplayReport | null> {
+  await ensureMigrated();
+  const result = await pool.query(`
+    SELECT id, owner, symbol, version, status, payload, created_at
+    FROM kalshi_smart_exit_replay_reports
+    WHERE owner = $1 AND symbol = upper($2) AND version = $3
+    LIMIT 1`,
+  [params.owner, params.symbol, params.version]);
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  return row ? {
+    id: String(row.id), owner: row.owner as SmartExitOwnerKind, symbol: String(row.symbol),
+    version: String(row.version), status: row.status as SmartExitReportStatus,
+    payload: row.payload as Record<string, unknown>, createdAt: row.created_at as Date,
+  } : null;
+}
+
 export async function getValidatedSmartExitParameterReport(
   owner: SmartExitOwnerKind, symbol: string,
 ): Promise<SmartExitReplayReport | null> {
@@ -529,7 +550,8 @@ export async function insertSmartExitReplayReport(report: SmartExitReplayReport)
   await pool.query(`
     INSERT INTO kalshi_smart_exit_replay_reports (id, owner, symbol, version, status, payload, created_at)
     VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,NOW()))
-    ON CONFLICT (owner, symbol, version) DO UPDATE SET status = EXCLUDED.status, payload = EXCLUDED.payload`,
+    ON CONFLICT (owner, symbol, version) DO UPDATE SET
+      status = EXCLUDED.status, payload = EXCLUDED.payload, created_at = NOW()`,
   [report.id, report.owner, report.symbol.toUpperCase(), report.version, report.status, report.payload,
     report.createdAt ?? null]);
 }

@@ -367,9 +367,16 @@ export interface SmartExitCoverageRecord {
 
 /** A shadow exit is economically scoreable only when the full position was executable. */
 export function getSmartExitShadowProceeds(
-  evaluation: Pick<SmartExitEvaluationRecord, "executionEvidenceReady" | "estimatedSaleValue">,
+  evaluation: Pick<SmartExitEvaluationRecord,
+    "executionEvidenceReady" | "estimatedSaleValue" | "liquidityCoverage" | "remainingQuantity">,
+  expectedQuantity: number,
 ): number | null {
   return evaluation.executionEvidenceReady
+    && Number.isFinite(expectedQuantity)
+    && expectedQuantity > 0
+    && evaluation.liquidityCoverage !== null
+    && evaluation.liquidityCoverage >= 1
+    && evaluation.remainingQuantity === expectedQuantity
     && evaluation.estimatedSaleValue != null
     && Number.isFinite(evaluation.estimatedSaleValue)
     && evaluation.estimatedSaleValue >= 0

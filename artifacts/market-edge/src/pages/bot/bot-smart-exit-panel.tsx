@@ -206,6 +206,19 @@ export function BotSmartExitPanel({ authPost }: Props) {
       };
     });
   })();
+  const actualLifecycle = lifecycle?.summary.actual;
+  const shadowObserved = lifecycle?.summary.shadowObserved;
+  const counterfactual = replay?.reports?.find((report) =>
+    report.kind === "global_counterfactual"
+    && report.owner === "regular"
+    && report.symbol === "GLOBAL"
+    && report.version === "global-counterfactual-v1",
+  )?.globalComparison;
+  const counterfactualModes = ([
+    "more_aggressive",
+    "default",
+    "less_aggressive",
+  ] as const).map((sensitivity) => counterfactual?.comparisons[sensitivity]).filter(Boolean);
 
   return (
     <div className="bg-[#0b0d13] border border-white/10 rounded-xl overflow-hidden mb-6 flex flex-col shadow-2xl [&_.text-slate-700]:!text-slate-400 [&_.text-slate-600]:!text-slate-400 [&_.text-slate-500]:!text-slate-300 [&_.text-slate-400]:!text-slate-200">
@@ -453,10 +466,46 @@ export function BotSmartExitPanel({ authPost }: Props) {
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(420px,1fr)] divide-y xl:divide-y-0 xl:divide-x divide-white/10">
         <div className="flex flex-col h-full bg-[#0d1017]">
           <SectionHeader title={`Exit Lifecycle & Effectiveness · ${lifecycle?.summary.triggered ?? 0} triggered · ${lifecycle?.summary.sold ?? 0} sold · ${lifecycle?.summary.settled ?? 0} settled`} />
+          <div className="border-b border-white/10 bg-emerald-950/10 p-4">
+            <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Actual results</div>
+                <div className="mt-0.5 text-[9px] text-slate-400">Observed Smart Exit lifecycle outcomes; not replay estimates.</div>
+              </div>
+              <div className="text-[9px] font-mono text-slate-400">
+                Confirmed fills: {actualLifecycle?.scoreable ?? 0} scoreable · {actualLifecycle?.pending ?? 0} pending
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                ["Gross money saved", actualLifecycle?.grossMoneySaved ?? 0, "text-emerald-400"],
+                ["Gross money forfeited", actualLifecycle?.grossMoneyForfeited ?? 0, "text-red-400"],
+                ["Net value", actualLifecycle?.netValue ?? 0,
+                  (actualLifecycle?.netValue ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"],
+              ] as const).map(([label, value, color]) => (
+                <div key={label} className="rounded-md border border-white/10 bg-black/20 px-3 py-2">
+                  <div className="text-[8px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
+                  <div className={`mt-1 font-mono text-sm font-bold tabular-nums ${color}`}>{fmt$(value)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 rounded-md border border-indigo-400/15 bg-indigo-950/10 px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[9px] font-bold uppercase tracking-wider text-indigo-300">Observed shadow simulations · not actual exits</span>
+                <span className={`font-mono text-[11px] font-bold ${(shadowObserved?.netValue ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  Net {(shadowObserved?.netValue ?? 0) > 0 ? "+" : ""}{fmt$(shadowObserved?.netValue ?? 0)}
+                </span>
+              </div>
+              <div className="mt-1 text-[9px] font-mono text-slate-400">
+                {shadowObserved?.scoreable ?? 0} scoreable · {shadowObserved?.pending ?? 0} pending · {shadowObserved?.helped ?? 0} helped · {shadowObserved?.harmed ?? 0} harmed
+                {" · "}saved {fmt$(shadowObserved?.grossMoneySaved ?? 0)} · forfeited {fmt$(shadowObserved?.grossMoneyForfeited ?? 0)}
+              </div>
+            </div>
+          </div>
           <div className="overflow-x-auto overflow-y-auto max-h-[360px]">
             <table className="w-full min-w-[1080px] table-fixed text-left text-xs whitespace-nowrap">
               <caption className="sr-only">
-                Saved / Forfeited equals Sell-now P&amp;L minus Held-to-result P&amp;L. Positive saved means recovered value versus a final loss; negative forfeited means value surrendered versus holding.
+                Lifecycle ledger includes confirmed filled exits and separately labelled observed shadow simulations. Saved / Forfeited equals exit or shadow P&amp;L minus held-to-result P&amp;L.
               </caption>
               <thead>
                 <tr className="border-b border-white/5 text-[9px] text-slate-500 uppercase tracking-wider">
@@ -464,12 +513,12 @@ export function BotSmartExitPanel({ authPost }: Props) {
                   <th className="w-[90px] px-4 py-2 font-medium">Market</th>
                   <th className="w-[110px] px-4 py-2 font-medium">Entry</th>
                   <th className="w-[100px] px-4 py-2 font-medium text-right">Stake</th>
-                  <th
+                    <th
                     className="w-[120px] px-4 py-2 font-medium text-right"
-                    title="P&amp;L from selling when Smart Exit triggered."
-                    aria-label="Sell-now profit and loss: P and L from selling when Smart Exit triggered"
+                      title="P&amp;L from a confirmed sale, or from a clearly-labelled observed shadow simulation."
+                      aria-label="Exit or shadow profit and loss"
                   >
-                    Sell-now P&amp;L
+                      Exit / Shadow P&amp;L
                   </th>
                   <th
                     className="w-[120px] px-4 py-2 font-medium text-right"
@@ -605,6 +654,39 @@ export function BotSmartExitPanel({ authPost }: Props) {
 
         {/* Right Column: Config & Replay */}
         <div className="flex flex-col h-full bg-[#0d1017]">
+          <SectionHeader title="Counterfactual replay · Same settled snapshot" />
+          <div className="border-b border-white/10 bg-indigo-950/10 p-4">
+            {counterfactual ? (
+              <>
+                <div className="mb-3 text-[9px] font-mono text-slate-400">
+                  Period {counterfactual.sharedCoverage.period.from ? fmtEasternDate(counterfactual.sharedCoverage.period.from) : "—"}–{counterfactual.sharedCoverage.period.to ? fmtEasternDate(counterfactual.sharedCoverage.period.to) : "—"}
+                  {" · "}{counterfactual.sharedCoverage.eligible} eligible · {counterfactual.sharedCoverage.excluded} excluded/unscoreable
+                  {" "}({counterfactual.sharedCoverage.missingSettlement} missing settlement, {counterfactual.sharedCoverage.insufficientEvidence} insufficient executable evidence)
+                </div>
+                <div className="grid grid-cols-1 gap-2">
+                  {counterfactualModes.map((modeSummary) => modeSummary && (
+                    <div key={modeSummary.sensitivity} className="rounded-md border border-indigo-400/15 bg-black/20 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-300">{sensitivityLabel(modeSummary.sensitivity)}</span>
+                        <span className={`font-mono text-xs font-bold ${modeSummary.netValue >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          Net {modeSummary.netValue > 0 ? "+" : ""}{fmt$(modeSummary.netValue)}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] font-mono text-slate-400">
+                        <span>Saved <strong className="text-emerald-400">{fmt$(modeSummary.grossMoneySaved)}</strong></span>
+                        <span>Forfeited <strong className="text-red-400">{fmt$(modeSummary.grossMoneyForfeited)}</strong></span>
+                        <span>{modeSummary.triggered} triggered</span>
+                        <span>{modeSummary.helped} helped · {modeSummary.harmed} harmed</span>
+                        <span className="col-span-2">Coverage {counterfactual.sharedCoverage.scoreable}/{counterfactual.sharedCoverage.eligible} shared scoreable situations</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="text-[10px] font-mono italic text-slate-500">No like-for-like counterfactual snapshot has been calibrated yet.</div>
+            )}
+          </div>
           <SectionHeader title="Parameters & Config" />
           <div className="p-4 flex flex-col gap-5 border-b border-white/10 bg-white/[0.01]">
             <div className="flex flex-col gap-2">
@@ -680,7 +762,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {replay?.reports?.map(rep => (
+                {replay?.reports?.filter(rep => rep.kind !== "global_counterfactual").map(rep => (
                   <tr key={rep.id || `${rep.symbol}-${rep.version}`} className="hover:bg-white/[0.02] transition-colors h-12">
                     <td className="px-4 py-2 align-middle font-bold text-slate-200 text-xs">{rep.symbol}</td>
                     <td className="px-4 py-2 align-middle text-[10px] text-slate-400 font-mono truncate" title={`${rep.owner}/${rep.version}`}>

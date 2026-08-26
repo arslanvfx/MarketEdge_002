@@ -7,9 +7,13 @@ import {
   buildCrossingRiskReplayLifecycles,
   calibrateSmartExit,
   replaySmartExit,
+  summarizeSmartExitComparison,
   type SmartExitReplayLifecycle,
 } from "./kalshi-smart-exit-replay.ts";
-import type { SmartExitEvaluationRecord } from "./kalshi-smart-exit-types.ts";
+import {
+  getSmartExitShadowProceeds,
+  type SmartExitEvaluationRecord,
+} from "./kalshi-smart-exit-types.ts";
 
 const lifecycle = (overrides: Partial<SmartExitReplayLifecycle> = {}): SmartExitReplayLifecycle => ({
   owner: "regular", symbol: "BTC", regime: "trend", entryTimestampSeconds: 10, expiryTimestampSeconds: 100,
@@ -266,6 +270,24 @@ test("durable replay refuses partial liquidity and reports dollars saved versus 
     }),
   ]);
   assert.equal(noExit[0]!.candidateExit, null);
+  assert.equal(getSmartExitShadowProceeds({
+    executionEvidenceReady: true,
+    estimatedSaleValue: 0.4,
+    liquidityCoverage: 0.5,
+    remainingQuantity: 1,
+  }, 1), null);
+  assert.equal(getSmartExitShadowProceeds({
+    executionEvidenceReady: true,
+    estimatedSaleValue: 0.4,
+    liquidityCoverage: null,
+    remainingQuantity: 1,
+  }, 1), null);
+  assert.equal(getSmartExitShadowProceeds({
+    executionEvidenceReady: true,
+    estimatedSaleValue: 0.4,
+    liquidityCoverage: 1,
+    remainingQuantity: 2,
+  }, 1), null);
 
   const report = replaySmartExit([
     lifecycle({ holdToExpiryPnl: -0.6, candidateExit: { timestampSeconds: 20, contractPrice: 0.3, reason: "saved" } }),
@@ -275,6 +297,48 @@ test("durable replay refuses partial liquidity and reports dollars saved versus 
   assert.ok(report.overall.missedWinDollars > 0);
   assert.ok(Math.abs(report.overall.totalPnlDelta
     - (report.overall.avoidedLossDollars - report.overall.missedWinDollars)) < 1e-12);
+
+  const summary = summarizeSmartExitComparison(report.chronologicalLifecycles);
+  assert.ok(summary.grossMoneySaved > 0);
+  assert.ok(summary.grossMoneyForfeited > 0);
+  assert.ok(Math.abs(summary.netValue
+    - (summary.grossMoneySaved - summary.grossMoneyForfeited)) < 1e-12);
+  assert.equal(summary.triggered, 2);
+  assert.equal(summary.helped, 1);
+  assert.equal(summary.harmed, 1);
+});
+
+test("durable replay cannot scale partial-position evidence into a hypothetical full exit", () => {
+  const replay = buildCrossingRiskReplayLifecycles([{
+    owner: "regular",
+    positionId: "p",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 100,
+    entryContractCost: 0.8,
+    quantity: 10,
+    holdToExpiryPnl: -8,
+  }], [
+    durableEvaluation(20, {
+      underlyingPrice: 99.9,
+      projectedCrossingSeconds: 0,
+      remainingQuantity: 5,
+      estimatedSaleValue: 2,
+      entryStake: 4,
+      executionEvidenceReady: true,
+      liquidityCoverage: 1,
+    }),
+  ]);
+  assert.equal(replay[0]!.candidateExit, null);
+});
+
+test("legacy replay report fields remain available alongside explicit effectiveness accounting", () => {
+  const report = replaySmartExit([lifecycle()]);
+  assert.equal(report.overall.totalPnlDelta, report.overall.candidate.totalPnl - report.overall.hold.totalPnl);
+  assert.equal(typeof report.overall.avoidedLossDollars, "number");
+  assert.equal(typeof report.overall.missedWinDollars, "number");
+  assert.equal(report.chronologicalLifecycles.length, 1);
 });
 
 test("durable replay DB loading is capped per position and in total", () => {
@@ -285,4 +349,21 @@ test("durable replay DB loading is capped per position and in total", () => {
   assert.match(source, /ROW_NUMBER\(\) OVER \(\s*PARTITION BY e\.owner, e\.position_id/s);
   assert.match(source, /WHERE sample_rank <= \$4/);
   assert.match(source, /LIMIT \$5/);
+});
+
+test("global counterfactual persistence is canonical-only and never embedded in scoped reports", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "kalshi-smart-exit-service.ts"), "utf8");
+  const routeSource = readFileSync(join(here, "../routes/kalshi-smart-exit.ts"), "utf8");
+  assert.match(source, /isSmartExitGlobalCalibration\(params\)/);
+  assert.match(source, /id: "smart-exit:global-counterfactual-v1"/);
+  assert.match(source, /symbol: "GLOBAL"/);
+  assert.match(source, /version: "global-counterfactual-v1"/);
+  assert.match(source, /params\.owner === undefined/);
+  assert.match(source, /params\.symbol === undefined/);
+  assert.match(source, /params\.limitPositions === undefined/);
+  assert.match(source, /getSmartExitReplayReportByIdentity/);
+  assert.doesNotMatch(source, /sharedCoverage,\s*\n\s*globalComparison,/);
+  assert.match(routeSource, /rawLimit === undefined \? undefined : Number\(rawLimit\)/);
+  assert.match(routeSource, /requestedLimit === undefined\s*\? undefined/);
 });

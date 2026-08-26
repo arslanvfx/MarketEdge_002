@@ -61,9 +61,13 @@ test("shadow proceeds require full executable evidence", () => {
   assert.equal(getSmartExitShadowProceeds({
     executionEvidenceReady: false,
     estimatedSaleValue: 7,
-  }), null);
+    liquidityCoverage: 1,
+    remainingQuantity: 10,
+  }, 10), null);
   assert.equal(getSmartExitShadowProceeds({
     executionEvidenceReady: true,
     estimatedSaleValue: 7,
-  }), 7);
+    liquidityCoverage: 1,
+    remainingQuantity: 10,
+  }, 10), 7);
 });

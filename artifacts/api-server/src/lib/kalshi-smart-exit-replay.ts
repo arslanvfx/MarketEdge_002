@@ -66,6 +66,18 @@ export interface SmartExitComparison {
   readonly missedWinDollars: number;
 }
 
+export interface SmartExitEffectivenessSummary {
+  /** Gross improvement over holding; never includes forfeited upside. */
+  readonly grossMoneySaved: number;
+  /** Gross upside surrendered versus holding, expressed as a positive amount. */
+  readonly grossMoneyForfeited: number;
+  readonly netValue: number;
+  readonly triggered: number;
+  readonly helped: number;
+  readonly harmed: number;
+  readonly unchanged: number;
+}
+
 export interface SmartExitSlippageResult {
   readonly assumption: Required<SmartExitSlippageAssumption>;
   readonly comparison: SmartExitComparison;
@@ -241,6 +253,27 @@ function compare(items: readonly SmartExitReplayLifecycle[], slippage: Required<
   };
 }
 
+/** Operator-facing accounting derived from the same per-position deltas as the legacy comparison. */
+export function summarizeSmartExitComparison(
+  items: readonly SmartExitReplayLifecycle[],
+): SmartExitEffectivenessSummary {
+  const deltas = items.map((item) => item.candidateExit === null
+    ? null
+    : candidatePnl(item, { bps: 0, cents: 0 }) - item.holdToExpiryPnl);
+  const scored = deltas.filter((value): value is number => value !== null);
+  const grossMoneySaved = scored.reduce((sum, value) => sum + Math.max(0, value), 0);
+  const grossMoneyForfeited = scored.reduce((sum, value) => sum + Math.max(0, -value), 0);
+  return {
+    grossMoneySaved,
+    grossMoneyForfeited,
+    netValue: grossMoneySaved - grossMoneyForfeited,
+    triggered: scored.length,
+    helped: scored.filter((value) => value > 0.005).length,
+    harmed: scored.filter((value) => value < -0.005).length,
+    unchanged: scored.filter((value) => Math.abs(value) <= 0.005).length,
+  };
+}
+
 function evaluationTimeSeconds(evaluation: SmartExitEvaluationRecord): number {
   return Date.parse(evaluation.timestamp) / 1_000;
 }
@@ -353,6 +386,7 @@ export function buildCrossingRiskReplayLifecycles(
       const fullyExecutable = sample.executionEvidenceReady
         && sample.estimatedSaleValue !== null
         && sample.remainingQuantity > 0
+        && sample.remainingQuantity === settlement.quantity
         && sample.liquidityCoverage !== null
         && sample.liquidityCoverage >= 1;
       const entryStake = sample.entryStake ?? (

@@ -1471,7 +1471,55 @@ export interface SmartExitLifecycleLedger {
     settled: number;
     helped: number;
     harmed: number;
+    grossMoneySaved: number;
+    grossMoneyForfeited: number;
+    netValue: number;
+    scoreable: number;
+    pending: number;
+    coverageTotal: number;
+    unavailable: number;
+    /** Legacy signed alias for netValue. */
     totalValueSaved: number;
+    /** Confirmed filled exits only; excludes all shadow simulations. */
+    actual: SmartExitLifecycleAccounting;
+    /** Advisory shadow exits observed with full executable evidence. */
+    shadowObserved: SmartExitLifecycleAccounting;
+  };
+}
+
+export interface SmartExitLifecycleAccounting {
+  triggered: number;
+  settled: number;
+  scoreable: number;
+  pending: number;
+  helped: number;
+  harmed: number;
+  grossMoneySaved: number;
+  grossMoneyForfeited: number;
+  netValue: number;
+}
+
+export interface SmartExitCounterfactualModeSummary {
+  sensitivity: SmartExitSensitivity;
+  grossMoneySaved: number;
+  grossMoneyForfeited: number;
+  netValue: number;
+  triggered: number;
+  helped: number;
+  harmed: number;
+  unchanged: number;
+}
+
+export interface SmartExitCounterfactualComparison {
+  snapshotId: string;
+  comparisons: Record<SmartExitSensitivity, SmartExitCounterfactualModeSummary>;
+  sharedCoverage: {
+    eligible: number;
+    scoreable: number;
+    excluded: number;
+    missingSettlement: number;
+    insufficientEvidence: number;
+    period: { from: string | null; to: string | null };
   };
 }
 
@@ -1485,6 +1533,8 @@ export interface SmartExitReplayReport {
   hypotheticalPnlSaved: number;
   calibrationScore: number;
   createdAt: string;
+  kind?: "global_counterfactual";
+  globalComparison?: SmartExitCounterfactualComparison;
 }
 
 export interface SmartExitReplay {
