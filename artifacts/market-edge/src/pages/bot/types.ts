@@ -297,6 +297,8 @@ export interface HistoryRecord {
   decisionMode: string | null;
   source: string | null;
   entryYesPrice: string | null;
+  /** Exact owner + position-id Smart Exit projection supplied by all-history. */
+  smartExit?: SmartExitLifecycleRecord;
 }
 
 export interface ConvictionPriceBand {
@@ -1442,6 +1444,7 @@ export interface SmartExitLifecycleRecord {
   actualExitPnl: number | null;
   settlementResult: "yes" | "no" | null;
   settledAt: string | null;
+  holdValue: number | null;
   holdPnl: number | null;
   valueSaved: number | null;
   verdict: "saved_loss" | "reduced_profit" | "missed_win" | "no_difference" | "pending" | "unknown";

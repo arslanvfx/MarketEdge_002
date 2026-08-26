@@ -693,6 +693,21 @@ export async function getSmartExitLifecycle(
   return (result.rows[0]?.payload as SmartExitLifecycleRecord | undefined) ?? null;
 }
 
+export async function getSmartExitLifecyclesByPositionIds(
+  owner: SmartExitOwnerKind,
+  positionIds: readonly string[],
+): Promise<SmartExitLifecycleRecord[]> {
+  await ensureMigrated();
+  const uniqueIds = [...new Set(positionIds.filter((id) => id.length > 0))];
+  if (uniqueIds.length === 0) return [];
+  const result = await pool.query(
+    `SELECT payload FROM kalshi_smart_exit_lifecycles
+     WHERE owner=$1 AND position_id = ANY($2::text[])`,
+    [owner, uniqueIds],
+  );
+  return result.rows.map((row: { payload: SmartExitLifecycleRecord }) => row.payload);
+}
+
 export async function listSmartExitLifecycles(limit = 100): Promise<SmartExitLifecycleRecord[]> {
   await ensureMigrated();
   const result = await pool.query(

@@ -6,6 +6,8 @@ import { db, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { desc, sql } from "drizzle-orm";
 export { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
 import { backtestModeApproval } from "./kalshi-bot-backtest-core.js";
+import { getSmartExitLifecyclesByPositionIds } from "./kalshi-smart-exit-db.js";
+import { projectRegularSmartExitHistory } from "./kalshi-smart-exit-history.js";
 
 type BotMode = "paper" | "live";
 type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
@@ -23,12 +25,13 @@ export async function getBotHistory(limit = 20, filterMode?: BotMode, resetAt?: 
     const resetClause = resetAt
       ? sql` AND ${kalshiBotBetsTable.createdAt} >= ${resetAt}`
       : sql``;
-    return await db
+    const rows = await db
       .select()
       .from(kalshiBotBetsTable)
       .where(sql`${kalshiBotBetsTable.action} IN ('exit','late_recovery_exit','expired')${modeClause}${resetClause}`)
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit);
+    return rows;
   } catch {
     return [];
   }
@@ -106,7 +109,7 @@ export async function getBotAllHistory(
       : kind === "skips"
         ? sql` AND ${kalshiBotBetsTable.action} = 'skip'`
         : sql``;
-    return await db
+    const rows = await db
       .select()
       .from(kalshiBotBetsTable)
       .where(sql`
@@ -116,6 +119,17 @@ export async function getBotAllHistory(
       .orderBy(desc(kalshiBotBetsTable.createdAt))
       .limit(limit)
       .offset(offset);
+    try {
+      const lifecycles = await getSmartExitLifecyclesByPositionIds(
+        "regular",
+        rows.map((row) => row.id),
+      );
+      return projectRegularSmartExitHistory(rows, lifecycles);
+    } catch {
+      // Smart Exit history is an optional projection. Legacy transaction rows
+      // remain available if its additive store is temporarily unavailable.
+      return rows;
+    }
   } catch {
     return [];
   }

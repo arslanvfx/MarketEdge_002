@@ -28,9 +28,11 @@ interface TransactionLogProps {
   histSourceFilter: "all" | "bot" | "manual" | "scalper" | "skips";
   setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual" | "scalper" | "skips">>;
   activeMode: "paper" | "live";
+  loading?: boolean;
+  error?: boolean;
 }
 
-export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPages, totalBets, historyMode, setHistoryMode, histSourceFilter, setHistSourceFilter, activeMode }: TransactionLogProps) {
+export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPages, totalBets, historyMode, setHistoryMode, histSourceFilter, setHistSourceFilter, activeMode, loading = false, error = false }: TransactionLogProps) {
   const clampedHistPage = Math.min(histPage, Math.max(0, totalHistPages - 1));
   const regularRecordsById = React.useMemo(
     () => new Map(
@@ -44,7 +46,11 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
     () => new Set(
       pagedBets
         .map(layeredRegularPositionId)
-        .filter((id): id is string => id != null && regularRecordsById.has(id)),
+         .filter((id): id is string =>
+           id != null
+           && regularRecordsById.has(id)
+           && regularRecordsById.get(id)?.smartExit == null
+         ),
     ),
     [pagedBets, regularRecordsById],
   );
@@ -111,7 +117,17 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
             )}
           </div>
 
-          {totalBets === 0 ? (
+          {loading ? (
+            <div className="px-5 py-12 text-center" role="status">
+              <RefreshCw className="w-7 h-7 text-sky-400/70 mx-auto mb-3 animate-spin" />
+              <p className="text-sm text-muted-foreground">Loading transaction history…</p>
+            </div>
+          ) : error ? (
+            <div className="px-5 py-12 text-center" role="alert">
+              <AlertTriangle className="w-8 h-8 text-amber-400/70 mx-auto mb-3" />
+              <p className="text-sm text-muted-foreground">Transaction history is temporarily unavailable.</p>
+            </div>
+          ) : totalBets === 0 ? (
             <div className="px-5 py-12 text-center">
               <Bot className="w-8 h-8 text-muted-foreground/40 mx-auto mb-3" />
               <p className="text-sm text-muted-foreground">
@@ -142,6 +158,13 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                    return null;
                  }
                  const isRegularMarketBet = !isScalper && !isShadow && !isSkip;
+                 const smartExit = r.smartExit;
+                 const isExecutedPaperSmartExit = smartExit != null
+                   && smartExit.owner === "regular"
+                   && smartExit.tradingMode === "paper"
+                   && !smartExit.advisoryOnly
+                   && smartExit.executionStatus === "filled";
+                 const isSmartExitAdvisory = smartExit?.advisoryOnly === true;
                 const isEmergencyClose = r.exitReason === "conviction_catastrophic_fill";
                 const isPendingEval = !isOpen && !isShadow && !isSkip && r.outcome == null;
                 const isWin = r.outcome === "win";
@@ -182,6 +205,17 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     {/* Card header */}
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                        <span className={`text-base font-black tracking-tight ${isScalper ? "text-amber-50" : isRegularMarketBet ? "text-slate-50" : "text-foreground"}`}>{r.symbol}</span>
+
+                       {isExecutedPaperSmartExit && (
+                         <span className="flex items-center gap-1 rounded-full border border-red-300/60 bg-red-500/25 px-2.5 py-1 text-xs font-black tracking-wide text-red-100 shadow-[0_0_14px_rgba(239,68,68,0.25)]">
+                           <Shield className="h-3.5 w-3.5" /> SMART EXIT · STOP LOSS
+                         </span>
+                       )}
+                       {isSmartExitAdvisory && (
+                         <span className="flex items-center gap-1 rounded-full border border-indigo-400/40 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-bold text-indigo-200">
+                           <Shield className="h-3 w-3" /> SMART EXIT · SHADOW / ADVISORY
+                         </span>
+                       )}
 
                       {r.direction && (
                         <span className={`flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${isScalper ? "border border-amber-400/35 bg-amber-500/15 text-amber-100" : r.direction === "yes" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
@@ -414,6 +448,94 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                         </div>
                       </div>
                     </div>
+
+                     {smartExit && (isExecutedPaperSmartExit || isSmartExitAdvisory) && (() => {
+                       const entryStake = smartExit.entryStake
+                         ?? smartExit.entryWinningPrice * smartExit.quantity;
+                       const proceeds = isSmartExitAdvisory
+                         ? smartExit.simulatedExitProceeds
+                         : smartExit.saleProceeds;
+                       const exitPnl = isSmartExitAdvisory
+                         ? smartExit.simulatedExitPnl
+                         : smartExit.actualExitPnl;
+                       const saved = smartExit.valueSaved != null && smartExit.valueSaved > 0
+                         ? smartExit.valueSaved : 0;
+                       const forfeited = smartExit.valueSaved != null && smartExit.valueSaved < 0
+                         ? Math.abs(smartExit.valueSaved) : 0;
+                       const signedMoney = (value: number | null | undefined) =>
+                         value == null ? "—" : `${value >= 0 ? "+" : ""}${fmt$(value)}`;
+                       const verdict = smartExit.verdict.replace(/_/g, " ").toUpperCase();
+                       return (
+                         <div
+                           data-testid={`smart-exit-history-${r.id}`}
+                           className={`mb-3 rounded-xl border p-3 ${
+                             isExecutedPaperSmartExit
+                               ? "border-red-400/40 bg-red-950/25"
+                               : "border-indigo-400/30 bg-indigo-950/20"
+                           }`}
+                         >
+                           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                             <div>
+                               <div className={`text-[10px] font-black uppercase tracking-[0.16em] ${
+                                 isExecutedPaperSmartExit ? "text-red-200" : "text-indigo-200"
+                               }`}>
+                                 {isExecutedPaperSmartExit ? "Executed stop-loss lifecycle" : "Shadow advisory — no transaction executed"}
+                               </div>
+                               <div className="mt-0.5 text-[10px] text-slate-300/70">
+                                 Triggered {fmtDateTime(smartExit.triggeredAt)}
+                                 {smartExit.soldAt ? ` · Sold ${fmtDateTime(smartExit.soldAt)}` : ""}
+                               </div>
+                             </div>
+                             <span className={`rounded px-2 py-1 text-[10px] font-black ${
+                               smartExit.verdict === "saved_loss" ? "bg-emerald-500/20 text-emerald-200"
+                                 : smartExit.verdict === "pending" ? "bg-amber-500/15 text-amber-200"
+                                   : "bg-slate-500/15 text-slate-200"
+                             }`}>{verdict}</span>
+                           </div>
+                           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                             <div className={REGULAR_METRIC_CLASS + " rounded-lg p-2"}>
+                               <div className="text-[9px] uppercase text-sky-200/70">Entry / stake</div>
+                               <div className="mt-0.5 font-mono text-xs">{(smartExit.entryWinningPrice * 100).toFixed(1)}¢ · {fmt$(entryStake)}</div>
+                             </div>
+                             <div className={REGULAR_METRIC_CLASS + " rounded-lg p-2"}>
+                               <div className="text-[9px] uppercase text-sky-200/70">{isSmartExitAdvisory ? "Simulated fill" : "Fill / quantity"}</div>
+                               <div className="mt-0.5 font-mono text-xs">
+                                 {smartExit.winningFillPrice == null ? "—" : `${(smartExit.winningFillPrice * 100).toFixed(1)}¢`}
+                                 {" · "}{smartExit.quantity}/{smartExit.requestedQuantity ?? smartExit.quantity}
+                               </div>
+                             </div>
+                             <div className={REGULAR_METRIC_CLASS + " rounded-lg p-2"}>
+                               <div className="text-[9px] uppercase text-sky-200/70">{isSmartExitAdvisory ? "Sim proceeds / P&L" : "Exit proceeds / P&L"}</div>
+                               <div className="mt-0.5 font-mono text-xs">{proceeds == null ? "—" : fmt$(proceeds)} · <span className={(exitPnl ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}>{signedMoney(exitPnl)}</span></div>
+                             </div>
+                             <div className={REGULAR_METRIC_CLASS + " rounded-lg p-2"}>
+                               <div className="text-[9px] uppercase text-sky-200/70">Hold outcome / value / P&L</div>
+                               <div className="mt-0.5 font-mono text-xs">{smartExit.settlementResult?.toUpperCase() ?? "Pending"} · {smartExit.holdValue == null ? "—" : fmt$(smartExit.holdValue)} · {signedMoney(smartExit.holdPnl)}</div>
+                             </div>
+                             <div className="rounded-lg border border-emerald-400/20 bg-emerald-500/10 p-2">
+                               <div className="text-[9px] uppercase text-emerald-200/70">Potential saved</div>
+                               <div className="mt-0.5 font-mono text-xs font-bold text-emerald-300">{fmt$(saved)}</div>
+                             </div>
+                             <div className="rounded-lg border border-red-400/20 bg-red-500/10 p-2">
+                               <div className="text-[9px] uppercase text-red-200/70">Forfeited</div>
+                               <div className="mt-0.5 font-mono text-xs font-bold text-red-300">{fmt$(forfeited)}</div>
+                             </div>
+                             <div className={REGULAR_METRIC_CLASS + " rounded-lg p-2"}>
+                               <div className="text-[9px] uppercase text-sky-200/70">Net value</div>
+                               <div className={`mt-0.5 font-mono text-xs font-bold ${(smartExit.valueSaved ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}>{signedMoney(smartExit.valueSaved)}</div>
+                             </div>
+                             <div className={REGULAR_METRIC_CLASS + " rounded-lg p-2"}>
+                               <div className="text-[9px] uppercase text-sky-200/70">Status</div>
+                               <div className="mt-0.5 text-xs font-bold uppercase">{smartExit.executionStatus.replace(/_/g, " ")}</div>
+                             </div>
+                           </div>
+                           <div className="mt-2 text-[10px] text-slate-300/75">
+                             <span className="font-bold uppercase tracking-wide">Trigger reason:</span>{" "}
+                             {smartExit.reason ?? "No trigger reason recorded"}
+                           </div>
+                         </div>
+                       );
+                     })()}
 
                     {/* Footer row */}
                      <div className={`flex items-center gap-3 text-[11px] flex-wrap ${isScalper ? "text-amber-100/65" : isRegularMarketBet ? "text-sky-100/65" : "text-muted-foreground"}`}>

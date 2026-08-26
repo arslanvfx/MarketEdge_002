@@ -517,7 +517,9 @@ async function executeAuthorizedExit(
       });
       await upsertSmartExitLifecycle({
         ...lifecycle, requestId, executionStatus: "filled", soldAt: result.soldAt,
-        winningFillPrice: result.winningFillPrice, reason: result.reason, ...effectiveness,
+        winningFillPrice: result.winningFillPrice,
+        reason: lifecycle.reason ?? result.reason,
+        ...effectiveness,
       });
     }
     return { ...evaluation, executed: true, executionStatus: "filled" };

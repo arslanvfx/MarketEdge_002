@@ -130,7 +130,9 @@ export async function requestSmartExitFromOwner(params: {
       current,
       market.yesPrice,
       market.value,
-      `smart_exit:${parameterVersion}`,
+      position.owner.tradingMode === "paper"
+        ? `smart_exit_stop_loss:${parameterVersion}`
+        : `smart_exit:${parameterVersion}`,
       false,
       {
         preSubmitGuard: finalGuard,

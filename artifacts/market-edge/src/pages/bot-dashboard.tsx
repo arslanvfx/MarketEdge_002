@@ -240,7 +240,11 @@ export default function BotDashboard() {
   }, [status?.mode]);
 
   const historyKind = histSourceFilter === "skips" ? "skips" : "transactions";
-  const { data: historyData } = useQuery<{ history: HistoryRecord[] }>({
+  const {
+    data: historyData,
+    isLoading: historyLoading,
+    isError: historyError,
+  } = useQuery<{ history: HistoryRecord[] }>({
     queryKey: ["bot-all-history", historyMode, historyKind],
     queryFn: () => fetch(`${API_BASE}/crypto/bot/all-history?limit=500&mode=${historyMode}&kind=${historyKind}`).then(r => r.json()),
     refetchInterval: 15_000,
@@ -922,6 +926,8 @@ export default function BotDashboard() {
           histSourceFilter={histSourceFilter}
           setHistSourceFilter={setHistSourceFilter}
           activeMode={activeMode}
+          loading={historyLoading}
+          error={historyError}
         />
         <PerformanceInsights
           perfReportData={perfReportData}
