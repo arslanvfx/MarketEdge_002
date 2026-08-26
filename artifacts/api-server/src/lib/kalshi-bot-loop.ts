@@ -18,7 +18,6 @@ import {
   deriveConvictionZone,
   getEffectiveConvictionZone,
   getConvictionMinEntryMinute,
-  shouldSuppressConvictionStopLoss,
   shouldApplyLoopGlobalQuietHours,
   getEtDow,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
@@ -50,10 +49,10 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  convictionFiredThisWindow, convictionEmergencyCloses, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, maxBetWindowToken, convictionDirectionGuardBlockedMap,
+  convictionFiredThisWindow, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, convictionDirectionGuardBlockedMap,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
   convictionAbortCooldownMs, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS, setConvictionZoneEntryCallback, convictionObCache,
-  maxBetCandidateForWindow, convictionPriceTicks, tickAbortReasons,
+  convictionPriceTicks, tickAbortReasons,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
   liveCoinStreakState, coinSlippageStrikes, recentWindowOutcomes, recentUnanimousOutcomes, recentDirectionalOutcomes, directionalDampenerCooldown, windowCBBuffer,
   cachedPerformanceReportByMode, recentKalshiTargets, windowStabilityCache,
@@ -63,7 +62,7 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  WINDOW_ENTRY_BUFFER_S, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow,
+  WINDOW_ENTRY_BUFFER_S, coinStabilityCache, coinTrajectoryCache,
   setShadowQhBypass,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState, type CoinStabilityResult,
@@ -92,7 +91,7 @@ import {
 // 5-second scheduler loop.  The dispatch is fire-and-forget; all gates still
 // run inside runBotTickForCoin (live-price check, direction guard, candle
 // slope, etc.) — nothing is bypassed.
-setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: number | null) => {
+setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => {
   if (!S.config.enabled || S.paused || S.dbDegradedSince !== null) return;
   if (S.config.decisionMode !== "conviction") return;
   const wk = currentWindowKey();
@@ -117,10 +116,13 @@ setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: numbe
     );
     return;
   }
-  const kd = getKalshiCachedData(sym);
-  if (!kd?.ticker || kd.value === null || kd.yesPrice == null) return;
+  if (!ticker || !Number.isFinite(target) || target <= 0) return;
   const pred = getCachedPrediction(sym);
-  runBotTickForCoin(sym, kd.ticker, kd.value, kd.yesPrice, pred?.candles ?? []).catch((err) =>
+  const pairedYesPrice =
+    yesAsk != null && noAsk != null
+      ? (yesAsk + (1 - noAsk)) / 2
+      : yesAsk ?? (noAsk != null ? 1 - noAsk : null);
+  runBotTickForCoin(sym, ticker, target, pairedYesPrice, pred?.candles ?? []).catch((err) =>
     logger.warn({ err, sym }, "[conviction-poller-dispatch] per-coin tick error (non-fatal)"),
   );
 });
@@ -591,32 +593,14 @@ export async function runBotLoopTick(): Promise<void> {
     windowZeroFillAttempts.clear();
     windowRandomizerUsedValues.clear();
     convictionFiredThisWindow.clear();
-    extremeCautionAbortedThisWindow.clear();
     convictionAbortCooldown.clear();
     convictionAbortCooldownMs.clear();
     convictionObCache.clear();
-    convictionEmergencyCloses.clear();
     convictionDirectionGuardBlockedMap.clear();
     convictionPriceTicks.clear();
     tickAbortReasons.clear();
     coinStabilityCache.clear();
     coinTrajectoryCache.clear();
-    maxBetCandidateForWindow.clear(); // stale window keys no longer relevant
-    // Global max-bet token: roll ONCE per window to decide whether any bet this
-    // window is eligible for max-bet size.  The first qualifying coin claims it.
-    // All other coins use regular size, regardless of their stability.
-    {
-      const prob = S.config.convictionStabilityMaxBetProbability ?? S.config.convictionBoostProbability ?? 0.25;
-      const maxSlots = S.config.convictionStabilityMaxBetsPerWindow ?? 1;
-      const tokenAvailable = Math.random() < prob;
-      maxBetWindowToken.remaining = tokenAvailable ? maxSlots : 0;
-      logger.info(
-        { windowKey: cbWindowNow, prob, tokenAvailable, maxSlots },
-        tokenAvailable
-          ? `[kalshi-bot] max-bet token available this window (${maxSlots} slot${maxSlots !== 1 ? "s" : ""})`
-          : "[kalshi-bot] no max-bet token this window — all bets regular size",
-      );
-    }
     convictionBoostWindowCoins.clear();
     refreshConvictionWinRates();   // async, fire-and-forget; used by win-rate gate in the tick
     windowTotalBets.delete(cbWindowNow);   // drop last window's total (keyed by new wk)
@@ -758,78 +742,6 @@ export async function runBotLoopTick(): Promise<void> {
   // _runBotTick returns early after managing an existing position so the
   // same coin does not immediately re-enter in Phase 4 of this tick.
   if (openPositions.size > 0) {
-    // ── Conviction stop-loss ────────────────────────────────────────────────
-    // Checked every tick before the normal exit path.
-    // convictionStopLossFloor is an absolute contract-value floor in dollars
-    // (e.g. 0.30 = exit when the contract we hold drops to 30¢ or below).
-    //   YES position: contract value = yesPrice.  Exit when yesPrice ≤ floor.
-    //   NO  position: contract value = 1 − yesPrice.  Exit when (1 − yesPrice) ≤ floor.
-    // Near-zero guard: if the contract has already collapsed to ≤ 5¢ there
-    // is no meaningful recovery value — skip the sell to avoid a pointless
-    // transaction fee on a position that has already effectively expired worthless.
-    const NEAR_ZERO_FLOOR = 0.05;
-    const stopFloor = S.config.convictionStopLossFloor ?? 0;
-    // Time-gate: only arm the stop-loss after convictionStopLossActivationMinute minutes
-    // have elapsed in this window (default 12 = last 3 min).  Early-window dips can
-    // recover — arming too early creates false stops on winning trades.
-    const stopActivationMin = S.config.convictionStopLossActivationMinute ?? 0;
-    const windowKeyMs = new Date(newWindowKey).getTime();
-    const clockMinutesElapsed = (Date.now() - windowKeyMs) / 60000;
-    const stopLossArmed = stopActivationMin === 0 || clockMinutesElapsed >= stopActivationMin;
-    if (S.config.decisionMode === "conviction" && stopFloor > 0 && stopLossArmed) {
-      for (const [sym, pos] of Array.from(openPositions.entries())) {
-        const kd = getKalshiCachedData(sym);
-        const yp = kd?.yesPrice ?? null;
-        if (yp === null) continue;
-        const contractValue = pos.direction === "yes" ? yp : (1 - yp);
-        // Skip if already near-zero (no point selling worthless contracts).
-        if (contractValue <= NEAR_ZERO_FLOOR) continue;
-        if (contractValue > stopFloor) continue;
-
-        // Crypto-side confirmation: before exiting, check whether the
-        // underlying crypto price is already on the WINNING side of the
-        // Kalshi strike.  Market makers can temporarily misprice a contract
-        // mid-window (e.g. a NO bet where YES spikes to 90¢ while DOGE is
-        // 4% below the strike).  The stop-loss would exit a winning position.
-        // Suppress when crypto confirms the direction — fail-closed: if
-        // livePrice or kalshiStrike is unavailable, allow the stop-loss.
-        const _slLivePrice   = getCachedPrediction(sym)?.price ?? null;
-        const _slKalshiStrike = kd?.value ?? null;
-        const _slMarginPct = S.config.convictionStopLossSuppressionMarginPct ?? 0.02;
-        if (shouldSuppressConvictionStopLoss({ direction: pos.direction, livePrice: _slLivePrice, kalshiStrike: _slKalshiStrike, marginPct: _slMarginPct })) {
-          logger.warn(
-            {
-              sym, direction: pos.direction,
-              livePrice:      _slLivePrice,
-              kalshiStrike:   _slKalshiStrike,
-              suppressMargin: _slMarginPct,
-              contractValue:  +contractValue.toFixed(4),
-              stopFloor,
-            },
-            "[kalshi-bot] conviction stop-loss SUPPRESSED — crypto confirms position is winning (Kalshi mispricing)",
-          );
-          continue;
-        }
-
-        logger.warn(
-          { sym, direction: pos.direction,
-            contractValue: +contractValue.toFixed(4),
-            stopFloor,
-            entryYesPrice: pos.entryYesPrice },
-          "[kalshi-bot] conviction stop-loss triggered — selling position",
-        );
-        // Delete synchronously first — mirrors the window-expiry pattern so a
-        // concurrent tick cannot double-close the same position.
-        openPositions.delete(sym);
-        try {
-          await closePosition(pos, yp, kd?.value ?? null, "conviction_stop_loss", false, { gtcFallback: true });
-        } catch (err) {
-          logger.error({ err, sym }, "[kalshi-bot] conviction stop-loss exit failed — restoring position");
-          openPositions.set(sym, pos);
-        }
-      }
-    }
-
     for (const [sym] of Array.from(openPositions.entries())) {
       const kalshiData = getKalshiCachedData(sym);
       const prediction = getCachedPrediction(sym);
@@ -1595,9 +1507,9 @@ export async function runBotLoopTick(): Promise<void> {
     // across ALL coins this window, skip any coin that has not yet placed a bet.
     // Coins that already placed a bet are allowed to continue (for display/exit purposes).
     //
-    // CONVICTION MODE: this cap does NOT apply. Each coin bets independently based on
-    // its own yesPrice crossing 90¢. Max-bet slots are governed separately by
-    // convictionStabilityMaxBetsPerWindow via maxBetWindowToken.
+    // CONVICTION MODE: the in-memory prefilter does not serialize parallel
+    // symbols. Live entries enforce this shared cap atomically in the durable
+    // reservation immediately before POST.
     if (!isConviction && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${S.config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
@@ -2551,13 +2463,11 @@ export async function runBotLoopTick(): Promise<void> {
   if (bets.length > 0) {
     if (S.config.decisionMode === "conviction") {
       // Conviction: all qualifying coins fire in parallel — no single winner.
-      // Mark the max-bet candidate (pre-selected by stability score) as "selected"
-      // purely for UI display.  If none qualifies, fall back to bets[0].
-      const _maxSym   = maxBetCandidateForWindow.get(windowKey) ?? null;
-      const _maxEntry = _maxSym ? bets.find(e => e.symbol === _maxSym) : null;
-      (_maxEntry ?? bets[0]).selected = true;
+      // Select the first ranked item for UI focus only; this does not promote
+      // size or delay the other independent submissions.
+      bets[0].selected = true;
       logger.info(
-        { symbols: bets.map(e => `${e.symbol}(${e.action})`), maxBetCandidate: _maxSym ?? "none", windowKey },
+        { symbols: bets.map(e => `${e.symbol}(${e.action})`), windowKey },
         "[kalshi-bot] conviction: dispatching all in-zone coins",
       );
     } else {
@@ -2657,9 +2567,13 @@ export async function runBotLoopTick(): Promise<void> {
     // positive entries.  Falls back to kalshiData.yesPrice only when the
     // poller has no fresh data (e.g. first tick before poller has run once).
     let yesPrice: number | null = kalshiData?.yesPrice ?? null;
+    let tickTicker: string | null = kalshiData?.ticker ?? null;
+    let tickTarget: number | null = kalshiData?.value ?? null;
     if (S.config.decisionMode === "conviction") {
       const pollerPrice = getConvictionLivePrice(sym);
       if (pollerPrice != null) {
+        tickTicker = pollerPrice.ticker ?? null;
+        tickTarget = pollerPrice.target;
         yesPrice =
           pollerPrice.yesAsk != null && pollerPrice.yesBid != null
             ? (pollerPrice.yesAsk + pollerPrice.yesBid) / 2
@@ -2672,8 +2586,8 @@ export async function runBotLoopTick(): Promise<void> {
     try {
       await runBotTickForCoin(
         sym,
-        kalshiData?.ticker ?? null,
-        kalshiData?.value  ?? null,
+        tickTicker,
+        tickTarget,
         yesPrice,
         prediction?.candles ?? [],
       );
@@ -2691,45 +2605,6 @@ export async function runBotLoopTick(): Promise<void> {
   // before the next coin re-checks it. Running in parallel caused multiple coins to
   // all see globalBetsThisWindow=0 (the Phase-3 snapshot) and all place bets in the
   // same tick, violating maxBetsPerWindow.
-  // Max-bet pre-selection: before running coins in parallel, score all stable
-  // candidates and record the single best one.  Only the winner can claim the
-  // global token — this eliminates the race where whichever coin's async tick
-  // fires first wins the slot regardless of quality (ER / osc / ML).
-  if (_isConvictionMode && S.config.convictionStabilityEnabled !== false && maxBetWindowToken.remaining > 0) {
-    const minER     = S.config.convictionStabilityMinER     ?? 0.30;
-    const maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
-    const maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
-    const minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
-    let bestSym: string | null = null;
-    let bestScore = -Infinity;
-    for (const sym of betSymbols) {
-      const ind    = getCachedPrediction(sym)?.indicators;
-      const mlConf = getLatestCoinSignals(sym)?.mlConfidence ?? null;
-      if (!ind) continue;
-      if (ind.efficiencyRatio  < minER)     continue;
-      if (ind.oscillationCount > maxOsc)    continue;
-      if (ind.volatilityPct    > maxVolPct) continue;
-      if (mlConf !== null && mlConf < minMLConf) continue;
-      // Composite score: ER is primary (×100), osc penalised (×1.5),
-      // ML confidence secondary (×0.3), volatility penalised (×10).
-      const score = ind.efficiencyRatio * 100
-                  - ind.oscillationCount * 1.5
-                  + (mlConf ?? minMLConf) * 0.3
-                  - ind.volatilityPct * 10;
-      if (score > bestScore) { bestScore = score; bestSym = sym; }
-    }
-    const prev = maxBetCandidateForWindow.get(windowKey);
-    if (prev !== bestSym) {
-      maxBetCandidateForWindow.set(windowKey, bestSym);
-      if (bestSym) {
-        logger.info(
-          { sym: bestSym, score: bestScore.toFixed(2), windowKey },
-          "[kalshi-bot] max-bet candidate pre-selected (best stable coin by ER/osc/ML)",
-        );
-      }
-    }
-  }
-
   if (_isConvictionMode) {
     await Promise.allSettled(betSymbols.map(runCoin));
   } else {

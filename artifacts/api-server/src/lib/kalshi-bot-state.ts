@@ -251,9 +251,10 @@ export const convictionAbortCooldownMs = new Map<string, number>();
 export const CONVICTION_BOUNDARY_MISS_COOLDOWN_MS = 2_000;
 
 // Pre-warmed authenticated orderbook snapshot for coins at the conviction zone.
-// Populated by the conviction poller in the same poll cycle that detects zone
-// entry — so the live-price gate in runBotTickForCoin can skip its own Kalshi
-// API round-trip (0.5–2 s) and use the already-fetched data instead.
+// The poller starts this warmup before immediate dispatch but never waits for it;
+// it publishes a result only while the matching public-price ticker is still
+// fresh.  The live-price gate independently requires this ticker and freshness
+// before it can use the snapshot.
 // Cleared on window transition.  TTL matches the conviction price map (1.5 s).
 export interface ConvictionObSnapshot {
   yesAsk: number | null;
@@ -280,10 +281,10 @@ export const CONVICTION_OB_CACHE_TTL_MS = 1_500;
 // (deriveConvictionZone(floor, cap)) before dispatching — belt-and-suspenders
 // so a future poller zone drift cannot dispatch out-of-zone ticks again.
 let _convictionZoneEntryFn:
-  | ((sym: string, yesAsk: number | null, noAsk: number | null) => void)
+  | ((sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => void)
   | null = null;
 export function setConvictionZoneEntryCallback(
-  fn: (sym: string, yesAsk: number | null, noAsk: number | null) => void,
+  fn: (sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => void,
 ): void {
   _convictionZoneEntryFn = fn;
 }
@@ -291,8 +292,10 @@ export function callConvictionZoneEntry(
   sym: string,
   yesAsk: number | null,
   noAsk: number | null,
+  ticker: string,
+  target: number,
 ): void {
-  _convictionZoneEntryFn?.(sym, yesAsk, noAsk);
+  _convictionZoneEntryFn?.(sym, yesAsk, noAsk, ticker, target);
 }
 // Per-coin rolling price ticks from the conviction 1 s poller.
 // Used by the direction guard to detect consecutive-seconds adverse movement.

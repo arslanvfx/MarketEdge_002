@@ -31,15 +31,20 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // mutates it directly.  fetchKalshiTarget(sym, undefined, true) bypasses the
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
-import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
+import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, CONVICTION_OB_CACHE_TTL_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
 import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
 import { CRYPTO_COINS, getTickerFresh } from "./crypto-data";
 import { logger } from "./logger";
+import {
+  getCachedKalshiBalance,
+  prewarmRegularOrderExchangeIndex,
+} from "./kalshi-trader";
 import {
   startRegularSpotSampler,
   stopRegularSpotSampler,
   shouldRunRegularSpotSampler,
 } from "./kalshi-regular-spot-sampler";
+import { ConvictionOrderbookWarmupCoordinator } from "./kalshi-conviction-orderbook-warmup";
 
 const POLL_INTERVAL_MS = 1_000;
 export const CONVICTION_LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
@@ -83,6 +88,8 @@ export interface ConvictionLivePrice {
   /** The Kalshi market ticker this snapshot was fetched from (e.g. KXXRP15M-26JUL180045-45).
    *  The bot-tick cross-checks this against expectedTicker to reject drift to the next window. */
   ticker: string | undefined;
+  /** Strike paired with ticker by the same forced-fresh market response. */
+  target: number | null;
 }
 
 // Dedicated per-symbol price map populated exclusively by this poller.
@@ -91,9 +98,113 @@ export interface ConvictionLivePrice {
 const convictionPriceMap = new Map<string, ConvictionLivePrice>();
 
 let pollerHandle: ReturnType<typeof setInterval> | null = null;
+// setInterval does not await async callbacks.  Keep one cycle in flight so a
+// slow Kalshi request cannot pile up concurrent force-refreshes (and, more
+// importantly, let an older cycle publish after a newer one).
+let pollOnceInFlight: Promise<void> | null = null;
 
-async function pollOnce(generation = pollerGeneration): Promise<void> {
+// Retain completed outcomes briefly so a fast failure is still recognized as
+// the prepared request and cannot trigger an immediate duplicate read.
+const orderbookWarmups = new ConvictionOrderbookWarmupCoordinator();
+
+/**
+ * Join an exact-ticker warmup already started by the poller. The bounded wait
+ * prevents a slow authenticated read from dominating entry latency; on timeout
+ * the tick uses its strict poller-fallback validator instead of duplicating the
+ * same request.
+ */
+export async function waitForConvictionOrderbookWarmup(
+  sym: string,
+  ticker: string,
+  timeoutMs = 900,
+): Promise<boolean> {
+  return orderbookWarmups.wait(sym, ticker, timeoutMs);
+}
+
+function isActiveGeneration(generation: number): boolean {
+  return generation === pollerGeneration && pollerHandle !== null;
+}
+
+async function refreshSpotTick(sym: string, product: string, generation: number): Promise<void> {
+  const h = healthFor(sym);
+  try {
+    const spot = await getTickerFresh(product);
+    if (!isActiveGeneration(generation)) return;
+    if (Number.isFinite(spot) && spot > 0) {
+      const ticks = convictionPriceTicks.get(sym) ?? [];
+      ticks.push({ price: spot, ts: Date.now() });
+      // Keep ~5 min of history at 1 s cadence; the guard filters to the
+      // last few seconds via timestamp but deep history costs little.
+      if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
+      convictionPriceTicks.set(sym, ticks);
+      h.okCount++;
+      h.consecutiveFails = 0;
+      h.lastOkAt = Date.now();
+    } else {
+      // Invalid price (0/NaN) counts as a feed failure — no tick pushed.
+      h.failCount++;
+      h.consecutiveFails++;
+    }
+  } catch {
+    // No tick pushed on error.  The direction guard fails CLOSED when it
+    // ends up with no usable source, so a feed outage blocks entries rather
+    // than fabricating a fake decline OR silently passing.
+    h.failCount++;
+    h.consecutiveFails++;
+    if (h.consecutiveFails === 5 || h.consecutiveFails % 30 === 0) {
+      logger.warn(
+        { sym, consecutiveFails: h.consecutiveFails, lastOkAgoMs: h.lastOkAt != null ? Date.now() - h.lastOkAt : null },
+        "[conviction-poller] fresh spot-price fetch failing repeatedly — direction guard tick feed degraded",
+      );
+    }
+  }
+}
+
+/**
+ * Begin an authenticated warmup without putting it on the dispatch critical
+ * path.  A result is published only when the currently prepared public-price
+ * snapshot is still fresh and names the exact ticker that was queried.  The
+ * tick independently applies the same ticker+TTL check before consuming it.
+ */
+function startOrderbookWarmup(sym: string, ticker: string, generation: number): boolean {
+  const cached = convictionObCache.get(sym);
+  if (
+    cached &&
+    cached.ticker === ticker &&
+    Date.now() - cached.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
+  ) {
+    return false;
+  }
+
+  orderbookWarmups.start(sym, ticker, async () => {
+    const ob = await fetchOrderbookPrices(ticker);
+      if (ob === null || !isActiveGeneration(generation)) return;
+
+      // Do not let a slow old-window request become a "prepared" snapshot.
+      const prepared = convictionPriceMap.get(sym);
+      if (
+        !prepared ||
+        prepared.ticker !== ticker ||
+        Date.now() - prepared.fetchedAt > CONVICTION_LIVE_PRICE_TTL_MS
+      ) {
+        return;
+      }
+
+      // Empty authenticated books are meaningful and intentionally cached;
+      // failures (null) are not.
+      convictionObCache.set(sym, {
+        yesAsk: ob.yesAsk,
+        yesBid: ob.yesBid,
+        fetchedAt: Date.now(),
+        ticker,
+      });
+  });
+  return true;
+}
+
+async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
   const syms = Object.keys(KALSHI_SERIES);
+  const spotWarmups: Promise<void>[] = [];
 
   // NOTE: the conviction zone is now derived PER SYMBOL inside the per-symbol
   // callback via getEffectiveConvictionZone(sym, S.config) — see the
@@ -138,57 +249,49 @@ async function pollOnce(generation = pollerGeneration): Promise<void> {
       // (the guard returns blocked=false when it has < 2 samples).
       const product = COIN_PRODUCT[sym];
       if (product) {
-        const h = healthFor(sym);
-        try {
-          const spot = await getTickerFresh(product);
-          if (generation !== pollerGeneration || pollerHandle === null) return;
-          if (Number.isFinite(spot) && spot > 0) {
-            const ticks = convictionPriceTicks.get(sym) ?? [];
-            ticks.push({ price: spot, ts: Date.now() });
-            // Keep ~5 min of history at 1 s cadence; the guard filters to the
-            // last few seconds via timestamp but deep history costs little.
-            if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
-            convictionPriceTicks.set(sym, ticks);
-            h.okCount++;
-            h.consecutiveFails = 0;
-            h.lastOkAt = Date.now();
-          } else {
-            // Invalid price (0/NaN) counts as a feed failure — no tick pushed.
-            h.failCount++;
-            h.consecutiveFails++;
-          }
-        } catch {
-          // No tick pushed on error.  The direction guard fails CLOSED when it
-          // ends up with no usable source, so a feed outage blocks entries
-          // rather than fabricating a fake decline OR silently passing.
-          h.failCount++;
-          h.consecutiveFails++;
-          if (h.consecutiveFails === 5 || h.consecutiveFails % 30 === 0) {
-            logger.warn(
-              { sym, consecutiveFails: h.consecutiveFails, lastOkAgoMs: h.lastOkAt != null ? Date.now() - h.lastOkAt : null },
-              "[conviction-poller] fresh spot-price fetch failing repeatedly — direction guard tick feed degraded",
-            );
-          }
-        }
+        // Start this independently from the public Kalshi target request.
+        // Spot readiness must not add a network round-trip before zone
+        // dispatch, but the cycle still awaits it below before releasing its
+        // no-overlap lock.
+        spotWarmups.push(refreshSpotTick(sym, product, generation));
       }
 
       // forceRefresh=true bypasses the TTL check without deleting the existing
       // cache entry.  The old entry stays readable to other callers until the
       // live fetch atomically overwrites it — no transient null gap.
       // windowCloseTime pins to the current window — prevents next-window drift.
+      const targetFetchStartedAt = Date.now();
       await fetchKalshiTarget(sym, windowCloseTime, true);
+      if (!isActiveGeneration(generation)) return;
       // Read the freshly overwritten cache entry and mirror into the dedicated
       // conviction price map with its own 1.5 s TTL.
       const entry = kalshiTargetCache.get(sym);
-      if (entry && (entry.yesAsk != null || entry.yesBid != null || entry.noAsk != null)) {
-        convictionPriceMap.set(sym, {
-          yesAsk: entry.yesAsk ?? null,
-          yesBid: entry.yesBid ?? null,
-          noAsk:  entry.noAsk  ?? null,
-          fetchedAt: entry.at ?? nowMs,
-          ticker: entry.ticker,
-        });
-      }
+      // A failed force refresh leaves the previous shared-cache entry intact.
+      // Never promote that old entry into a newly "prepared" poller snapshot:
+      // dispatching on it would defeat the strict ticker+freshness guard.
+      const prepared = entry != null
+        && entry.ticker != null
+        && entry.at >= targetFetchStartedAt
+        && Date.now() - entry.at <= CONVICTION_LIVE_PRICE_TTL_MS
+        && (entry.yesAsk != null || entry.yesBid != null || entry.noAsk != null);
+      if (!prepared || !entry) return;
+      const preparedTicker = entry.ticker;
+      if (preparedTicker == null) return;
+      convictionPriceMap.set(sym, {
+        yesAsk: entry.yesAsk ?? null,
+        yesBid: entry.yesBid ?? null,
+        noAsk:  entry.noAsk  ?? null,
+        fetchedAt: entry.at,
+        ticker: preparedTicker,
+        target: Number.isFinite(entry.value) ? entry.value : null,
+      });
+      // Routing is immutable for an exact ticker. Publish it while the target is
+      // fresh so the final POST path does not need another market lookup.
+      prewarmRegularOrderExchangeIndex(preparedTicker, entry.exchangeIndex, entry.at);
+      // Keep the aggregate balance hot during the wait. The trader coalesces
+      // simultaneous warmups and the placement guard still fails closed if no
+      // usable balance can be obtained.
+      void getCachedKalshiBalance().catch(() => {});
 
       // ── Zone-entry detection ──────────────────────────────────────────────
       // If this coin's price has entered [lockPrice, lockPriceCap] on either
@@ -275,29 +378,15 @@ async function pollOnce(generation = pollerGeneration): Promise<void> {
           S.config.enabled &&
           !S.paused
         ) {
-          // Pre-warm: fetch the authenticated orderbook now (same poll cycle)
-          // so the live-price gate in the tick can read it from convictionObCache
-          // and skip its own 0.5–2 s round-trip.
+          // Start (but do not await) an authenticated orderbook warmup.  A
+          // zone dispatch is latency-sensitive; waiting here used to add the
+          // complete 0.5–2 s authenticated round-trip before the tick began.
+          // The strict ticker+freshness check in startOrderbookWarmup means a
+          // late result is usable only for this exact prepared market.
           const pollerEntry = convictionPriceMap.get(sym);
-          if (pollerEntry?.ticker) {
-            try {
-              const ob = await fetchOrderbookPrices(pollerEntry.ticker);
-              if (ob !== null) {
-                // Cache the authenticated result.  Empty-book { yesAsk: null,
-                // yesBid: null } is a valid response and is cached.  We do NOT
-                // cache null (timeout/network error): the tick treats null as
-                // "retry later" and must not be misled by a stale failure.
-                convictionObCache.set(sym, {
-                  yesAsk:    ob.yesAsk,
-                  yesBid:    ob.yesBid,
-                  fetchedAt: Date.now(),
-                  ticker:    pollerEntry.ticker,
-                });
-              }
-            } catch {
-              // OB pre-fetch failed — the tick will fall back to its own call.
-            }
-          }
+          const obPrewarming = pollerEntry?.ticker
+            ? startOrderbookWarmup(sym, pollerEntry.ticker, generation)
+            : false;
 
           logger.info(
             {
@@ -307,16 +396,24 @@ async function pollOnce(generation = pollerGeneration): Promise<void> {
               lockPrice, lockPriceCap,
               side: yesInZone ? "YES" : "NO",
               obCached: convictionObCache.has(sym),
+              obPrewarming,
             },
             "[conviction-poller] zone entry — dispatching tick immediately",
           );
-          callConvictionZoneEntry(sym, yesAsk, noAsk);
+          const target = pollerEntry?.target;
+          if (pollerEntry?.ticker && target != null && Number.isFinite(target) && target > 0) {
+            callConvictionZoneEntry(sym, yesAsk, noAsk, pollerEntry.ticker, target);
+          }
         }
         // ─────────────────────────────────────────────────────────────────────
       }
       // ─────────────────────────────────────────────────────────────────────
     }),
   );
+  // Spot warmups run in parallel with target work and do not delay individual
+  // zone dispatches.  Do await them before ending the cycle so the interval
+  // cannot start a second writer for the same symbol.
+  await Promise.allSettled(spotWarmups);
 
   // ── Periodic tick-feed health summary ────────────────────────────────────
   // Once a minute, log per-coin ok/fail counts since the previous summary so
@@ -337,6 +434,17 @@ async function pollOnce(generation = pollerGeneration): Promise<void> {
     }
     logger.info({ feeds: summary }, "[conviction-poller] tick-feed health (last 60 s)");
   }
+}
+
+function pollOnce(): Promise<void> {
+  if (pollOnceInFlight) return pollOnceInFlight;
+  const generation = pollerGeneration;
+  let run: Promise<void>;
+  run = pollOnceImpl(generation).finally(() => {
+    if (pollOnceInFlight === run) pollOnceInFlight = null;
+  });
+  pollOnceInFlight = run;
+  return run;
 }
 
 /**
@@ -371,13 +479,15 @@ export function startConvictionPoller(): void {
   pollerGeneration += 1;
   convictionPriceTicks.clear();
   logger.info("[conviction-poller] starting 1 s fresh-price poll");
-  // Fire immediately so the first bot tick after mode switch has fresh data.
-  pollOnce().catch(() => {});
   pollerHandle = setInterval(() => {
     pollOnce().catch((err) =>
       logger.debug({ err }, "[conviction-poller] poll error (non-fatal)"),
     );
   }, POLL_INTERVAL_MS);
+  // Fire immediately so the first bot tick after mode switch has fresh data.
+  // Install the handle first: generation guards treat a missing handle as
+  // stopped and must not discard this initial cycle.
+  pollOnce().catch(() => {});
 }
 
 /**
@@ -388,6 +498,7 @@ export function stopConvictionPoller(): void {
   if (pollerHandle !== null) clearInterval(pollerHandle);
   pollerHandle = null;
   convictionPriceMap.clear();
+  orderbookWarmups.clear();
   tickFeedHealth.clear();
   convictionPriceTicks.clear();
   logger.info("[conviction-poller] stopped");

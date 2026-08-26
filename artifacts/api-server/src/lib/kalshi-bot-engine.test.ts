@@ -2328,15 +2328,15 @@ test("strike proximity: ATR scaling disabled — base threshold used even with h
   assert.equal(r.effectiveThreshold, 0.30);
 });
 
-test("strike proximity: null livePrice → fail-open (gate passes)", () => {
+test("strike proximity: null livePrice → fail-closed (gate blocks)", () => {
   const r = computeStrikeProximityGate({ livePrice: null, kalshiStrike: 100000, direction: "yes", thresholdPct: 0.30 });
-  assert.equal(r.blocked, false);
+  assert.equal(r.blocked, true);
   assert.equal(r.gapPct, null);
 });
 
-test("strike proximity: null kalshiStrike → fail-open (gate passes)", () => {
+test("strike proximity: null kalshiStrike → fail-closed (gate blocks)", () => {
   const r = computeStrikeProximityGate({ livePrice: 101000, kalshiStrike: null, direction: "yes", thresholdPct: 0.30 });
-  assert.equal(r.blocked, false);
+  assert.equal(r.blocked, true);
   assert.equal(r.gapPct, null);
 });
 

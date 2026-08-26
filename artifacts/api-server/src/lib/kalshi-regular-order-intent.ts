@@ -40,9 +40,13 @@ export interface RegularOrderIntentKey {
   side: "yes" | "no";
   requestedCount: number;
   limitPrice: number | null;
+  /** Worst-case dollars reserved for this submission at the exact limit. */
+  requestedCost?: number;
   /** Shared live-order cap for this mode/window. Enforced atomically under the
    * same advisory lock as the per-symbol duplicate reservation. */
   maxOrdersPerWindow?: number;
+  /** Shared live exposure ceiling. Enforced atomically with the order cap. */
+  maxTotalExposure?: number;
 }
 
 export interface ClaimIntentResult {
@@ -82,6 +86,7 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
         side             TEXT NOT NULL,
         requested_count  NUMERIC(12,2) NOT NULL,
         limit_price      NUMERIC(12,8),
+        reserved_cost    NUMERIC(12,8),
         status           TEXT NOT NULL DEFAULT 'reserved',
         reason           TEXT,
         filled_count     NUMERIC(12,2),
@@ -145,7 +150,8 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
         ALTER COLUMN avg_fill_price TYPE NUMERIC(12,8) USING avg_fill_price::numeric,
         ADD COLUMN IF NOT EXISTS reconciliation_reason TEXT,
         ADD COLUMN IF NOT EXISTS reconciliation_evidence JSONB,
-        ADD COLUMN IF NOT EXISTS last_reconciled_at TIMESTAMPTZ
+        ADD COLUMN IF NOT EXISTS last_reconciled_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS reserved_cost NUMERIC(12,8)
     `);
     await client.query(`
       ALTER TABLE kalshi_regular_exit_intents
@@ -175,11 +181,14 @@ export async function ensureRegularOrderIntentMigrations(): Promise<void> {
   await ensureMigrated();
 }
 
-const advisoryKey = (mode: string): string => `kalshi-regular-order-cap:${mode}`;
+const advisoryKey = (mode: string, windowKey: string): string =>
+  `kalshi-regular-order-cap:${mode}:${windowKey}`;
 
 /**
- * ATOMIC claim-and-persist. Runs in one transaction under a per-mode advisory
- * lock so no two parallel symbol ticks can race the reservation. Persists the
+ * ATOMIC claim-and-persist. Runs in one transaction under a per-window advisory
+ * lock so no two parallel symbol ticks can oversubscribe the shared cap. The
+ * critical section is a single SQL statement after the lock rather than a
+ * multi-query count/check/insert sequence. Persists the
  * full intent BEFORE the live POST. Returns claimed=false when an active intent
  * for (mode,symbol,window) already exists (duplicate / in-flight / filled).
  *
@@ -196,52 +205,96 @@ export async function claimRegularOrderIntent(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [advisoryKey(key.mode)]);
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      advisoryKey(key.mode, key.windowKey),
+    ]);
 
-    const maxOrders = key.maxOrdersPerWindow;
-    if (Number.isInteger(maxOrders) && (maxOrders ?? 0) > 0) {
-      const activeCount = await client.query(
-        `SELECT COUNT(*)::int AS cnt
-         FROM kalshi_regular_order_intents
-         WHERE mode = $1 AND window_key = $2
-           AND status IN ('reserved','unknown','filled')`,
-        [key.mode, key.windowKey],
-      );
-      if (Number(activeCount.rows[0]?.cnt ?? 0) >= (maxOrders as number)) {
-        await client.query("COMMIT");
-        return { claimed: false, reason: "window_order_cap_reached" };
-      }
-    }
-
-    // Unknown/reserved exposure blocks this symbol across later windows. A
-    // confirmed fill blocks only its own window.
-    const existing = await client.query(
-      `SELECT client_order_id FROM kalshi_regular_order_intents
-       WHERE mode = $1 AND symbol = $2
-         AND (
-           status IN ('reserved','unknown')
-           OR (window_key = $3 AND status = 'filled')
-         )
+    const maxOrders =
+      Number.isInteger(key.maxOrdersPerWindow) && (key.maxOrdersPerWindow ?? 0) > 0
+        ? key.maxOrdersPerWindow!
+        : null;
+    const requestedCost =
+      Number.isFinite(key.requestedCost) && (key.requestedCost ?? 0) > 0
+        ? key.requestedCost!
+        : null;
+    const maxExposure =
+      Number.isFinite(key.maxTotalExposure) && (key.maxTotalExposure ?? 0) > 0
+        ? key.maxTotalExposure!
+        : null;
+    const claim = await client.query<{ claimed: boolean; reason: string | null }>(
+      `WITH facts AS (
+         SELECT
+           EXISTS (
+             SELECT 1
+               FROM kalshi_regular_order_intents
+              WHERE mode = $2 AND symbol = $3
+                AND (
+                  status IN ('reserved','unknown')
+                  OR (window_key = $4 AND status = 'filled')
+                )
+           ) AS symbol_blocked,
+           (
+             SELECT COUNT(*)::int
+               FROM kalshi_regular_order_intents
+              WHERE mode = $2 AND window_key = $4
+                AND status IN ('reserved','unknown','filled')
+           ) AS active_count,
+           (
+             SELECT COALESCE(SUM(reserved_cost), 0)::numeric
+               FROM kalshi_regular_order_intents
+              WHERE mode = $2
+                AND (
+                  status IN ('reserved','unknown')
+                  OR (window_key = $4 AND status = 'filled')
+                )
+           ) AS active_cost
+       ),
+       inserted AS (
+         INSERT INTO kalshi_regular_order_intents
+           (client_order_id, mode, symbol, window_key, ticker, side,
+            requested_count, limit_price, reserved_cost, status, created_at)
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',NOW()
+           FROM facts
+          WHERE NOT symbol_blocked
+            AND ($10::int IS NULL OR active_count < $10)
+            AND (
+              $11::numeric IS NULL
+              OR $9::numeric IS NULL
+              OR active_cost + $9::numeric <= $11::numeric + 0.01
+            )
+         ON CONFLICT DO NOTHING
+         RETURNING 1
+       )
+       SELECT true AS claimed, NULL::text AS reason FROM inserted
+       UNION ALL
+       SELECT false AS claimed,
+         CASE
+           WHEN symbol_blocked THEN 'unresolved_intent_exists'
+           WHEN $10::int IS NOT NULL AND active_count >= $10 THEN 'window_order_cap_reached'
+           WHEN $11::numeric IS NOT NULL AND $9::numeric IS NOT NULL
+             AND active_cost + $9::numeric > $11::numeric + 0.01
+             THEN 'exposure_cap_reached'
+           ELSE 'reservation_conflict'
+         END AS reason
+       FROM facts
+       WHERE NOT EXISTS (SELECT 1 FROM inserted)
        LIMIT 1`,
-      [key.mode, key.symbol.toUpperCase(), key.windowKey],
-    );
-    if (existing.rows.length > 0) {
-      await client.query("COMMIT");
-      return { claimed: false, reason: "unresolved_intent_exists" };
-    }
-
-    await client.query(
-      `INSERT INTO kalshi_regular_order_intents
-         (client_order_id, mode, symbol, window_key, ticker, side,
-          requested_count, limit_price, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'reserved',NOW())`,
       [
-        key.clientOrderId, key.mode, key.symbol.toUpperCase(), key.windowKey,
-        key.ticker, key.side, key.requestedCount, key.limitPrice,
+        key.clientOrderId,
+        key.mode,
+        key.symbol.toUpperCase(),
+        key.windowKey,
+        key.ticker,
+        key.side,
+        key.requestedCount,
+        key.limitPrice,
+        requestedCost,
+        maxOrders,
+        maxExposure,
       ],
     );
     await client.query("COMMIT");
-    return { claimed: true, reason: null };
+    return claim.rows[0] ?? { claimed: false, reason: "reservation_conflict" };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
@@ -480,7 +533,9 @@ export async function claimRegularExitIntent(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [advisoryKey(key.mode)]);
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `kalshi_regular_exit:${key.mode}`,
+    ]);
     const existing = await client.query(
       `SELECT client_order_id
        FROM kalshi_regular_exit_intents

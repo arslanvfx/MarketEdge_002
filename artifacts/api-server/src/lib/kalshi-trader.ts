@@ -946,7 +946,34 @@ export function computeMarketableLimitPrice(
  * This deliberately does not use any market cache: every actual POST attempt
  * must be preceded by its own exact-ticker lookup against the Trade API.
  */
+const regularOrderRouteCache = new Map<string, { exchangeIndex: number; preparedAt: number }>();
+const REGULAR_ORDER_ROUTE_TTL_MS = 20 * 60_000;
+
+/**
+ * Publish routing evidence fetched with the exact market snapshot during the
+ * waiting period. Ticker identity is the cache key; malformed evidence is
+ * ignored and can never replace a valid route.
+ */
+export function prewarmRegularOrderExchangeIndex(
+  ticker: string,
+  exchangeIndex: number | undefined,
+  preparedAt = Date.now(),
+): void {
+  if (
+    typeof ticker !== "string"
+    || ticker.length === 0
+    || !Number.isInteger(exchangeIndex)
+    || (exchangeIndex ?? -1) < 0
+    || !Number.isFinite(preparedAt)
+  ) return;
+  regularOrderRouteCache.set(ticker, { exchangeIndex: exchangeIndex!, preparedAt });
+}
+
 export async function resolveRegularOrderExchangeIndex(ticker: string): Promise<number> {
+  const cached = regularOrderRouteCache.get(ticker);
+  if (cached && Date.now() - cached.preparedAt <= REGULAR_ORDER_ROUTE_TTL_MS) {
+    return cached.exchangeIndex;
+  }
   const path = `/markets/${encodeURIComponent(ticker)}`;
   let raw: unknown;
   try {
@@ -1348,6 +1375,7 @@ export function isKalshiConfigured(): boolean {
 // tight enough to catch a real drain between consecutive bets in the same window.
 
 const _balanceCache = new Map<string, { availableBalance: number; fetchedAt: number }>();
+const _balanceInflight = new Map<string, Promise<number>>();
 const BALANCE_CACHE_TTL_MS = 10_000;
 
 /** Return Kalshi available balance in dollars, cached for up to 10 seconds.
@@ -1361,21 +1389,30 @@ export async function getCachedKalshiBalance(exchangeIndex?: number): Promise<nu
   if (cached && now - cached.fetchedAt < BALANCE_CACHE_TTL_MS) {
     return cached.availableBalance;
   }
-  try {
-    const bal = await getBalance(exchangeIndex);
-    _balanceCache.set(cacheKey, { availableBalance: bal.availableBalance, fetchedAt: now });
-    return bal.availableBalance;
-  } catch (err) {
-    if (cached) {
-      const staleAgeMs = now - cached.fetchedAt;
-      // Use stale cache (up to 60 s old) rather than aborting the trade
-      if (staleAgeMs < 60_000) {
-        logger.warn({ err }, "[kalshi] balance fetch failed — using stale cache (%ds old)", Math.round(staleAgeMs / 1000));
-        return cached.availableBalance;
+  const existing = _balanceInflight.get(cacheKey);
+  if (existing) return existing;
+  let request!: Promise<number>;
+  request = (async () => {
+    try {
+      const bal = await getBalance(exchangeIndex);
+      _balanceCache.set(cacheKey, { availableBalance: bal.availableBalance, fetchedAt: Date.now() });
+      return bal.availableBalance;
+    } catch (err) {
+      if (cached) {
+        const staleAgeMs = now - cached.fetchedAt;
+        // Use stale cache (up to 60 s old) rather than aborting the trade
+        if (staleAgeMs < 60_000) {
+          logger.warn({ err }, "[kalshi] balance fetch failed — using stale cache (%ds old)", Math.round(staleAgeMs / 1000));
+          return cached.availableBalance;
+        }
       }
+      throw err;
+    } finally {
+      if (_balanceInflight.get(cacheKey) === request) _balanceInflight.delete(cacheKey);
     }
-    throw err;
-  }
+  })();
+  _balanceInflight.set(cacheKey, request);
+  return request;
 }
 
 /** Invalidate the cached balance (call after a bet is placed so the next guard

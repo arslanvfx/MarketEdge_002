@@ -1320,17 +1320,22 @@ export interface BotConfig {
   lockPrice092Bootstrap?: boolean;    // one-time startup bootstrap: 0.93 → 0.92 target (asymmetric zone [90¢, 95¢])
   lockPrice082Migrated?: boolean;     // one-time startup migration: ≥88¢ lockPrice → 0.82 floor + set kalshiLockPriceCap=0.91
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.91; above this the window is missed → SKIP)
-  strikeProximityMinPct?: number;     // conviction only: global minimum |cryptoPrice−kalshiStrike|/strike % required before any FOK fires (default 0.05); fail-open when price/strike unavailable
+  strikeProximityMinPct?: number;     // conviction only: global minimum |cryptoPrice−kalshiStrike|/strike % required before any order fires (default 0.05); missing/invalid price or strike blocks
   proximityCalibrationMigrated?: boolean; // one-time startup migration: clamp drifted proximity thresholds back to the calibrated band (global ≤0.05, per-coin ≤ suggestion)
   strikeProximityAtrScale?: boolean;  // when true, effectiveThreshold = strikeProximityMinPct × max(1, atrPct/0.20); scales guard wider for more volatile coins (default true)
   strikeProximityMinPctOverrides?: Record<string, number>; // per-coin override of strikeProximityMinPct; takes priority over global when set; key = symbol (e.g. "BTC")
-  convictionStopLossFloor?: number;            // conviction only: absolute contract-value floor (e.g. 0.75 = sell when contract drops to 75¢; skipped if already at/near 0¢; 0 = disabled)
-  convictionStopLossActivationMinute?: number; // conviction only: only arm the stop-loss after this many minutes into the window (e.g. 12 = last 3 min); 0 = arm immediately
-  convictionStopLossSuppressionMarginPct?: number; // conviction only: widen the crypto-confirmation suppression window by this fraction (e.g. 0.02 = suppress when crypto is within 2% of the strike on the winning side); default 0.02
+  /** @deprecated retained only so old persisted config can be read; no runtime stop-loss is armed. */
+  convictionStopLossFloor?: number;
+  /** @deprecated retained only so old persisted config can be read; no runtime stop-loss is armed. */
+  convictionStopLossActivationMinute?: number;
+  /** @deprecated retained only for persisted-config compatibility. */
+  convictionStopLossSuppressionMarginPct?: number;
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
-  convictionCatastrophicFillThresholdCents?: number; // conviction only: if fill price deviates MORE than this many cents below lockPrice (YES) or above lockPriceCap (NO), trigger an immediate emergency close instead of holding; default 15¢; set to 0 to always hold
-  convictionEmergencyAutoCloseEnabled?: boolean; // safety default false: never churn a price-improved out-of-band fill into an immediate opposite order
+  /** @deprecated retained only for persisted-config compatibility; no automatic opposite order is submitted. */
+  convictionCatastrophicFillThresholdCents?: number;
+  /** @deprecated retained only for persisted-config compatibility; always ignored. */
+  convictionEmergencyAutoCloseEnabled?: boolean;
   convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
   // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
@@ -1612,15 +1617,10 @@ export interface BotConfig {
   convictionCandleSlopeThresholdPct?: number;  // % net move required to block (default 0.01)
   convictionCandleAtrScaleEnabled?: boolean;   // ATR-widen the threshold (default false)
 
-  // ── Extreme Caution mode (conviction only) ────────────────────────────────
-  // When enabled: (1) if a YES conviction bet was aborted this window because
-  // the YES bid was below the zone floor, all further YES entries for that
-  // coin+window are blocked — no re-tries after a bid-below-floor abort; and
-  // (2) the NO cross-check uses zero tolerance (no +1¢ spread allowance).
-  // Optional betOverride: when > 0, uses this $ amount instead of the normal
-  // bet size for ALL conviction entries while extreme caution is active.
-  extremeCautionEnabled?: boolean;         // master toggle (default false)
-  extremeCautionBetOverride?: number | null; // $ override; 0/null/undefined = use normal sizing
+  /** @deprecated useful bid-floor evidence is now part of the mandatory freefall verdict. */
+  extremeCautionEnabled?: boolean;
+  /** @deprecated separate caution sizing was removed. */
+  extremeCautionBetOverride?: number | null;
 
   // ── Time-Based Bet Schedule ───────────────────────────────────────────────
   // When enabled, the bet size is overridden by the first matching bracket
@@ -1782,11 +1782,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   enableDynamicSizing: false,
   dynamicSizingMaxConfidence: 90,
   profitLockPct: 0,
-  convictionStopLossFloor: 0.75,
-  convictionStopLossActivationMinute: 0,
   convictionEmergencyCloseFloor: 0.75,
   convictionDailyLossLimit: 50,
-  convictionCatastrophicFillThresholdCents: 15,
   convictionMinEntryMinutes: 0,
   convictionMaxDailySpend: undefined,
   convictionBoostBetSize: undefined,
@@ -2659,8 +2656,9 @@ export function mergePerMarketConvictionConfig(
  * a fraction of a percent above the strike — a single adverse candle can flip
  * the outcome.  This gate enforces a minimum distance.
  *
- * Gate is FAIL-OPEN: if livePrice or kalshiStrike is unavailable (null/zero)
- * the gate passes so the bot never silently blocks entries due to missing data.
+ * Gate is FAIL-CLOSED: if livePrice or kalshiStrike is unavailable, invalid,
+ * or non-positive, the order is blocked. Missing evidence cannot prove a safe
+ * distance from the strike.
  *
  * ATR scaling (when atrScaleEnabled=true):
  *   multiplier = clamp(atrPct / 0.20, 1, atrMultiplierCap)
@@ -2672,7 +2670,7 @@ export function mergePerMarketConvictionConfig(
  */
 export interface StrikeProximityResult {
   blocked: boolean;
-  gapPct: number | null;           // null when livePrice or kalshiStrike unavailable (gate passes)
+  gapPct: number | null;           // null when livePrice or kalshiStrike unavailable (gate blocks)
   effectiveThreshold: number;      // threshold used for this evaluation (may be ATR-scaled)
   atrMultiplier: number;           // the multiplier that was applied (1 when scaling off/unavailable)
 }
@@ -2688,9 +2686,16 @@ export function computeStrikeProximityGate(opts: {
 }): StrikeProximityResult {
   const { livePrice, kalshiStrike, thresholdPct, atrPct, atrScaleEnabled = true, atrMultiplierCap = 2 } = opts;
 
-  // Fail-open: unavailable data must never block a bet silently.
-  if (!livePrice || !kalshiStrike || kalshiStrike <= 0) {
-    return { blocked: false, gapPct: null, effectiveThreshold: thresholdPct, atrMultiplier: 1 };
+  // Fail closed on unavailable or malformed evidence.
+  if (
+    livePrice == null
+    || kalshiStrike == null
+    || !Number.isFinite(livePrice)
+    || !Number.isFinite(kalshiStrike)
+    || livePrice <= 0
+    || kalshiStrike <= 0
+  ) {
+    return { blocked: true, gapPct: null, effectiveThreshold: thresholdPct, atrMultiplier: 1 };
   }
 
   const gapPct = Math.abs(livePrice - kalshiStrike) / kalshiStrike * 100;

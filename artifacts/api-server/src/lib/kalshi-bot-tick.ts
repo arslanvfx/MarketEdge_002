@@ -18,9 +18,7 @@ import {
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
   computeConvictionCandleSlopeGate,
-  checkExtremeCautionEarlyGuard,
   computeNoAskBounceThreshold,
-  computeExtremeCautionNoAskCeiling,
   selectTimeBetBracket,
   evaluateYesBidFloorAbort,
   checkConvictionOneSidedBook,
@@ -65,7 +63,11 @@ import {
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
 import { triggerWindowPipeline } from "./kalshi-bot-pipeline";
-import { CONVICTION_LIVE_PRICE_TTL_MS, getConvictionLivePriceSnapshot } from "./kalshi-conviction-poller";
+import {
+  CONVICTION_LIVE_PRICE_TTL_MS,
+  getConvictionLivePriceSnapshot,
+  waitForConvictionOrderbookWarmup,
+} from "./kalshi-conviction-poller";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
@@ -78,7 +80,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   windowRandomizerUsedValues,
-  convictionFiredThisWindow, convictionEmergencyCloses, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache, maxBetWindowToken, maxBetCandidateForWindow,
+  convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
   convictionAbortCooldownMs, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS, convictionObCache, CONVICTION_OB_CACHE_TTL_MS,
   tickAbortReasons,
@@ -93,7 +95,7 @@ import {
   NOISE_CONFIDENCE_FLOOR, MIN_HARD_MODEL_SIGNALS, DB_DEGRADED_THRESHOLD,
   DB_DEGRADED_MIN_WINDOW_MS, REGIME_STRIKES_MAX,
   STABILITY_WAIT_MAX_S, COIN_YES_BLOCKED, COIN_FULLY_BLOCKED, TIMING_CACHE_TTL,
-  tickInFlight, getEffectiveDailyLossLimit, extremeCautionAbortedThisWindow,
+  tickInFlight, getEffectiveDailyLossLimit,
   convictionPriceTicks, shadowQhBypassActive,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
@@ -1327,162 +1329,11 @@ async function _runBotTick(
     coinTrajectoryCache.set(sym, computeTrajectoryGate(sym, candles, trajLivePrice, kalshiTarget, guessDir, _clockSTraj, S.config));
   }
 
-  // Conviction stability gate: classify the coin as stable or volatile using the
-  // stat model indicators + ML confidence.  Stable → max bet size; volatile → normal size.
-  // When convictionStabilityEnabled is false, falls back to the legacy random roll.
-  const boostBetSize = (() => {
-    if (S.config.decisionMode !== "conviction") return null;
-    const targetBoost = (S.config.convictionBoostBetSize ?? 0) > 0
-      ? S.config.convictionBoostBetSize!
-      : (S.config.maxBetSize ?? 0);
-    if (targetBoost <= 0) return null;
-    // clockElapsedS: defined here at IIFE top so both stable and legacy paths
-    // can use it.  The outer-scope definition lives inside a block `{ }` and
-    // is not accessible in this IIFE.
-    const _wkMs = new Date(windowKey).getTime();
-    const clockElapsedS = isNaN(_wkMs) ? 0 : (Date.now() - _wkMs) / 1000;
-
-    if (S.config.convictionStabilityEnabled !== false) {
-      // ── Deterministic stability gate ──────────────────────────────────────
-      const ind = getCachedPrediction(sym)?.indicators;
-      if (!ind) {
-        logger.info({ sym }, "[kalshi-bot] conviction stability — no indicators, treating as volatile");
-        coinStabilityCache.set(sym, { stable: false, er: 0, osc: 0, volPct: 0, mlConf: null, windowKey, computedAt: Date.now() } satisfies CoinStabilityResult);
-        return null;
-      }
-      const mlSig  = getLatestCoinSignals(sym);
-      const mlConf = mlSig?.mlConfidence ?? null;
-      const minER     = S.config.convictionStabilityMinER     ?? 0.30;
-      const maxOsc    = S.config.convictionStabilityMaxOsc    ?? 8;
-      const maxVolPct = S.config.convictionStabilityMaxVolPct ?? 3.0;
-      const minMLConf = S.config.convictionStabilityMinMLConf ?? 52;
-      const erOk  = ind.efficiencyRatio  >= minER;
-      const oscOk = ind.oscillationCount <= maxOsc;
-      const volOk = ind.volatilityPct    <= maxVolPct;
-      const mlOk  = mlConf === null || mlConf >= minMLConf;
-      // spikeFlag intentionally excluded here: conviction mode fires BECAUSE
-      // price just hit 90¢ — that sharp move often sets spikeFlag, but the
-      // 90¢ lock threshold is already the certainty filter.  Blocking max bets
-      // on spikes in conviction mode is self-defeating.
-      const stable = erOk && oscOk && volOk && mlOk;
-      coinStabilityCache.set(sym, {
-        stable,
-        er: ind.efficiencyRatio,
-        osc: ind.oscillationCount,
-        volPct: ind.volatilityPct,
-        mlConf,
-        windowKey,
-        computedAt: Date.now(),
-      } satisfies CoinStabilityResult);
-      if (!stable) {
-        logger.info(
-          { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, spike: ind.spikeFlag, erOk, oscOk, volOk, mlOk },
-          "[kalshi-bot] conviction stability — VOLATILE: regular bet size",
-        );
-        return null;
-      }
-      // Win-rate secondary gate: even stable coins need minimum historical win rate
-      const minWr2 = S.config.convictionBoostMinWinRate ?? 0.70;
-      const wr2    = coinConvictionWinRates.get(sym) ?? null;
-      if (wr2 !== null && wr2 < minWr2) {
-        logger.info(
-          { sym, wr: wr2.toFixed(2), minWr: minWr2, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount },
-          "[kalshi-bot] conviction stability — STABLE but win-rate below threshold, regular bet size",
-        );
-        return null;
-      }
-      // Max-bet timing gate: independent of minWindowEntryMinutes; blocks max-size
-      // bets until the configured number of minutes has elapsed.  Falling back to
-      // regular size does NOT consume the token — it stays available for later.
-      // (clockElapsedS is defined at the top of this IIFE, shared by all paths.)
-      const maxBetEntryGateS = (S.config.maxBetMinWindowEntryMinutes ?? 0) * 60;
-      if (maxBetEntryGateS > 0 && clockElapsedS < maxBetEntryGateS) {
-        logger.info(
-          { sym, elapsed: Math.round(clockElapsedS), gateS: maxBetEntryGateS },
-          "[kalshi-bot] conviction stability — STABLE but max-bet timing gate not elapsed, regular bet size",
-        );
-        return null;
-      }
-      // Trajectory gate: block max bets when the underlying price is trending
-      // dangerously close to (or crossing) the Kalshi target.
-      // Use candles[last].c as the live price — it is patched with the live ticker
-      // by the tracker snap loop and is always fresher than predCache.price.
-      if (S.config.maxBetTrajectoryEnabled !== false && kalshiTarget != null && candles.length >= 2) {
-        const trajLiveP = candles[candles.length - 1].c;
-        const traj = computeTrajectoryGate(sym, candles, trajLiveP, kalshiTarget, direction, clockElapsedS, S.config);
-        coinTrajectoryCache.set(sym, traj); // overwrite with precise direction
-        if (traj.blocked) {
-          logger.info(
-            { sym, reason: traj.reason, velocity: traj.velocity.toFixed(2), currentMarginPct: traj.currentMarginPct.toFixed(3), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1), direction },
-            "[kalshi-bot] trajectory gate — BLOCKED: max bet skipped (price momentum too close to target)",
-          );
-          // Clear the pre-selection so the next loop tick can pick a different
-          // stable candidate.  Without this, all other stable coins see
-          // preSelected !== sym → return null (regular size), and the token is
-          // permanently wasted on the one blocked coin for the entire window.
-          if (maxBetCandidateForWindow.get(windowKey) === sym) {
-            maxBetCandidateForWindow.delete(windowKey);
-          }
-          return null;
-        }
-        logger.info(
-          { sym, velocity: traj.velocity.toFixed(2), currentMarginPct: traj.currentMarginPct.toFixed(3), projectedMarginPct: traj.projectedMarginPct.toFixed(3), minutesRemaining: traj.minutesRemaining.toFixed(1) },
-          "[kalshi-bot] trajectory gate — SAFE: projected margin ok",
-        );
-      }
-
-      // Pre-selection guard: only the best-scoring stable coin (ranked by ER,
-      // osc, ML) can claim the max-bet token.  The loop pre-computes the winner
-      // before dispatching parallel ticks so the result is deterministic.
-      const preSelected = maxBetCandidateForWindow.get(windowKey);
-      if (preSelected !== undefined && preSelected !== sym) {
-        logger.info(
-          { sym, preSelected, er: ind.efficiencyRatio.toFixed(3) },
-          "[kalshi-bot] conviction stability — STABLE but not pre-selected for max bet, regular bet size",
-        );
-        return null;
-      }
-      // Global per-window token check: the probability was already rolled ONCE at
-      // window transition.  If no token is available, all remaining coins use regular
-      // size regardless of how stable they are.
-      if (maxBetWindowToken.remaining <= 0) {
-        logger.info(
-          { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount },
-          "[kalshi-bot] conviction stability — STABLE but no max-bet token this window, regular bet",
-        );
-        return null;
-      }
-      maxBetWindowToken.remaining--;
-      logger.info(
-        { sym, er: ind.efficiencyRatio.toFixed(3), osc: ind.oscillationCount, volPct: ind.volatilityPct.toFixed(2), mlConf, targetBoost },
-        "[kalshi-bot] conviction stability — STABLE + max-bet token claimed: max bet size",
-      );
-      return targetBoost;
-    }
-
-    // ── Legacy path (convictionStabilityEnabled=false): same global token logic ──
-    const minWr = S.config.convictionBoostMinWinRate ?? 0.70;
-    const wr    = coinConvictionWinRates.get(sym) ?? null;
-    if (wr !== null && wr < minWr) {
-      logger.info({ sym, wr, minWr }, "[kalshi-bot] conviction boost — win-rate gate failed");
-      return null;
-    }
-    const legacyMaxBetEntryGateS = (S.config.maxBetMinWindowEntryMinutes ?? 0) * 60;
-    if (legacyMaxBetEntryGateS > 0 && clockElapsedS < legacyMaxBetEntryGateS) {
-      logger.info(
-        { sym, elapsed: Math.round(clockElapsedS), gateS: legacyMaxBetEntryGateS },
-        "[kalshi-bot] conviction stability — STABLE but max-bet timing gate not elapsed, regular bet size",
-      );
-      return null;
-    }
-    if (maxBetWindowToken.remaining <= 0) {
-      logger.info({ sym }, "[kalshi-bot] conviction boost — no max-bet token this window, regular bet");
-      return null;
-    }
-    maxBetWindowToken.remaining--;
-    logger.info({ sym, targetBoost, wr }, "[kalshi-bot] conviction boost — max-bet token claimed: max bet size");
-    return targetBoost;
-  })();
+  // Historical production evidence did not support max-size promotion from the
+  // old stability/trajectory stack. Keep its UI telemetry passive, but conviction
+  // entries always use normal configured sizing until a validated replacement
+  // policy is intentionally introduced.
+  const boostBetSize: number | null = null;
   // A max-bet token is reserved before the late conviction/order gates run.
   // Every no-fill retry or pre-fill abort must release it exactly once so one
   // rejected coin cannot strand the window's max-bet opportunity.
@@ -1496,13 +1347,7 @@ async function _runBotTick(
     if (release.releaseConvictionLock) {
       convictionFiredThisWindow.delete(`${sym}:${windowKey}`);
     }
-    if (release.restoreMaxBetToken) {
-      maxBetWindowToken.remaining++;
-      logger.info(
-        { sym, reason, remaining: maxBetWindowToken.remaining },
-        "[kalshi-bot] conviction entry reservation released — max-bet token restored",
-      );
-    }
+    // restoreMaxBetToken is always false while conviction max-size promotion is disabled.
   };
   // Stat regime boost: use maxBetSize when the coin's current price action is
   // stable (high efficiency ratio, low oscillations, no spike candle).
@@ -1578,19 +1423,6 @@ async function _runBotTick(
       targetBetSize = scheduled;
       betScheduleApplied = true;
     }
-  }
-  if (
-    !betScheduleApplied &&
-    S.config.decisionMode === "conviction" &&
-    (S.config.extremeCautionEnabled ?? false) &&
-    (S.config.extremeCautionBetOverride ?? 0) > 0
-  ) {
-    const override = Math.min(S.config.extremeCautionBetOverride!, effectiveMaxBet);
-    logger.info(
-      { sym, override: +override.toFixed(2), prev: +targetBetSize.toFixed(2) },
-      "[kalshi-bot] extreme caution: overriding bet size (conviction mode, no schedule bracket matched)",
-    );
-    targetBetSize = override;
   }
 
   // ── BET AMOUNT RANDOMIZER ─────────────────────────────────────────────────
@@ -1952,30 +1784,6 @@ async function _runBotTick(
     }
   }
 
-  // ── EXTREME CAUTION: block YES re-entry after bid-below-floor abort ───────
-  // When extreme caution is enabled and a YES conviction bet was aborted this
-  // window because the YES bid was below the zone floor, block any further YES
-  // entry attempts for this coin+window.  The abort populates the set in the
-  // YES cross-check gate below; this early check prevents the retry loop from
-  // re-attempting the order before the set is populated on the same tick.
-  if (checkExtremeCautionEarlyGuard(
-    S.config.decisionMode ?? "classic",
-    S.config.extremeCautionEnabled ?? false,
-    direction,
-    extremeCautionAbortedThisWindow,
-    sym,
-    windowKey,
-  )) {
-    logger.info(
-      { sym, windowKey },
-      "[kalshi-bot] extreme caution: YES entry blocked — bid was below zone floor earlier this window",
-    );
-    setTickAbortReason(sym, windowKey,
-      "extreme caution: YES re-entry blocked — bid was below zone floor earlier this window");
-    releaseConvictionEntryReservation("extreme-caution early re-entry guard");
-    return;
-  }
-
   // Conviction once-per-window lock: mark synchronously before any await so that
   // a concurrent tick (e.g. the 5s scheduler vs the pipeline-completion trigger)
   // cannot also read the guard as "not fired" and place a duplicate bet.
@@ -2004,6 +1812,8 @@ async function _runBotTick(
   // fresh values (avoids stale-cache sizing blowup: yesBid 0.93 → 57 contracts).
   let freshYesAsk: number | null = null;
   let freshYesBid: number | null = null;
+  const convictionHotPathStartedAt = Date.now();
+  let finalQuoteReadyAt = convictionHotPathStartedAt;
   // True when the poller fallback path was taken (empty book or OB timeout).
   // Hoisted here so the order placement block (outside the conviction gate
   // block below) can read it — declaration inside `if (decisionMode===conviction)`
@@ -2036,6 +1846,20 @@ async function _runBotTick(
   const expectedTicker = `KX${sym}15M-${_tyy}${_tmon}${_tdd}${_thh}${_tmm}-${_tmm}`;
 
   if (S.config.decisionMode === "conviction") {
+    if (
+      kalshiTicker !== expectedTicker
+      || kalshiTarget == null
+      || !Number.isFinite(kalshiTarget)
+      || kalshiTarget <= 0
+    ) {
+      releaseConvictionEntryReservation("poller ticker/strike identity mismatch");
+      setTickAbortReason(sym, windowKey, "conviction market identity unavailable or mismatched");
+      logger.warn(
+        { sym, windowKey, expectedTicker, suppliedTicker: kalshiTicker, kalshiTarget },
+        "[kalshi-bot] conviction entry blocked: exact ticker/strike snapshot mismatch",
+      );
+      return;
+    }
     // Derive the asymmetric −2¢/+3¢ zone from the single slider value
     // (kalshiLockPrice) via deriveConvictionZone — single source of truth,
     // shared with the engine, the conviction poller, and the post-fill check.
@@ -2059,15 +1883,27 @@ async function _runBotTick(
     // authenticated API call when the cache is absent, stale (>1.5 s), or for a
     // mismatched ticker.  Caching null (timeout) is intentionally excluded: the
     // tick treats null as "retry later" and must not serve a stale error.
-    const _cachedOb     = convictionObCache.get(sym);
-    const _obCacheFresh = _cachedOb != null
+    let _cachedOb = convictionObCache.get(sym);
+    let _obCacheFresh = _cachedOb != null
       && Date.now() - _cachedOb.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
       && _cachedOb.ticker === expectedTicker;
-    const obPrices: { yesAsk: number | null; yesBid: number | null } | null = _obCacheFresh && _cachedOb
-      ? { yesAsk: _cachedOb.yesAsk, yesBid: _cachedOb.yesBid }
-      : await fetchOrderbookPrices(expectedTicker).catch(() => null);
+    const joinedWarmup = !_obCacheFresh
+      ? await waitForConvictionOrderbookWarmup(sym, expectedTicker)
+      : false;
+    if (joinedWarmup) {
+      _cachedOb = convictionObCache.get(sym);
+      _obCacheFresh = _cachedOb != null
+        && Date.now() - _cachedOb.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
+        && _cachedOb.ticker === expectedTicker;
+    }
+    const obPrices: { yesAsk: number | null; yesBid: number | null } | null =
+      _obCacheFresh && _cachedOb
+        ? { yesAsk: _cachedOb.yesAsk, yesBid: _cachedOb.yesBid }
+        : joinedWarmup
+          ? null
+          : await fetchOrderbookPrices(expectedTicker).catch(() => null);
     logger.debug(
-      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker, obCacheHit: _obCacheFresh },
+      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker, obCacheHit: _obCacheFresh, joinedWarmup },
       "[kalshi-bot] conviction live-price gate: orderbook fetch for expected window ticker",
     );
 
@@ -2321,7 +2157,7 @@ async function _runBotTick(
       // Round to 2 decimal places to avoid IEEE 754 drift: (1 − 0.91) evaluates to
       // 0.08999... in double precision, making the raw threshold 0.09999... instead of
       // 0.10, causing a false abort when freshYesAsk is exactly 0.10.
-      const yesAskBounceThreshold = computeNoAskBounceThreshold(lockPrice, S.config.extremeCautionEnabled ?? false);
+      const yesAskBounceThreshold = computeNoAskBounceThreshold(lockPrice, false);
       if (freshYesAsk > yesAskBounceThreshold) {
         releaseConvictionEntryReservation("NO cross-check abort");
         convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
@@ -2367,7 +2203,7 @@ async function _runBotTick(
         freshYesBid,
         lockPrice,
         usedPollerFallback,
-        S.config.extremeCautionEnabled ?? false,
+        false,
       );
       if (bidAbort.abort) {
         releaseConvictionEntryReservation("YES bid-floor cross-check abort");
@@ -2385,44 +2221,6 @@ async function _runBotTick(
         );
         setTickAbortReason(sym, windowKey,
           `YES cross-check: bid ${(freshYesBid * 100).toFixed(1)}¢ below zone floor ${(lockPrice * 100).toFixed(0)}¢ — price reversed`);
-        if (bidAbort.populateECSet) {
-          extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
-          logger.info(
-            { sym, windowKey, freshYesBid: +freshYesBid.toFixed(4), yesBidDropThreshold: +lockPrice.toFixed(4) },
-            "[kalshi-bot] extreme caution: YES bid-below-floor abort recorded — YES re-entry blocked for rest of window",
-          );
-        }
-        return;
-      }
-    }
-
-    // ── YES cross-check (NO-ask complement — Extreme Caution only) ──────────
-    // Complementary guard for YES entries when Extreme Caution is enabled.
-    // The derived NO ask (1 − freshYesBid) must be ≤ (1 − lockPrice + 0.005).
-    // If it exceeds that ceiling, the complementary side of the book is pricing
-    // YES back below the zone floor — a strong signal the price has bounced out.
-    // This check also covers the poller-fallback path where the authenticated
-    // bid-floor check above is skipped (!usedPollerFallback guard).
-    if (direction === "yes" && (S.config.extremeCautionEnabled ?? false) && freshYesBid != null) {
-      const freshNoAsk = 1 - freshYesBid;
-      const noAskCeiling = computeExtremeCautionNoAskCeiling(lockPrice);
-      if (freshNoAsk > noAskCeiling) {
-        releaseConvictionEntryReservation("extreme-caution complement abort");
-        convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
-        extremeCautionAbortedThisWindow.add(`${sym}:${windowKey}`);
-        logger.info(
-          {
-            sym, windowKey, direction,
-            freshNoAsk: +freshNoAsk.toFixed(4),
-            noAskCeiling: +noAskCeiling.toFixed(4),
-            freshYesBid: +freshYesBid.toFixed(4),
-            lockPrice,
-            cooldownMs: CONVICTION_ABORT_COOLDOWN_MS,
-          },
-          "[conviction-diag] tick-time price miss: extreme caution NO ask complement above ceiling — abort cooldown set; YES re-entry blocked for rest of window",
-        );
-        setTickAbortReason(sym, windowKey,
-          `extreme caution: NO ask ${(freshNoAsk * 100).toFixed(1)}¢ above ceiling ${(noAskCeiling * 100).toFixed(1)}¢ — YES re-entry blocked this window`);
         return;
       }
     }
@@ -2490,46 +2288,17 @@ async function _runBotTick(
         `safety abort: sizing $${postGateCost.toFixed(2)} exceeds max bet cap $${maxBetCap}`);
       return;
     }
-  }
-
-  // ── Conviction adverse-momentum gate ─────────────────────────────────────
-  // Runs ALWAYS in conviction mode (independent of regularBetTrajectoryEnabled).
-  // Blocks entry when the spot price is falling toward the Kalshi strike fast
-  // enough that it is projected to cross before window close — even if the
-  // Kalshi YES price is still inside the 82–91¢ conviction zone.
-  // Uses the same computeTrajectoryGate / computeAdverseMomentumGate logic
-  // but with convictionMomentumGateEnabled as the master toggle so it can be
-  // turned off in the bot config without touching regularBetTrajectoryEnabled.
-  if (S.config.decisionMode === "conviction" &&
-      (S.config.convictionMomentumGateEnabled ?? false) &&
-      kalshiTarget != null && candles.length >= 2) {
-    const _convTrajLiveP  = candles[candles.length - 1].c;
-    const _convTrajWkMs   = new Date(windowKey).getTime();
-    const _convTrajClockS = isNaN(_convTrajWkMs) ? 0 : (Date.now() - _convTrajWkMs) / 1000;
-    const convTraj = computeTrajectoryGate(sym, candles, _convTrajLiveP, kalshiTarget, direction, _convTrajClockS, S.config, "regular", true);
-    coinTrajectoryCache.set(sym, convTraj);
-    if (convTraj.blocked) {
-      releaseConvictionEntryReservation("conviction adverse-momentum gate");
-      logger.info(
-        {
-          sym, direction,
-          reason: convTraj.reason,
-          velocity: convTraj.velocity.toFixed(4),
-          currentMarginPct: convTraj.currentMarginPct.toFixed(4),
-          projectedMarginPct: convTraj.projectedMarginPct.toFixed(4),
-          minutesRemaining: convTraj.minutesRemaining.toFixed(2),
-        },
-        "[kalshi-bot] conviction: adverse momentum — projected to cross strike before close — BLOCKED",
-      );
-      setTickAbortReason(sym, windowKey,
-        `adverse momentum: projected to cross strike before close (velocity ${convTraj.velocity.toFixed(4)}/min)`);
-      return;
-    }
+    finalQuoteReadyAt = Date.now();
   }
 
   // Trajectory gate — regular bets: block if price is trending dangerously into target.
   // Use live-patched last candle close — always fresher than predCache.price.
-  if (S.config.regularBetTrajectoryEnabled && kalshiTarget != null && candles.length >= 2) {
+  if (
+    S.config.decisionMode !== "conviction"
+    && S.config.regularBetTrajectoryEnabled
+    && kalshiTarget != null
+    && candles.length >= 2
+  ) {
     const trajLiveP = candles[candles.length - 1].c;
     const _trajWkMs = new Date(windowKey).getTime();
     const _trajClockS = isNaN(_trajWkMs) ? 0 : (Date.now() - _trajWkMs) / 1000;
@@ -2557,14 +2326,19 @@ async function _runBotTick(
   // and the FOK order below, the live price can drift much closer to the
   // Kalshi strike than the configured threshold allows (e.g. NEAR at 0.03%
   // when the threshold is 0.15%).  Re-check here with the freshest available
-  // price — the live-patched last candle close — immediately before the order
-  // fires so the gate is always evaluated against real-time data.
-  // Fail-open: if no candle/price data is available the check is skipped
-  // (same behaviour as the main-loop gate).
+  // price — the latest fresh one-second spot sample — immediately before the
+  // order fires. Missing price or strike evidence blocks.
   if (S.config.decisionMode === "conviction") {
-    const _proxLivePrice = candles.length > 0
-      ? candles[candles.length - 1].c
-      : (getCachedPrediction(sym)?.price ?? null);
+    const _proxNow = Date.now();
+    const _proxLatestTick = [...(convictionPriceTicks.get(sym) ?? [])]
+      .reverse()
+      .find((sample) =>
+        Number.isFinite(sample.price)
+        && sample.price > 0
+        && sample.ts <= _proxNow
+        && _proxNow - sample.ts <= 2_000
+      );
+    const _proxLivePrice = _proxLatestTick?.price ?? null;
     const _proxAtrPct = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;
     const _proxBaseThreshold = getEffectiveProximityThreshold(sym, S.config);
     const _prox = computeStrikeProximityGate({
@@ -2595,6 +2369,30 @@ async function _runBotTick(
       );
       setTickAbortReason(sym, windowKey,
         `strike-proximity re-check: gap ${_prox.gapPct?.toFixed(3) ?? '?'}% < threshold ${_prox.effectiveThreshold.toFixed(3)}%`);
+      void persistBetRecord({
+        symbol: sym,
+        windowKey,
+        ticker: expectedTicker,
+        direction,
+        action: "skip",
+        signals: {
+          reason: "conviction_proximity_guard",
+          guard: {
+            blocked: true,
+            gapPct: _prox.gapPct,
+            effectiveThreshold: _prox.effectiveThreshold,
+            atrMultiplier: _prox.atrMultiplier,
+            livePrice: _proxLivePrice,
+            kalshiStrike: kalshiTarget,
+            spotSampleAt: _proxLatestTick?.ts ?? null,
+          },
+        },
+        entryPrice: yesPrice,
+        kalshiTarget,
+      }).catch((err) => logger.warn(
+        { err, sym, windowKey },
+        "[kalshi-bot] proximity guard evidence persist failed",
+      ));
       return;
     }
     logger.info(
@@ -2605,141 +2403,6 @@ async function _runBotTick(
       },
       "[kalshi-bot] conviction proximity re-check: gap OK — proceeding",
     );
-  }
-
-  // ── Conviction direction guard ────────────────────────────────────────────
-  // Block entry when the crypto spot price is moving TOWARD the Kalshi strike
-  // rather than away from it.  At the moment of entry:
-  //   YES bet → price must be rising  (moving further above the strike)
-  //   NO  bet → price must be falling (moving further below the strike)
-  //
-  // UN-SKIPPABLE (fail-closed): this guard is evaluated on EVERY conviction
-  // dispatch — including 0-fill retries, which re-enter this function via a
-  // fresh tick — and there is NO data-availability precondition on the outer
-  // `if`.  Previously the whole block was gated on `candles.length >= 2`, so a
-  // coin with missing candle data skipped the guard entirely even when fresh
-  // poller ticks were available — this is exactly how a wrong-direction XRP
-  // conviction bet slipped through on a retry.  Now:
-  //   • ticks are evaluated independently of candle availability (the pure
-  //     gate prefers ticks and only falls back to candles), and
-  //   • when NEITHER ticks nor candles have ≥2 usable points, the entry is
-  //     BLOCKED (source === "none" → fail closed).  A wrong-direction
-  //     conviction bet is far more costly than a missed one.
-  if (S.config.decisionMode === "conviction" &&
-      (S.config.convictionDirectionGuardEnabled ?? true)) {
-    const _dirLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
-    const _dir = computeConvictionDirectionGate({
-      priceTicks: convictionPriceTicks.get(sym),
-      minSeconds: S.config.convictionDirectionGuardMinSeconds ?? 4,
-      candles,
-      direction,
-      lookback: _dirLookback,
-      trendWindowSeconds: S.config.convictionDirectionTrendWindowSeconds ?? 90,
-    });
-    const _noUsableSource = _dir.source === "none";
-    if (_dir.blocked || _noUsableSource) {
-      releaseConvictionEntryReservation("conviction direction guard");
-      // Surface the block to the dashboard: mark this coin as direction-blocked.
-      convictionDirectionGuardBlockedMap.set(sym, {
-        direction,
-        gate: _noUsableSource ? "no-data" : "tick",
-        lookback: _dirLookback,
-        fromPrice: _dir.fromPrice ?? undefined,
-        toPrice: _dir.toPrice ?? undefined,
-      });
-      logger.warn(
-        {
-          sym, direction, windowKey,
-          source:      _dir.source,
-          sampleCount: _dir.sampleCount,
-          ageSpanMs:   _dir.ageSpanMs,
-          fromPrice:   _dir.fromPrice,
-          toPrice:     _dir.toPrice,
-          slopePrice:  _dir.slopePrice,      // full precision — sub-cent slopes matter
-          lookback:    _dirLookback,
-          tickCount:   convictionPriceTicks.get(sym)?.length ?? 0,
-          candleCount: candles.length,
-        },
-        _noUsableSource
-          ? "[kalshi-bot] conviction direction guard: NO usable price source (ticks+candles both <2 points) — failing CLOSED, order aborted"
-          : "[kalshi-bot] conviction direction guard: price moving toward strike — order aborted",
-      );
-      setTickAbortReason(sym, windowKey,
-        _noUsableSource
-          ? "direction guard: no usable price data (fail closed)"
-          : `direction guard: price moving toward strike (${_dir.fromPrice ?? '?'} → ${_dir.toPrice ?? '?'})`);
-      return;
-    }
-    logger.info(
-      {
-        sym, direction, windowKey,
-        source:      _dir.source,
-        sampleCount: _dir.sampleCount,
-        ageSpanMs:   _dir.ageSpanMs,
-        fromPrice:   _dir.fromPrice,
-        toPrice:     _dir.toPrice,
-        slopePrice:  _dir.slopePrice,        // full precision — "-0.00" hid a real decline
-        lookback:    _dirLookback,
-      },
-      "[kalshi-bot] conviction direction guard: price moving away from strike — OK",
-    );
-
-    // ── Conviction candle-slope gate (medium-term trend confirmation) ───────
-    // Runs ALONGSIDE the short-horizon direction guard above.  The tick guard
-    // only sees the last few seconds; if price peaked minutes ago and has been
-    // falling ever since but happens to be flat for those few seconds, the tick
-    // guard passes.  This gate checks the net slope over the last N minute
-    // candles and blocks a sustained adverse trend.  Fail-open on insufficient
-    // candles — the guard above already fail-closes total data outages.
-    if (S.config.convictionCandleSlopeGateEnabled ?? true) {
-      const _slope = computeConvictionCandleSlopeGate({
-        candles,
-        direction,
-        lookback:     S.config.convictionCandleSlopeLookback ?? 5,
-        // Defaults from the SOL Aug-8 regression: tight 0.01% threshold, ATR
-        // scaling OFF (scaling widened the threshold and let the loss through).
-        thresholdPct: S.config.convictionCandleSlopeThresholdPct ?? 0.01,
-        atrPct:       getCachedPrediction(sym)?.indicators?.volatilityPct ?? null,
-        atrScaleEnabled:  S.config.convictionCandleAtrScaleEnabled ?? false,
-        atrMultiplierCap: 1.2,
-      });
-      if (_slope.blocked) {
-        releaseConvictionEntryReservation("conviction candle-slope gate");
-        convictionDirectionGuardBlockedMap.set(sym, {
-          direction,
-          gate: direction === "yes" ? "candle-decline" : "candle-rise",
-          slopePct: _slope.slopePct ?? undefined,
-          effectiveThreshold: _slope.effectiveThreshold,
-          lookback: _slope.lookback,
-        });
-        logger.warn(
-          {
-            sym, direction, windowKey,
-            slopePct:           _slope.slopePct,
-            effectiveThreshold: _slope.effectiveThreshold,
-            atrMultiplier:      _slope.atrMultiplier,
-            lookback:           _slope.lookback,
-            candleCount:        candles.length,
-          },
-          "[kalshi-bot] conviction candle-slope gate: sustained adverse trend — order aborted",
-        );
-        setTickAbortReason(sym, windowKey,
-          `candle-slope gate: sustained adverse trend (slope ${_slope.slopePct?.toFixed(3) ?? '?'}% over ${_slope.lookback} candles)`);
-        return;
-      }
-      logger.info(
-        {
-          sym, direction, windowKey,
-          slopePct:           _slope.slopePct,
-          effectiveThreshold: _slope.effectiveThreshold,
-          lookback:           _slope.lookback,
-        },
-        "[kalshi-bot] conviction candle-slope gate: trend OK",
-      );
-    }
-
-    // Both gates passed — clear any prior block so the dashboard badge disappears.
-    convictionDirectionGuardBlockedMap.delete(sym);
   }
 
   // ── Pipeline direction guard (all non-conviction modes) ──────────────────
@@ -2880,6 +2543,7 @@ async function _runBotTick(
     const freefallProduct = CRYPTO_COINS.find(
       (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
     );
+    const freefallStartedAt = Date.now();
     const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
       samples: convictionPriceTicks.get(sym) ?? [],
       side: direction,
@@ -2892,6 +2556,13 @@ async function _runBotTick(
     if (!regularFreefall.allowed) {
       const evidence = describeRegularFreefallDecision(regularFreefall);
       releaseConvictionEntryReservation(evidence);
+      convictionDirectionGuardBlockedMap.set(sym, {
+        direction,
+        gate: regularFreefall.guardResult?.evaluable === false ? "no-data" : "tick",
+        lookback: regularFreefall.guardResult?.samplesUsed ?? 0,
+        fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
+        toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
+      });
       logger.warn(
         {
           sym,
@@ -2905,8 +2576,28 @@ async function _runBotTick(
         "[kalshi-bot] final regular freefall guard blocked order before durable intent",
       );
       setTickAbortReason(sym, windowKey, evidence);
+      void persistBetRecord({
+        symbol: sym,
+        windowKey,
+        ticker: expectedTicker,
+        direction,
+        action: "skip",
+        signals: {
+          reason: "conviction_freefall_guard",
+          guardReason: regularFreefall.reason,
+          guardResult: regularFreefall.guardResult,
+          sampleCoverageMs: regularFreefall.sampleCoverageMs,
+          secondsRemaining: regularFreefall.secondsRemaining,
+        },
+        entryPrice: yesPrice,
+        kalshiTarget,
+      }).catch((err) => logger.warn(
+        { err, sym, windowKey },
+        "[kalshi-bot] freefall guard evidence persist failed",
+      ));
       return;
     }
+    convictionDirectionGuardBlockedMap.delete(sym);
 
     // Persist and submit the exact same YES-side limit. Older fallback paths
     // stored NULL and let placeOrder derive the price internally, which made an
@@ -2924,6 +2615,7 @@ async function _runBotTick(
     // paper never touches this table (paper behavior stays isolated).
     // (_intentReservationId / _intentClaimed are declared at function scope so
     //  the confirmed-fill resolve after persistBetRecord can reference them.)
+    const intentStartedAt = Date.now();
     try {
       const claim = await claimRegularOrderIntent({
         clientOrderId: _intentReservationId,
@@ -2934,7 +2626,9 @@ async function _runBotTick(
         side: direction,
         requestedCount: contractCount,
         limitPrice: durableEntryLimitPrice,
+        requestedCost: contractCount * expectedFillCost,
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
+        maxTotalExposure: S.config.maxTotalExposure,
       });
       if (!claim.claimed) {
         // An unresolved intent already exists for this symbol/window — a prior
@@ -2950,6 +2644,17 @@ async function _runBotTick(
         return;
       }
       _intentClaimed = true;
+      logger.info(
+        {
+          sym,
+          windowKey,
+          quoteValidationMs: finalQuoteReadyAt - convictionHotPathStartedAt,
+          finalFreefallMs: intentStartedAt - freefallStartedAt,
+          intentClaimMs: Date.now() - intentStartedAt,
+          hotPathToReservationMs: Date.now() - convictionHotPathStartedAt,
+        },
+        "[kalshi-bot] conviction entry latency: final checks and atomic reservation complete",
+      );
     } catch (claimErr) {
       // Could not persist the durable intent — fail CLOSED. Placing a live order
       // without a durable record would risk an unrecoverable rogue order.
@@ -2998,6 +2703,7 @@ async function _runBotTick(
         `[kalshi-bot] conviction entry: placing ${entryTimeInForce === "fill_or_kill" ? "FOK" : "IOC"} order${pollerFallbackLabel ? ` (${pollerFallbackLabel})` : ""}`,
       );
 
+      const exchangeSubmitStartedAt = Date.now();
       const fokResult = await placeEntryOrderWithSizeFallback(
         {
           clientOrderId: _intentReservationId,
@@ -3014,6 +2720,17 @@ async function _runBotTick(
         },
         undefined,
         { disableHalfSizeRetry: true },
+      );
+      logger.info(
+        {
+          sym,
+          windowKey,
+          exchangePostMs: Date.now() - exchangeSubmitStartedAt,
+          hotPathTotalMs: Date.now() - convictionHotPathStartedAt,
+          filledCount: fokResult.filledCount,
+          timeInForce: entryTimeInForce,
+        },
+        "[kalshi-bot] conviction entry latency: exchange submission resolved",
       );
 
       if (fokResult.filledCount === 0) {
@@ -3208,14 +2925,10 @@ async function _runBotTick(
       // so the dashboard shows the placed bet, not a superseded abort.
       clearTickAbort(tickAbortReasons, sym, windowKey);
 
-      // Post-fill zone check (Layer 3 — hard guarantee).
-      // Kalshi FOK BUY fills at any ask ≤ limit (no floor), so price "improvement"
-      // can land the fill far below the conviction zone even when the pre-order gate
-      // confirmed an in-zone price.  This check catches that race window: if the
-      // actual fill price is outside [lockPrice, lockPriceCap], immediately sell to
-      // eliminate the exposure and never record the position as open.
-      // Loop guard: convictionEmergencyCloses caps closes at 2 per coin/window;
-      // after 2 the once-per-window lock stays set so re-entry cannot happen.
+      // Post-fill integrity audit. The submitted limit remains the hard
+      // worst-price boundary and the trader parser rejects any fill that breaches
+      // it. Kalshi may legally price-improve a BUY below the entry floor; that is
+      // recorded and held rather than submitting an automatic opposite order.
       if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
         const _postFillZone = getEffectiveConvictionZone(sym, S.config);
         const { lockPrice: _lp, lockPriceCap: _lpCap } = deriveConvictionZone(
@@ -3229,148 +2942,23 @@ async function _runBotTick(
           ? result.avgPrice
           : 1 - result.avgPrice;
 
-        // Deviation from the zone boundary:
-        //   YES bets: positive when fill < lockPrice (below floor)
-        //   NO  bets: positive when fill > lockPriceCap (above cap)
         const fillDeviation = direction === "yes"
           ? _lp - convFillPrice
           : convFillPrice - _lpCap;
 
         if (fillDeviation > 0) {
-          const thresholdCents = (S.config.convictionCatastrophicFillThresholdCents ?? 15) / 100;
           const deviationCents = fillDeviation * 100;
-
-          if (S.config.convictionEmergencyAutoCloseEnabled === true && fillDeviation > thresholdCents) {
-            // CATASTROPHIC deviation — the FOK was price-improved to a fill far outside
-            // the conviction zone (e.g. YES filled at 11¢ when lockPrice = 88¢).
-            // This happens when a resting sell order at a very different price appears
-            // between the pre-order gate and the actual exchange match.
-            // Action: unwind immediately via closePosition (handles P&L, balance,
-            // and DB persistence atomically with the same retry logic used everywhere).
-            logger.error(
-              {
-                sym, direction, windowKey,
-                convFillPrice: +convFillPrice.toFixed(4),
-                avgPrice: +result.avgPrice.toFixed(4),
-                lockPrice: _lp, lockPriceCap: _lpCap,
-                deviationCents: +deviationCents.toFixed(1),
-                thresholdCents: thresholdCents * 100,
-                contractCount, ticker: expectedTicker,
-              },
-              "[kalshi-bot] conviction fill: CATASTROPHIC deviation — emergency closing position immediately",
-            );
-            // Increment emergency-close counter — loop guard blocks re-entry after 2.
-            const closeCount = (convictionEmergencyCloses.get(`${sym}:${windowKey}`) ?? 0) + 1;
-            convictionEmergencyCloses.set(`${sym}:${windowKey}`, closeCount);
-
-            // Build a temporary OpenPosition so closePosition can handle the sell,
-            // P&L calculation, balance refresh, and DB persistence uniformly.
-            // Kalshi always returns avgPrice in YES-side terms.
-            // convFillPrice = cost per contract for the direction placed:
-            //   YES → convFillPrice = result.avgPrice  (paid per YES contract)
-            //   NO  → convFillPrice = 1 - result.avgPrice  (paid per NO contract)
-            const catastrophicId = `${sym}:${windowKey}:${Date.now()}`;
-            const _catSigs = decision.signals as {
-              statAbove?: boolean | null;
-              claudeAbove?: boolean | null;
-              mlAbove?: boolean | null;
-            };
-            const catastrophicPos: OpenPosition = {
-              id: catastrophicId,
-              symbol: sym,
-              windowKey,
-              ticker: expectedTicker ?? "",
-              direction,
-              entryYesPrice: result.avgPrice, // always YES-side (Kalshi convention)
-              contractCount,
-              // betAmount: cost per contract × contracts (convFillPrice = cost for either dir)
-              betAmount: contractCount * convFillPrice,
-              kalshiTarget: kalshiTarget ?? 0,
-              openedAt: Date.now(),
-              cryptoPriceAtEntry: getCachedPrediction(sym)?.price ?? null,
-              exitState: makeInitialExitState(result.avgPrice),
-              entryDecision: decision,
-              phase2Activated: false,
-              entryMode,
-              entrySignals: {
-                statAbove: _catSigs.statAbove ?? null,
-                claudeAbove: _catSigs.claudeAbove ?? null,
-                mlAbove: _catSigs.mlAbove ?? null,
-              },
-            };
-            try {
-              // closePosition: places sell order, computes P&L, updates balance +
-              // daily counters, and upserts the DB record (INSERT … ON CONFLICT DO
-              // UPDATE).  It handles the case where no prior entry INSERT exists
-              // by creating a combined entry+exit row.  gtcFallback retries as IOC
-              // on empty-book FOK failures so one thin-book tick doesn't strand us.
-              await closePosition(
-                catastrophicPos,
-                yesPrice,    // current market YES price — fallback for P&L if sell has no avgPrice
-                kalshiTarget,
-                "conviction_catastrophic_fill",
-                false,
-                { gtcFallback: true },
-              );
-              logger.info(
-                { sym, direction, contractCount },
-                "[kalshi-bot] conviction catastrophic fill: position unwound via closePosition",
-              );
-              setTickAbortReason(sym, windowKey, "catastrophic fill: order filled far outside conviction zone — position unwound immediately");
-              return; // Fully closed — do NOT record as open.
-            } catch (closeErr) {
-              // closePosition threw (sell failed, exchange unavailable, etc.).
-              // Record the position as open so Phase 2 / exit guard can retry the
-              // close on the very next tick instead of leaving it stranded.
-              logger.error(
-                { err: closeErr, sym, direction },
-                "[kalshi-bot] conviction catastrophic fill: closePosition failed — tracking as open for retry next tick",
-              );
-              openPositions.set(sym, catastrophicPos);
-              // Persist an entry record so the position appears in history and
-              // evalClosedBets can reconcile the P&L once Kalshi settles.
-              persistBetRecord({
-                insertId: catastrophicId,
-                symbol: sym,
-                windowKey,
-                ticker: expectedTicker,
-                direction,
-                action: "conviction_catastrophic_open",
-                signals: decision.signals,
-                entryPrice: catastrophicPos.entryYesPrice,
-                kalshiTarget: kalshiTarget ?? 0,
-                contractCount,
-                betAmount: catastrophicPos.betAmount,
-                mode: S.botMode,
-                decisionMode: S.config.decisionMode,
-                entryYesPrice: result.avgPrice,
-              }).catch((dbErr: unknown) => {
-                logger.warn({ err: dbErr, sym }, "[kalshi-bot] conviction catastrophic fill: entry persist error (non-fatal)");
-              });
-              setTickAbortReason(sym, windowKey, "catastrophic fill: out-of-zone fill could not be unwound — tracked as open for retry");
-              return; // Tracked as open; Phase 2 will close it.
-            }
-          } else {
-            // A buy limit can cap the WORST executable price but exchanges may
-            // legally price-improve a fill below the entry floor. Immediately
-            // selling that cheaper fill crystallizes spread loss and creates the
-            // dangerous buy/close loop the operator explicitly prohibited. The
-            // known quote was already checked before POST; an accepted improved
-            // fill is held and no opposite order is submitted here.
-            logger.warn(
-              {
-                sym, direction, windowKey,
-                convFillPrice: +convFillPrice.toFixed(4),
-                avgPrice: +result.avgPrice.toFixed(4),
-                lockPrice: _lp, lockPriceCap: _lpCap,
-                deviationCents: +deviationCents.toFixed(1),
-                thresholdCents: thresholdCents * 100,
-                contractCount, ticker: expectedTicker,
-              },
-              "[kalshi-bot] conviction fill price-improved outside entry band — holding; emergency auto-close disabled",
-            );
-            // Fall through: position is recorded as open and held until settlement.
-          }
+          logger.warn(
+            {
+              sym, direction, windowKey,
+              convFillPrice: +convFillPrice.toFixed(4),
+              avgPrice: +result.avgPrice.toFixed(4),
+              lockPrice: _lp, lockPriceCap: _lpCap,
+              deviationCents: +deviationCents.toFixed(1),
+              contractCount, ticker: expectedTicker,
+            },
+            "[kalshi-bot] conviction fill price-improved outside entry band — integrity audit recorded; holding position",
+          );
         }
       }
 

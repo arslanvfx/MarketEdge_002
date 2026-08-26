@@ -1,12 +1,11 @@
-import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, AlertTriangle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
+import { Bot, Pause, Play, TrendingUp, TrendingDown, Clock, DollarSign, BarChart3, Target, Star, CheckCircle2, XCircle, RefreshCw, Shield, Zap, ArrowUp, ArrowDown, Trophy, Minus, Settings, ChevronDown, ChevronUp, Activity, Brain, Sliders, ChevronLeft, ChevronRight, ShoppingCart, X, RotateCcw, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useQuery, type QueryClient } from "@tanstack/react-query";
+import { type QueryClient } from "@tanstack/react-query";
 import React from "react";
 import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode, QuietHoursV2 } from "./types";
 import { QuietHoursGrid } from "./quiet-hours-grid";
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 
-const STABILITY_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
 
 // ── Client-side quiet-hours state resolver (mirrors server resolveQuietHoursV2State exactly) ──
@@ -417,98 +416,6 @@ function PerSymbolQuietHoursPanel({
           }).catch(() => {});
         }}
       />
-    </div>
-  );
-}
-
-interface StabilityPreviewProps {
-  minER: number;
-  maxOsc: number;
-  maxVolPct: number;
-  minMLConf: number;
-}
-
-function StabilityPreview({ minER, maxOsc, maxVolPct, minMLConf }: StabilityPreviewProps) {
-  const { data, dataUpdatedAt } = useQuery<{
-    coinStability?: Record<string, { er: number; osc: number; volPct: number; mlConf: number | null; windowKey?: string }>;
-  }>({
-    queryKey: ["bot-pipeline-status"],
-    queryFn: () => fetch(`${API_BASE}/crypto/bot/pipeline-status`).then(r => r.json()),
-    refetchInterval: 5_000,
-  });
-
-  const coinStability = data?.coinStability;
-  const hasData = coinStability && Object.keys(coinStability).length > 0;
-
-  const results = STABILITY_COINS.map(sym => {
-    const s = coinStability?.[sym];
-    if (!s) return { sym, stable: null as boolean | null, er: null, osc: null, volPct: null, mlConf: null };
-    const stable =
-      s.er >= minER &&
-      s.osc <= maxOsc &&
-      s.volPct <= maxVolPct &&
-      (s.mlConf === null || s.mlConf >= minMLConf);
-    return { sym, stable, er: s.er, osc: s.osc, volPct: s.volPct, mlConf: s.mlConf };
-  });
-
-  const stableCount = results.filter(r => r.stable === true).length;
-  const updatedSec = dataUpdatedAt ? Math.round((Date.now() - dataUpdatedAt) / 1000) : null;
-
-  return (
-    <div className="mt-1 rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] font-medium text-violet-300 flex items-center gap-1.5">
-          <span className="relative flex h-1.5 w-1.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
-          </span>
-          Live eligibility — current thresholds
-        </span>
-        <span className="text-[9px] text-muted-foreground/50 font-mono">
-          {hasData ? `${stableCount}/${STABILITY_COINS.length} stable` : "—"}
-          {updatedSec !== null && updatedSec < 60 && <span className="ml-1 opacity-60">{updatedSec}s ago</span>}
-        </span>
-      </div>
-
-      {!hasData ? (
-        <span className="text-[10px] text-muted-foreground/50 italic">Waiting for indicator data…</span>
-      ) : (
-        <div className="flex flex-wrap gap-1.5">
-          {results.map(({ sym, stable, er, osc, volPct, mlConf }) => {
-            const failReasons: string[] = [];
-            if (er !== null && er < minER) failReasons.push(`ER ${er.toFixed(2)}<${minER.toFixed(2)}`);
-            if (osc !== null && osc > maxOsc) failReasons.push(`Osc ${osc}>${maxOsc}`);
-            if (volPct !== null && volPct > maxVolPct) failReasons.push(`Vol ${volPct.toFixed(2)}%>${maxVolPct.toFixed(2)}%`);
-            if (mlConf !== null && mlConf < minMLConf) failReasons.push(`ML ${mlConf.toFixed(0)}%<${minMLConf}%`);
-            const title = stable === null
-              ? `${sym}: no data`
-              : stable
-                ? `${sym}: STABLE → eligible for max bet roll`
-                : `${sym}: volatile (${failReasons.join(", ")})`;
-
-            return (
-              <span
-                key={sym}
-                title={title}
-                className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border cursor-default select-none transition-colors ${
-                  stable === null
-                    ? "bg-muted/30 text-muted-foreground/40 border-border/30"
-                    : stable
-                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                      : "bg-amber-500/10 text-amber-400/80 border-amber-500/20"
-                }`}
-              >
-                {stable === true && <Zap className="w-2.5 h-2.5" />}
-                {sym}
-              </span>
-            );
-          })}
-        </div>
-      )}
-
-      <span className="text-[9px] text-muted-foreground/40 leading-relaxed">
-        Green = stable → enters max bet probability roll · Amber = volatile → regular bet · Hover for details · Updates every 5 s
-      </span>
     </div>
   );
 }
@@ -1314,68 +1221,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       );
                     })()}
 
-                    {/* Stop-loss floor */}
-                    {(() => {
-                      const floor = merged.convictionStopLossFloor ?? 0;
-                      const floorPct = Math.round(floor * 100);
-                      return (
-                        <label className="flex flex-col gap-1.5 mt-1">
-                          <span className="text-xs text-muted-foreground flex items-center gap-2">
-                            Stop-Loss Floor —{" "}
-                            {floor === 0
-                              ? <span className="text-muted-foreground/50">Disabled</span>
-                              : <span className="text-red-400 font-mono">Sell if contract drops to {floorPct}¢</span>}
-                          </span>
-                          <div className="flex items-center gap-3">
-                            <input type="range" min={0} max={0.80} step={0.05}
-                              className="flex-1 accent-red-500"
-                              value={floor}
-                              onChange={e => setConfigDraft(d => ({ ...d, convictionStopLossFloor: parseFloat(e.target.value) }))} />
-                            <span className="text-xs font-mono w-20 text-right">
-                              {floor === 0
-                                ? <span className="text-muted-foreground/50">Off</span>
-                                : <span className="text-red-400">{floorPct}¢ floor</span>}
-                            </span>
-                          </div>
-                          <span className="text-[10px] text-muted-foreground/70">
-                            {floor === 0
-                              ? "No automatic exit — position holds until window close."
-                              : `Auto-sell if the contract you hold drops to ${floorPct}¢ or below. Skipped if the contract is already at or near 0¢ (no recovery value). Checked every 5 seconds.`}
-                          </span>
-                        </label>
-                      );
-                    })()}
-
-                    {/* Stop-loss activation minute */}
-                    {(merged.convictionStopLossFloor ?? 0) > 0 && (() => {
-                      const actMin = merged.convictionStopLossActivationMinute ?? 12;
-                      const remaining = 15 - actMin;
-                      return (
-                        <label className="flex flex-col gap-1.5 mt-1">
-                          <span className="text-xs text-muted-foreground flex items-center gap-2">
-                            Stop-Loss Arm Time —{" "}
-                            {actMin === 0
-                              ? <span className="text-amber-400 font-mono">Armed immediately</span>
-                              : <span className="text-orange-400 font-mono">Arms at minute {actMin} (last {remaining} min)</span>}
-                          </span>
-                          <div className="flex items-center gap-3">
-                            <input type="range" min={0} max={13} step={1}
-                              className="flex-1 accent-orange-500"
-                              value={actMin}
-                              onChange={e => setConfigDraft(d => ({ ...d, convictionStopLossActivationMinute: parseInt(e.target.value, 10) }))} />
-                            <span className="text-xs font-mono w-20 text-right text-orange-400">
-                              min {actMin}
-                            </span>
-                          </div>
-                          <span className="text-[10px] text-muted-foreground/70">
-                            {actMin === 0
-                              ? "Stop-loss fires at any point in the window. Early dips may trigger false exits."
-                              : `Stop-loss only arms after minute ${actMin} — ignores dips in the first ${actMin} min when prices can still recover.`}
-                          </span>
-                        </label>
-                      );
-                    })()}
-
                     {/* Conviction daily loss limit */}
                     <label className="flex flex-col gap-1.5 mt-1">
                       <span className="text-xs text-muted-foreground flex items-center gap-1.5">
@@ -1415,47 +1260,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </span>
                     </label>
 
-                    {/* Catastrophic fill threshold */}
-                    {(() => {
-                      const raw = merged.convictionCatastrophicFillThresholdCents ?? 15;
-                      return (
-                        <label className="flex flex-col gap-1.5 mt-1">
-                          <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                            <AlertTriangle className="w-3 h-3 text-red-400" />
-                            Catastrophic Fill Threshold (¢)
-                            {raw === 0 && (
-                              <span className="text-muted-foreground/50 text-[10px]">— emergency close disabled</span>
-                            )}
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            max={50}
-                            step={1}
-                            className="bg-background border border-red-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
-                            value={raw}
-                            onChange={e => {
-                              const v = parseInt(e.target.value, 10);
-                              setConfigDraft(d => ({ ...d, convictionCatastrophicFillThresholdCents: Number.isNaN(v) || v < 0 ? 0 : v }));
-                            }}
-                          />
-                          <span className="text-[10px] text-muted-foreground/60 leading-relaxed">
-                            {raw === 0
-                              ? "Emergency close is disabled — all fills are held to settlement regardless of price."
-                              : `Fills more than ${raw}¢ below the zone floor trigger an immediate emergency close instead of holding to settlement. Default: 15¢.`}
-                          </span>
-                        </label>
-                      );
-                    })()}
-
-                    {/* Strike Proximity Guard */}
+                    {/* Operator-tunable safety controls */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
                       <span className="text-[11px] font-medium text-sky-300 flex items-center gap-1.5">
                         <Activity className="w-3 h-3" />
-                        Strike Proximity Guard
+                        Operator Safety: Strike Proximity &amp; ATR Scale
                       </span>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Blocks a FOK when the live crypto price is too close to the Kalshi strike — a single adverse candle near the strike can flip the outcome. Each coin uses its per-coin override if set, otherwise the global threshold below. Fail-open: passes when price data is unavailable.
+                        Blocks an order when the live crypto price is too close to the Kalshi strike — a single adverse candle near the strike can flip the outcome. Each coin uses its per-coin override if set, otherwise the global threshold below. Missing or invalid spot/strike data blocks entry.
                         {(merged.strikeProximityAtrScale ?? true) && <span className="text-sky-400/70"> Threshold is ATR-scaled up to 1.2× for volatile coins.</span>}
                       </span>
                       <label className="flex flex-col gap-1.5">
@@ -1603,7 +1415,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Blocks entry when the coin's spot price is trending toward the Kalshi strike over the lookback window. YES bets: blocked when spot price is falling toward the strike. NO bets: blocked when spot price is rising toward the strike. Flat price (slope = 0) always passes.
+                        Final wrong-side protection rechecks fresh spot samples immediately before reservation. It fails closed on missing or stale evidence, the wrong target side, adverse endpoint movement, consecutive wrong-way movement, reversal/excursion, or rapid movement.
                       </span>
                       {(merged.convictionDirectionGuardEnabled ?? true) && (
                         <div className="flex flex-col gap-2 mt-1">
@@ -1622,242 +1434,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           </label>
                         </div>
                       )}
-                    </div>
-
-                    {/* Stability Gate */}
-                    <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-medium text-violet-300 flex items-center gap-1.5">
-                          <Zap className="w-3 h-3" />
-                          Stability Gate
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setConfigDraft(d => ({ ...d, convictionStabilityEnabled: !(merged.convictionStabilityEnabled ?? true) }))}
-                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.convictionStabilityEnabled ?? true)
-                            ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
-                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
-                        >
-                          {(merged.convictionStabilityEnabled ?? true) ? "On" : "Off"}
-                        </button>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Classifies each coin as stable or volatile every tick using stat model + ML metrics. Stable coins bet max size; volatile coins use regular bet size. Deterministic — no random rolls.
-                      </span>
-                      {/* Boost bet size */}
-                      <label className="flex flex-col gap-1">
-                        <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                          <DollarSign className="w-3 h-3 text-violet-400" />
-                          Stable Bet Size ($)
-                          {(merged.convictionBoostBetSize ?? 0) === 0 && (
-                            <span className="text-muted-foreground/50 text-[10px]">— uses Max Bet Size</span>
-                          )}
-                        </span>
-                        <input type="number" min={0} max={100} step={1}
-                          className="bg-background border border-violet-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
-                          value={merged.convictionBoostBetSize ?? 0}
-                          onChange={e => {
-                            const v = parseFloat(e.target.value);
-                            setConfigDraft(d => ({ ...d, convictionBoostBetSize: Number.isNaN(v) || v <= 0 ? undefined : v }));
-                          }} />
-                        <span className="text-[10px] text-muted-foreground/60">
-                          Dollar amount for stable-market bets. Leave at 0 to use the global Max Bet Size.
-                        </span>
-                      </label>
-                      {(merged.convictionStabilityEnabled ?? true) && (<>
-                        {/* Min ER */}
-                        {(() => {
-                          const er = merged.convictionStabilityMinER ?? 0.12;
-                          return (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground">
-                                Min Efficiency Ratio — <span className="text-violet-400 font-mono">{er.toFixed(2)}</span>
-                              </span>
-                              <input type="range" min={0.05} max={0.40} step={0.01}
-                                className="accent-violet-500"
-                                value={er}
-                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMinER: parseFloat(e.target.value) }))} />
-                              <span className="text-[10px] text-muted-foreground/60">
-                                ER = |net move| ÷ total path in last 15 min. Typical crypto values: 0.05–0.25. 0.12 = gentle bias; 0.20+ = strong trend required.
-                              </span>
-                            </label>
-                          );
-                        })()}
-                        {/* Max oscillations */}
-                        {(() => {
-                          const osc = merged.convictionStabilityMaxOsc ?? 8;
-                          return (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground">
-                                Max Oscillations — <span className="text-amber-400 font-mono">{osc}</span>
-                              </span>
-                              <input type="range" min={2} max={14} step={1}
-                                className="accent-amber-500"
-                                value={osc}
-                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxOsc: parseInt(e.target.value, 10) }))} />
-                              <span className="text-[10px] text-muted-foreground/60">
-                                Direction reversals in last 15 min. Fewer = choppier market classified volatile.
-                              </span>
-                            </label>
-                          );
-                        })()}
-                        {/* Max vol% */}
-                        {(() => {
-                          const vol = merged.convictionStabilityMaxVolPct ?? 0.15;
-                          return (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground">
-                                Max Volatility % — <span className="text-red-400 font-mono">{vol.toFixed(2)}%</span>
-                              </span>
-                              <input type="range" min={0.02} max={0.50} step={0.01}
-                                className="accent-red-500"
-                                value={vol}
-                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxVolPct: parseFloat(e.target.value) }))} />
-                              <span className="text-[10px] text-muted-foreground/60">
-                                1-min log-return std dev. Typical calm crypto: 0.03–0.08%. 0.15% = loose; 0.06% = strict. Coins above this are volatile regardless of ER/osc.
-                              </span>
-                            </label>
-                          );
-                        })()}
-                        {/* Min ML conf */}
-                        {(() => {
-                          const mlConf = merged.convictionStabilityMinMLConf ?? 52;
-                          return (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground">
-                                Min ML Confidence — <span className="text-blue-400 font-mono">{mlConf}%</span>
-                              </span>
-                              <input type="range" min={50} max={70} step={1}
-                                className="accent-blue-500"
-                                value={mlConf}
-                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMinMLConf: parseInt(e.target.value, 10) }))} />
-                              <span className="text-[10px] text-muted-foreground/60">
-                                ML model confidence floor. Coins with ML confidence below this are classified volatile. Coins with no ML signal pass this check.
-                              </span>
-                            </label>
-                          );
-                        })()}
-                        {/* Max bet probability */}
-                        {(() => {
-                          const prob = merged.convictionStabilityMaxBetProbability ?? 0.25;
-                          const pct = Math.round(prob * 100);
-                          return (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                                <Zap className="w-3 h-3 text-emerald-400" />
-                                Max bet chance — <span className="text-emerald-400 font-mono">{pct}% chance per window</span>
-                              </span>
-                              <input type="range" min={0} max={100} step={5}
-                                className="accent-emerald-500"
-                                value={pct}
-                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxBetProbability: parseInt(e.target.value, 10) / 100 }))} />
-                              <span className="text-[10px] text-muted-foreground/60">
-                                Rolled once per window. If it hits, the first stable qualifying coin gets max bet size — all others use regular size regardless.
-                              </span>
-                            </label>
-                          );
-                        })()}
-                        {/* Max bet slots per window */}
-                        {(() => {
-                          const slots = merged.convictionStabilityMaxBetsPerWindow ?? 1;
-                          return (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                                <Zap className="w-3 h-3 text-emerald-400" />
-                                Max bet slots per window — <span className="text-emerald-400 font-mono">{slots} slot{slots !== 1 ? "s" : ""}</span>
-                              </span>
-                              <input type="range" min={1} max={3} step={1}
-                                className="accent-emerald-500"
-                                value={slots}
-                                onChange={e => setConfigDraft(d => ({ ...d, convictionStabilityMaxBetsPerWindow: parseInt(e.target.value, 10) }))} />
-                              <span className="text-[10px] text-muted-foreground/60">
-                                How many coins can claim max-bet size in a single window when the roll hits. Set above 1 only for high-conviction windows.
-                              </span>
-                            </label>
-                          );
-                        })()}
-                        {/* Max-bet entry timing gate */}
-                        {(() => {
-                          const gate = merged.maxBetMinWindowEntryMinutes ?? 0;
-                          return (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                                <Zap className="w-3 h-3 text-amber-400" />
-                                Max-Bet Entry Wait
-                                {gate > 0 && (
-                                  <span className="ml-1 text-amber-400 font-mono">T+{gate}m</span>
-                                )}
-                              </span>
-                              <select className="bg-background border border-violet-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
-                                value={gate}
-                                onChange={e => setConfigDraft(d => ({ ...d, maxBetMinWindowEntryMinutes: parseInt(e.target.value, 10) }))}>
-                                <option value={0}>No wait — max bet allowed immediately</option>
-                                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(m => (
-                                  <option key={m} value={m}>Wait until T+{m} min</option>
-                                ))}
-                              </select>
-                              <span className="text-[10px] text-muted-foreground/60">
-                                Max-size bets are blocked until this many minutes into the window. If STABLE but the gate hasn't elapsed, the bot falls back to regular size — the token is not consumed.
-                              </span>
-                            </label>
-                          );
-                        })()}
-                        <StabilityPreview
-                          minER={merged.convictionStabilityMinER ?? 0.12}
-                          maxOsc={merged.convictionStabilityMaxOsc ?? 8}
-                          maxVolPct={merged.convictionStabilityMaxVolPct ?? 0.15}
-                          minMLConf={merged.convictionStabilityMinMLConf ?? 52}
-                        />
-                      </>)}
-                    </div>
-
-                    {/* ── Extreme Caution ──────────────────────────────────── */}
-                    <div className="flex flex-col gap-2 mt-2 border-t border-orange-500/15 pt-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-medium text-orange-300 flex items-center gap-1.5">
-                          <Shield className="w-3 h-3" />
-                          Extreme Caution
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setConfigDraft(d => ({ ...d, extremeCautionEnabled: !(merged.extremeCautionEnabled ?? false) }))}
-                          className={`rounded-md px-2.5 py-1 text-xs font-medium border transition-colors ${(merged.extremeCautionEnabled ?? false)
-                            ? "bg-orange-500/15 text-orange-400 border-orange-500/30 hover:bg-orange-500/25"
-                            : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"}`}
-                        >
-                          {(merged.extremeCautionEnabled ?? false) ? "On" : "Off"}
-                        </button>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        When on: (1) if a YES conviction bet is aborted this window because the YES bid dropped below the zone floor, all further YES re-entries for that coin are blocked for the rest of the window; (2) the NO cross-check uses zero tolerance instead of the normal +1¢ spread allowance.
-                      </span>
-                      <label className="flex flex-col gap-1 mt-0.5">
-                        <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                          <DollarSign className="w-3 h-3 text-orange-400" />
-                          Bet Override ($)
-                          {((merged.extremeCautionBetOverride ?? 0) === 0) && (
-                            <span className="text-muted-foreground/50 text-[10px]">— uses normal sizing</span>
-                          )}
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          step={0.5}
-                          disabled={!(merged.extremeCautionEnabled ?? false)}
-                          className={`border rounded-md px-3 py-1.5 text-sm w-32 transition-opacity ${(merged.extremeCautionEnabled ?? false)
-                            ? "bg-background border-orange-500/30 text-foreground"
-                            : "bg-muted/30 border-border text-muted-foreground opacity-50 cursor-not-allowed"}`}
-                          value={merged.extremeCautionBetOverride ?? 0}
-                          onChange={e => {
-                            const v = parseFloat(e.target.value);
-                            setConfigDraft(d => ({ ...d, extremeCautionBetOverride: Number.isNaN(v) || v <= 0 ? null : v }));
-                          }}
-                        />
-                        <span className="text-[10px] text-muted-foreground/60">
-                          When &gt; 0, every conviction bet uses this fixed $ amount (only when no time bracket matches). 0 = no override.
-                        </span>
-                      </label>
                     </div>
 
                   </div>
@@ -1881,7 +1457,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </button>
                   </div>
                   <p className="text-[10px] text-muted-foreground/60 -mt-1">
-                    Override bet size based on how far into the window the entry fires. The bracket with the highest minute threshold ≤ current elapsed minutes wins. Falls through to normal sizing when no bracket matches. In conviction mode, the Extreme Caution bet override takes priority over this.
+                    Override bet size based on how far into the window the entry fires. The bracket with the highest minute threshold ≤ current elapsed minutes wins. Falls through to normal sizing when no bracket matches.
                   </p>
                   {(() => {
                     const schedule = (configDraft.timeBetSchedule !== undefined ? configDraft.timeBetSchedule : merged.timeBetSchedule) ?? [];
@@ -2039,6 +1615,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   })()}
                 </div>
 
+                {/* Legacy trajectory tuning intentionally hidden from the primary UI. */}
+                {false && <>
                 {/* Trajectory Gate toggles — visible for all modes */}
                 <div className="col-span-2 flex flex-col gap-3 rounded-xl border border-border/60 bg-muted/20 p-3">
                   <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
@@ -2074,6 +1652,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     </label>
                   </div>
                 </div>
+                </>}
 
                 {/* Mode config panel — defaults, saved preset, and save actions */}
                 <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 p-3">
@@ -2245,7 +1824,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       <span className="text-[11px] text-violet-300/80 leading-relaxed">
                         <span className="font-semibold text-violet-300">Conviction mode:</span> mid-exit is automatically suppressed regardless of the toggle above.
                         Conviction positions always hold to window expiry — the edge is in the price cross, not ongoing signals.
-                        Only the conviction stop-loss (below) can close a position early.
                       </span>
                     </div>
                   )}
