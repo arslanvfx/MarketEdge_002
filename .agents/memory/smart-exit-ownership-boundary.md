@@ -20,3 +20,9 @@ After proving exact full-quantity depth, the dedicated live exit must submit FOK
 **Why:** Analysis can become stale while durable ownership is being claimed. A gap between lifecycle claim and request insertion can admit a second mode or remainder. Exchange acknowledgements can omit or misstate eventual fills, unit drift can disable a live safety gate, and treating optional calibration as mandatory once blocked every baseline exit.
 
 **How to apply:** Regular positions use their canonical regular close lifecycle. Scalper exits use a dedicated, mode-independent reducing owner keyed to the original Scalper position, exact authenticated order-and-fill reconciliation, converted complementary depth, FOK submission, and exact unsold-remainder accounting. Claim broker-request attempts only after final evidence and policy revalidation; pre-submit blocks may release the lifecycle, post-submit ambiguity may not. Recovery scalps remain counterfactual research and never submissions.
+
+Current evaluations must be scoped twice: `live-exit` sees live positions only and `paper-exit` sees paper positions only; the regular dashboard displays regular-owner evaluations only, while Scalper-owner evaluations stay in the dedicated Scalper panel.
+
+**Why:** Regular paper and live positions share one in-memory map, and Smart Exit once evaluated both even while the bot dashboard correctly showed only the selected mode. This made one live position appear as three active exits; shared Scalper evaluations could further inflate the regular count.
+
+**How to apply:** Filter positions before evidence collection and evaluation, clear cached current evaluations on mode changes, and derive the regular UI count/table from regular-owner rows rather than global Smart Exit health totals.

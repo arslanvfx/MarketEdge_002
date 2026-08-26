@@ -5,7 +5,18 @@ import {
   computeSmartExitEffectivenessFromProceeds,
   getSmartExitShadowProceeds,
   isSmartExitCounterfactualScoreable,
+  smartExitModeIncludesPosition,
 } from "./kalshi-smart-exit-types.ts";
+
+test("Smart Exit execution modes include only positions from the matching bot mode", () => {
+  assert.equal(smartExitModeIncludesPosition("live-exit", "live"), true);
+  assert.equal(smartExitModeIncludesPosition("live-exit", "paper"), false);
+  assert.equal(smartExitModeIncludesPosition("paper-exit", "paper"), true);
+  assert.equal(smartExitModeIncludesPosition("paper-exit", "live"), false);
+  assert.equal(smartExitModeIncludesPosition("shadow", "paper"), true);
+  assert.equal(smartExitModeIncludesPosition("shadow", "live"), true);
+  assert.equal(smartExitModeIncludesPosition("off", "live"), false);
+});
 
 test("Smart Exit records loss saved for a losing YES exit", () => {
   const result = computeSmartExitEffectiveness({

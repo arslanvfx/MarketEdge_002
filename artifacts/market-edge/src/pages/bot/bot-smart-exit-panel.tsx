@@ -490,6 +490,8 @@ export function BotSmartExitPanel({ authPost }: Props) {
     });
   })();
   const exitSummary = lifecycle?.summary;
+  const regularEvaluations = (status?.evaluations ?? []).filter((evaluation) =>
+    evaluation.owner === "regular");
   const counterfactual = replay?.reports?.find((report) =>
     report.kind === "global_counterfactual"
     && report.owner === "regular"
@@ -513,7 +515,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
                  {status?.health?.dataReadiness?.toUpperCase() || 'UNAVAILABLE'}
                </span>
                <span className="text-slate-700 px-0.5">|</span>
-               <span>EVALS: <span className="text-slate-300">{status?.health?.activeEvaluations ?? 0}</span></span>
+               <span>EVALS: <span className="text-slate-300">{regularEvaluations.length}</span></span>
             </div>
           </div>
         </div>
@@ -607,7 +609,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {status?.evaluations?.map(ev => (
+                 {regularEvaluations.map(ev => (
                   <tr key={ev.id || `${ev.symbol}-${ev.windowKey}`} className="hover:bg-white/[0.02] transition-colors h-[84px]">
                     <td className="px-4 py-3 align-middle">
                       <div className="flex flex-col gap-1 w-full pr-2">
@@ -732,7 +734,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
                     </td>
                   </tr>
                 ))}
-                {!status?.evaluations?.length && (
+                 {regularEvaluations.length === 0 && (
                   <tr><td colSpan={5} className="px-4 py-4 text-center text-slate-600 text-[10px] font-mono italic h-[84px] align-middle">No active evaluations</td></tr>
                 )}
               </tbody>

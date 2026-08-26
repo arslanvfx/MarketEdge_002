@@ -76,6 +76,7 @@ import {
   getSmartExitShadowProceeds,
   isSmartExitCounterfactualScoreable,
   normalizeSmartExitComponentHealth,
+  smartExitModeIncludesPosition,
 } from "./kalshi-smart-exit-types.ts";
 
 interface SmartExitLifecycleAccounting {
@@ -818,8 +819,13 @@ async function runCycle(): Promise<void> {
   const cycleStartedAt = Date.now();
   cycleInFlight = true;
   try {
-    const regular = [...openPositions.values()];
-    const scalper = await listOpenScalperPositions();
+    const regular = [...openPositions.values()].filter((position) =>
+      smartExitModeIncludesPosition(config.mode, position.entryMode));
+    const scalper = (await listOpenScalperPositions()).filter((position) =>
+      smartExitModeIncludesPosition(
+        config.mode,
+        position.mode === "live" ? "live" : "paper",
+      ));
     const entries = [
       ...regular.map((position) => ({ owner: "regular" as const, symbol: position.symbol.toUpperCase(), value: position })),
       ...scalper.map((position) => ({ owner: "scalper" as const, symbol: String(position.symbol ?? "").toUpperCase(), value: position })),
@@ -1031,6 +1037,10 @@ export async function updateSmartExitConfig(patch: Record<string, unknown>): Pro
     throw new Error("terminalLossHoldThreshold must be greater than or equal to deepLossHoldThreshold");
   }
   await saveSmartExitConfig(next);
+  if (next.mode !== config.mode) {
+    latestEvaluations.clear();
+    latestValidEvaluations.clear();
+  }
   config = next;
   if (next.enabled) startScheduler(); else stopScheduler();
   return getSmartExitConfig();

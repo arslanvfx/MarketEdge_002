@@ -167,9 +167,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     && scalperSmartExit.status !== "advisory"
                     && (scalperSmartExit.exitFillQuantity ?? 0) > 0;
                   const isScalperExitShadow = scalperSmartExit?.status === "advisory";
-                 const isExecutedPaperSmartExit = smartExit != null
+                  const isExecutedRegularSmartExit = smartExit != null
                    && smartExit.owner === "regular"
-                   && smartExit.tradingMode === "paper"
                    && !smartExit.advisoryOnly
                    && smartExit.executionStatus === "filled";
                  const isSmartExitAdvisory = smartExit?.advisoryOnly === true;
@@ -189,6 +188,8 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
 
                  const cardBg = isScalper
                    ? SCALPER_CARD_CLASS
+                    : isExecutedRegularSmartExit
+                      ? "border-red-400/45 bg-[linear-gradient(135deg,rgba(127,29,29,0.22),rgba(15,23,42,0.9))]"
                    : isRegularMarketBet
                      ? REGULAR_CARD_CLASS
                    : isShadow
@@ -213,9 +214,9 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                        <span className={`text-base font-black tracking-tight ${isScalper ? "text-amber-50" : isRegularMarketBet ? "text-slate-50" : "text-foreground"}`}>{r.symbol}</span>
 
-                       {isExecutedPaperSmartExit && (
+                       {isExecutedRegularSmartExit && (
                          <span className="flex items-center gap-1 rounded-full border border-red-300/60 bg-red-500/25 px-2.5 py-1 text-xs font-black tracking-wide text-red-100 shadow-[0_0_14px_rgba(239,68,68,0.25)]">
-                           <Shield className="h-3.5 w-3.5" /> SMART EXIT · STOP LOSS
+                            <Shield className="h-3.5 w-3.5" /> SMART EXIT · {smartExit.tradingMode === "live" ? "LIVE" : "PAPER"} STOP LOSS
                          </span>
                        )}
                        {isSmartExitAdvisory && (
@@ -466,7 +467,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                       </div>
                     </div>
 
-                     {smartExit && (isExecutedPaperSmartExit || isSmartExitAdvisory) && (() => {
+                     {smartExit && (isExecutedRegularSmartExit || isSmartExitAdvisory) && (() => {
                        const entryStake = smartExit.entryStake
                          ?? smartExit.entryWinningPrice * smartExit.quantity;
                        const proceeds = isSmartExitAdvisory
@@ -486,7 +487,7 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                          <div
                            data-testid={`smart-exit-history-${r.id}`}
                            className={`mb-3 rounded-xl border p-3 ${
-                             isExecutedPaperSmartExit
+                              isExecutedRegularSmartExit
                                ? "border-red-400/40 bg-red-950/25"
                                : "border-indigo-400/30 bg-indigo-950/20"
                            }`}
@@ -494,9 +495,11 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
                            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                              <div>
                                <div className={`text-[10px] font-black uppercase tracking-[0.16em] ${
-                                 isExecutedPaperSmartExit ? "text-red-200" : "text-indigo-200"
+                                  isExecutedRegularSmartExit ? "text-red-200" : "text-indigo-200"
                                }`}>
-                                 {isExecutedPaperSmartExit ? "Executed stop-loss lifecycle" : "Shadow advisory — no transaction executed"}
+                                  {isExecutedRegularSmartExit
+                                    ? `Executed ${smartExit.tradingMode === "live" ? "live" : "paper"} stop-loss lifecycle`
+                                    : "Shadow advisory — no transaction executed"}
                                </div>
                                <div className="mt-0.5 text-[10px] text-slate-300/70">
                                  Triggered {fmtDateTime(smartExit.triggeredAt)}

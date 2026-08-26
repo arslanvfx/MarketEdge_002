@@ -5,6 +5,16 @@
  */
 
 export type SmartExitMode = "off" | "shadow" | "paper-exit" | "live-exit";
+
+export function smartExitModeIncludesPosition(
+  smartExitMode: SmartExitMode,
+  positionMode: "paper" | "live",
+): boolean {
+  if (smartExitMode === "off") return false;
+  if (smartExitMode === "paper-exit") return positionMode === "paper";
+  if (smartExitMode === "live-exit") return positionMode === "live";
+  return true;
+}
 export type BinarySide = "yes" | "no";
 export type UnderlyingKind = "crypto" | "commodity" | "other";
 export type SmartExitOwnerKind = "regular" | "scalper";
