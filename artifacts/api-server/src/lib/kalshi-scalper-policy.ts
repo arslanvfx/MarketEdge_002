@@ -32,6 +32,7 @@
 // ---------------------------------------------------------------------------
 
 import {
+  MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
   normalizeScalpOpenCapDollars,
   type ScalpConfig,
   type EffectiveScalpParams,
@@ -2556,8 +2557,8 @@ export function validateScalpConfigPartial(
   }
   if (c["targetProximityThresholdPct"] != null) {
     const v = Number(c["targetProximityThresholdPct"]);
-    if (!Number.isFinite(v) || v <= 0 || v > 10) {
-      errors.push("targetProximityThresholdPct must be > 0 and ≤ 10");
+    if (!Number.isFinite(v) || v < MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT || v > 10) {
+      errors.push(`targetProximityThresholdPct must be ≥ ${MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT} and ≤ 10`);
     }
   }
 
@@ -2909,7 +2910,11 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
   numField("adverseExcursionRecoverySeconds", (v) => Number.isInteger(v) && v >= 1 && v <= 15, "adverseExcursionRecoverySeconds must be an integer 1-15");
   numField("rapidMoveLookbackSeconds", (v) => Number.isInteger(v) && v >= 1 && v <= 15, "rapidMoveLookbackSeconds must be an integer 1-15");
   numField("rapidMoveThresholdPct", (v) => v > 0 && v <= 10, "rapidMoveThresholdPct must be a number > 0 and ≤ 10");
-  numField("targetProximityThresholdPct", (v) => v > 0 && v <= 10, "targetProximityThresholdPct must be a number > 0 and ≤ 10");
+  numField(
+    "targetProximityThresholdPct",
+    (v) => v >= MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT && v <= 10,
+    `targetProximityThresholdPct must be a number ≥ ${MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT} and ≤ 10`,
+  );
 
   // ── Caps ──
   if (has("dailyCapDollars")) {

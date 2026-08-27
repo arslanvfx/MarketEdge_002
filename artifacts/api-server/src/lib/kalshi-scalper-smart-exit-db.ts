@@ -154,7 +154,7 @@ export async function claimScalperExitLifecycle(input: ScalperExitLifecycleInput
     }
     const result = await client.query(`INSERT INTO kalshi_scalper_exit_lifecycles
       (id,scalp_order_id,mode,symbol,ticker,window_key,side,remaining_quantity,status,trigger_reason,evidence,executable_quantity,executable_price,entry_winning_price,entry_stake,config_version)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14*$8,$15)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14::numeric*$8::numeric,$15)
       ON CONFLICT DO NOTHING
       RETURNING id,status`,
     [input.id,input.scalpOrderId,input.mode,input.symbol,input.ticker,input.windowKey,input.side,input.remainingQuantity,input.status,input.triggerReason,

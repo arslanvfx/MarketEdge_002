@@ -8,6 +8,7 @@ import { pool } from "@workspace/db";
 import { logger } from "./logger.ts";
 import {
   DEFAULT_SCALP_CONFIG,
+  MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
   normalizeScalpOpenCapDollars,
   type ScalpConfig,
   type ScalpEntryGuardEvidence,
@@ -559,7 +560,8 @@ export async function loadScalpConfigFromDB(): Promise<ScalpConfig> {
     // Legacy production config allowed null ("no cap"). The Scalper now always
     // requires a finite aggregate open-exposure ceiling, so normalize and
     // persist the safe default before the scan loop can start.
-    if (raw["openCapDollars"] !== merged.openCapDollars) {
+    if (raw["openCapDollars"] !== merged.openCapDollars
+      || raw["targetProximityThresholdPct"] !== merged.targetProximityThresholdPct) {
       await client.query(
         `UPDATE kalshi_scalp_config
          SET config = $1, updated_at = NOW()
@@ -570,8 +572,10 @@ export async function loadScalpConfigFromDB(): Promise<ScalpConfig> {
         {
           priorOpenCapDollars: raw["openCapDollars"] ?? null,
           openCapDollars: merged.openCapDollars,
+          priorTargetProximityThresholdPct: raw["targetProximityThresholdPct"] ?? null,
+          targetProximityThresholdPct: merged.targetProximityThresholdPct,
         },
-        "[kalshi-scalper] normalized mandatory open-exposure cap",
+        "[kalshi-scalper] normalized mandatory risk floors",
       );
     }
     return merged;
@@ -634,7 +638,9 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
     rapidMoveLookbackSeconds: typeof raw["rapidMoveLookbackSeconds"] === "number" ? raw["rapidMoveLookbackSeconds"] : defaults.rapidMoveLookbackSeconds,
     rapidMoveThresholdPct: typeof raw["rapidMoveThresholdPct"] === "number" ? raw["rapidMoveThresholdPct"] : defaults.rapidMoveThresholdPct,
     targetProximityGuardEnabled: typeof raw["targetProximityGuardEnabled"] === "boolean" ? raw["targetProximityGuardEnabled"] : defaults.targetProximityGuardEnabled,
-    targetProximityThresholdPct: typeof raw["targetProximityThresholdPct"] === "number" ? raw["targetProximityThresholdPct"] : defaults.targetProximityThresholdPct,
+    targetProximityThresholdPct: typeof raw["targetProximityThresholdPct"] === "number"
+      ? Math.max(MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT, raw["targetProximityThresholdPct"])
+      : defaults.targetProximityThresholdPct,
     circuitBreakerEnabled: typeof raw["circuitBreakerEnabled"] === "boolean" ? raw["circuitBreakerEnabled"] : defaults.circuitBreakerEnabled,
     circuitBreaker: typeof raw["circuitBreaker"] === "boolean" ? raw["circuitBreaker"] : defaults.circuitBreaker,
     circuitBreakerReason: typeof raw["circuitBreakerReason"] === "string" ? raw["circuitBreakerReason"] : (raw["circuitBreakerReason"] === null ? null : defaults.circuitBreakerReason),

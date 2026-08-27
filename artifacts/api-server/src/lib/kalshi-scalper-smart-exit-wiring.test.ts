@@ -197,6 +197,7 @@ test("global reducing ownership is row-locked and mode-independent", () => {
   assert.doesNotMatch(unresolvedQuery, /\bmode\s*=/);
   assert.match(claim, /expectedRemaining/);
   assert.match(claim, /quantity_mismatch/);
+  assert.match(claim, /\$14::numeric\*\$8::numeric/);
   assert.match(claim, /ON CONFLICT DO NOTHING/);
   assert.doesNotMatch(claim, /uq_scalper_exit_lifecycle/);
 });

@@ -59,6 +59,7 @@ export interface ScalpConfig {
 }
 
 export const DEFAULT_SCALP_OPEN_CAP_DOLLARS = 50;
+export const MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT = 0.20;
 export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   enabled: false,
   mode: "paper",
@@ -82,7 +83,7 @@ export const DEFAULT_SCALP_CONFIG: ScalpConfig = {
   rapidMoveLookbackSeconds: 4,
   rapidMoveThresholdPct: 0.5,
   targetProximityGuardEnabled: true,
-  targetProximityThresholdPct: 0.05,
+  targetProximityThresholdPct: MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
   circuitBreakerEnabled: true,
   circuitBreaker: false,
   circuitBreakerReason: null,

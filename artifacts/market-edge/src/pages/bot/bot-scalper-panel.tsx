@@ -1715,7 +1715,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                 <div className="relative min-w-20 flex-1 md:w-24 md:flex-none">
                   <input
                     type="number"
-                    min={0.01}
+                    min={0.2}
                     max={10}
                     step={0.01}
                     value={merged.targetProximityThresholdPct}

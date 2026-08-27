@@ -1274,7 +1274,7 @@ describe("checkFreefallGuard", () => {
     const shared = {
       coordinatedDirectionClearanceEnabled: true,
       targetProximityGuardEnabled: true,
-      targetProximityThresholdPct: 0.05,
+      targetProximityThresholdPct: 0.2,
       secondsRemaining: 40,
     };
     const strict = evaluate(
@@ -1324,7 +1324,7 @@ describe("checkFreefallGuard", () => {
       eligibilityStartMs: nowMs - 10_000,
       coordinatedDirectionClearanceEnabled: true,
       targetProximityGuardEnabled: true,
-      targetProximityThresholdPct: 0.05,
+      targetProximityThresholdPct: 0.2,
       secondsRemaining: 40,
       rapidMoveEnabled: true,
       rapidMoveLookbackSeconds: 10,
@@ -2750,6 +2750,8 @@ describe("parseScalpConfigPatch", () => {
     assert.equal(parseScalpConfigPatch({ rapidMoveThresholdPct: 0 }).ok, false);
     assert.equal(parseScalpConfigPatch({ rapidMoveThresholdPct: 10.01 }).ok, false);
     assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 0 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 0.19 }).ok, false);
+    assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 0.2 }).ok, true);
     assert.equal(parseScalpConfigPatch({ targetProximityThresholdPct: 10.01 }).ok, false);
   });
 
@@ -2759,7 +2761,7 @@ describe("parseScalpConfigPatch", () => {
       budgetDollars: 3, freefallConsecutiveSeconds: 6,
       freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
       rapidMoveLookbackSeconds: 5, rapidMoveThresholdPct: 0.8,
-      targetProximityThresholdPct: 0.05,
+      targetProximityThresholdPct: 0.2,
     });
     assert.equal(r.ok, true);
     assert.deepEqual(r.ok && r.value, {
@@ -2767,7 +2769,7 @@ describe("parseScalpConfigPatch", () => {
       budgetDollars: 3, freefallConsecutiveSeconds: 6,
       freefallLookbackSeconds: 20, freefallThresholdPct: 0.4,
       rapidMoveLookbackSeconds: 5, rapidMoveThresholdPct: 0.8,
-      targetProximityThresholdPct: 0.05,
+      targetProximityThresholdPct: 0.2,
     });
   });
 
