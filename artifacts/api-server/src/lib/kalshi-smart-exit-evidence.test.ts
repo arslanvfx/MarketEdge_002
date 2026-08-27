@@ -98,3 +98,33 @@ test("bounded pre-position collection is ready for a newly opened position and s
   assert.equal(collector.health().priceSamples <= 3, true);
   assert.equal(collector.health().tradeSamples <= 4, true);
 });
+
+test("hot ticker observations stay fresh while duplicate prices do not manufacture movement", async () => {
+  let clock = 100_000;
+  let price = "100";
+  const collector = new KalshiSmartExitEvidenceCollector({
+    now: () => clock,
+    momentumWindowSeconds: 1,
+    fetch: async () => reply({
+      price,
+      // Coinbase may return the same old last-trade timestamp repeatedly.
+      time: "1970-01-01T00:00:01.000Z",
+    }),
+  });
+
+  const first = await collector.collectSpot("BNB", "BNB-USD", null);
+  clock += 500;
+  const duplicate = await collector.collectSpot("BNB", "BNB-USD", null);
+
+  assert.equal(first.spotObservedAtSeconds, 100);
+  assert.equal(duplicate.spotObservedAtSeconds, 100.5);
+  assert.equal(duplicate.volatilityLogReturnPerSqrtSecond, 0);
+  assert.equal(duplicate.momentumLogReturn, 0);
+  assert.equal(collector.health().priceSamples, 1);
+
+  price = "99";
+  clock += 500;
+  const changed = await collector.collectSpot("BNB", "BNB-USD", null);
+  assert.equal(changed.spotObservedAtSeconds, 101);
+  assert.equal(collector.health().priceSamples, 2);
+});

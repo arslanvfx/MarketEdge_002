@@ -232,8 +232,16 @@ export class KalshiSmartExitEvidenceCollector {
     const encoded = encodeURIComponent(product);
     const tickerResult = await this.json(`${COINBASE_REST}/products/${encoded}/ticker`);
     const ticker = this.ticker(tickerResult.body);
-    const tickerIsMonotonic = ticker?.at != null
-      && (previous?.spotObservedAtSeconds == null || ticker.at >= previous.spotObservedAtSeconds);
+    // Coinbase's REST ticker `time` is the last trade time. On thinner products
+    // it can remain unchanged for tens of seconds even though this request is a
+    // fresh, successful spot observation. The hot lane therefore timestamps
+    // the observation at receipt. Duplicate prices are still excluded from the
+    // distinct trajectory below, so polling does not manufacture movement.
+    const spotObservedAtSeconds = tickerResult.receivedAtSeconds;
+    const tickerIsMonotonic = ticker != null
+      && spotObservedAtSeconds != null
+      && (previous?.spotReceivedAtSeconds == null
+        || spotObservedAtSeconds >= previous.spotReceivedAtSeconds);
     if (!ticker || !tickerIsMonotonic) {
       const failed = {
         ...(previous ?? emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability)),
@@ -249,26 +257,27 @@ export class KalshiSmartExitEvidenceCollector {
     const latestPrice = state.prices.at(-1);
     if (
       latestPrice == null
-      || ticker.at! > latestPrice.at
       || Math.abs(ticker.price - latestPrice.price) > Math.max(1e-12, ticker.price * 1e-12)
     ) {
-      state.prices.push({ at: ticker.at!, price: ticker.price });
+      state.prices.push({ at: spotObservedAtSeconds!, price: ticker.price });
     }
     this.prunePrices(state, observedAtSeconds);
-    const volatility = this.volatility(state.prices);
-    const momentum = this.momentum(state.prices, observedAtSeconds);
+    const volatility = this.volatility(state.prices)
+      ?? previous?.volatilityLogReturnPerSqrtSecond
+      ?? 0;
+    const momentum = this.momentum(state.prices, observedAtSeconds)
+      ?? previous?.momentumLogReturn
+      ?? 0;
     const evidence: SmartExitEvidence = {
       ...(previous ?? emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability)),
       source: "coinbase-rest",
       observedAtSeconds,
       spotReceivedAtSeconds: tickerResult.receivedAtSeconds,
-      spotObservedAtSeconds: ticker.at,
+      spotObservedAtSeconds,
       underlyingPrice: ticker.price,
-      volatilityLogReturnPerSqrtSecond:
-        volatility ?? previous?.volatilityLogReturnPerSqrtSecond ?? null,
-      momentumLogReturn: momentum ?? previous?.momentumLogReturn ?? null,
-      momentumWindowSeconds: momentum !== null
-        ? this.momentumWindowSeconds : previous?.momentumWindowSeconds ?? null,
+      volatilityLogReturnPerSqrtSecond: volatility,
+      momentumLogReturn: momentum,
+      momentumWindowSeconds: this.momentumWindowSeconds,
       marketWinProbability: currentMarketProbability,
     };
     state.latest = evidence;

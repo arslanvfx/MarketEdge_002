@@ -123,6 +123,8 @@ const lastEvaluationPersistenceMs = new Map<string, number>();
 const bookSnapshots = new Map<string, BookSnapshot>();
 const bookRefreshes = new Map<string, Promise<void>>();
 const hotSpotCollections = new Map<string, Promise<SmartExitEvidence>>();
+const slowEvidenceCollections = new Map<string, Promise<SmartExitEvidence>>();
+let cachedScalperPositions: Array<Record<string, unknown>> = [];
 const evaluationPending = new Map<string, {
   position: SmartExitPosition;
   evidence: SmartExitEvidence;
@@ -252,6 +254,18 @@ function collectHotSpot(
   const request = hotCollector.collectSpot(symbol, product, null)
     .finally(() => hotSpotCollections.delete(symbol));
   hotSpotCollections.set(symbol, request);
+  return request;
+}
+
+function collectSlowEvidence(
+  symbol: string,
+  product: string,
+): Promise<SmartExitEvidence> {
+  const existing = slowEvidenceCollections.get(symbol);
+  if (existing) return existing;
+  const request = collector.collect(symbol, product, null)
+    .finally(() => slowEvidenceCollections.delete(symbol));
+  slowEvidenceCollections.set(symbol, request);
   return request;
 }
 
@@ -1160,13 +1174,13 @@ async function runCycle(): Promise<void> {
   const cycleStartedAt = Date.now();
   cycleInFlight = true;
   try {
-    const prewarmable = PREWARMABLE_COINS;
-    if (prewarmable.length > 0) {
-      const coin = prewarmable[prewarmCursor % prewarmable.length]!;
-      prewarmCursor += 1;
-      await collector.collect(coin.symbol, coin.product, null);
-    }
     if (!config.enabled || config.mode === "off") {
+      const coin = PREWARMABLE_COINS[prewarmCursor % PREWARMABLE_COINS.length];
+      if (coin) {
+        prewarmCursor += 1;
+        void collectSlowEvidence(coin.symbol, coin.product).catch((error) =>
+          logger.debug({ error, symbol: coin.symbol }, "[kalshi-smart-exit] background prewarm failed"));
+      }
       lastCycleAt = new Date().toISOString();
       lastError = null;
       return;
@@ -1178,6 +1192,7 @@ async function runCycle(): Promise<void> {
         config.mode,
         position.mode === "live" ? "live" : "paper",
       ));
+    cachedScalperPositions = scalper;
     const entries = [
       ...regular.map((position) => ({ owner: "regular" as const, symbol: position.symbol.toUpperCase(), value: position })),
       ...scalper.map((position) => ({ owner: "scalper" as const, symbol: String(position.symbol ?? "").toUpperCase(), value: position })),
@@ -1204,7 +1219,7 @@ async function runCycle(): Promise<void> {
       if (evidenceBySymbol.has(entry.symbol)) continue;
       const definition = PRODUCT_BY_SYMBOL.get(entry.symbol);
       if (!definition) continue;
-      evidenceBySymbol.set(entry.symbol, collector.collect(entry.symbol, definition.product, null));
+      evidenceBySymbol.set(entry.symbol, collectSlowEvidence(entry.symbol, definition.product));
     }
     await Promise.all(entries.map(async (entry) => {
       const definition = PRODUCT_BY_SYMBOL.get(entry.symbol);
@@ -1235,6 +1250,15 @@ async function runCycle(): Promise<void> {
         : scalperSnapshot(raw as Record<string, unknown>, evidence);
       scheduleEvaluation(snapshot, evidence);
     }));
+    const activeSymbols = new Set(entries.map((entry) => entry.symbol));
+    const inactivePrewarmable = PREWARMABLE_COINS.filter((coin) =>
+      !activeSymbols.has(coin.symbol.toUpperCase()));
+    if (inactivePrewarmable.length > 0) {
+      const coin = inactivePrewarmable[prewarmCursor % inactivePrewarmable.length]!;
+      prewarmCursor += 1;
+      void collectSlowEvidence(coin.symbol, coin.product).catch((error) =>
+        logger.debug({ error, symbol: coin.symbol }, "[kalshi-smart-exit] background prewarm failed"));
+    }
     lastCycleAt = new Date().toISOString();
     lastError = null;
   } catch (error) {
@@ -1260,41 +1284,74 @@ async function runHotCycle(): Promise<void> {
     }
     const regular = [...openPositions.values()].filter((position) =>
       smartExitModeIncludesPosition(config.mode, position.entryMode));
+    const scalper = cachedScalperPositions.filter((position) =>
+      smartExitModeIncludesPosition(
+        config.mode,
+        position.mode === "live" ? "live" : "paper",
+      ));
+    const entries = [
+      ...regular.map((position) => ({
+        owner: "regular" as const,
+        symbol: position.symbol.toUpperCase(),
+        value: position as OpenPosition | Record<string, unknown>,
+      })),
+      ...scalper.map((position) => ({
+        owner: "scalper" as const,
+        symbol: String(position.symbol ?? "").toUpperCase(),
+        value: position as OpenPosition | Record<string, unknown>,
+      })),
+    ];
     const evidenceBySymbol = new Map<string, Promise<SmartExitEvidence>>();
-    for (const position of regular) {
-      const symbol = position.symbol.toUpperCase();
-      const definition = PRODUCT_BY_SYMBOL.get(symbol);
+    for (const entry of entries) {
+      const definition = PRODUCT_BY_SYMBOL.get(entry.symbol);
       if (!definition || definition.category === "commodity") continue;
-      requestBookRefresh(position.ticker);
-      if (!evidenceBySymbol.has(symbol)) {
+      const ticker = entry.owner === "regular"
+        ? (entry.value as OpenPosition).ticker
+        : String((entry.value as Record<string, unknown>).ticker ?? "");
+      requestBookRefresh(ticker);
+      if (!evidenceBySymbol.has(entry.symbol)) {
         evidenceBySymbol.set(
-          symbol,
-          collectHotSpot(symbol, definition.product),
+          entry.symbol,
+          collectHotSpot(entry.symbol, definition.product),
         );
       }
     }
-    await Promise.all(regular.map(async (position) => {
-      const symbol = position.symbol.toUpperCase();
-      const hotEvidence = await evidenceBySymbol.get(symbol);
+    await Promise.all(entries.map(async (entry) => {
+      const raw = entry.value;
+      const hotEvidence = await evidenceBySymbol.get(entry.symbol);
       if (!hotEvidence) return;
-      const baseEvidence = mergeHotSpotWithSlowEvidence(symbol, hotEvidence);
+      const baseEvidence = mergeHotSpotWithSlowEvidence(entry.symbol, hotEvidence);
       if (baseEvidence.spotReceivedAtSeconds != null) {
         const receiptMs = baseEvidence.spotReceivedAtSeconds * 1_000;
-        const previousReceiptMs = lastUsableSpotReceiptMs.get(symbol);
+        const previousReceiptMs = lastUsableSpotReceiptMs.get(entry.symbol);
         if (previousReceiptMs != null && receiptMs >= previousReceiptMs) {
           const gap = receiptMs - previousReceiptMs;
           maximumUsableSampleGapMs = Math.max(maximumUsableSampleGapMs ?? 0, gap);
         }
-        lastUsableSpotReceiptMs.set(symbol, receiptMs);
+        lastUsableSpotReceiptMs.set(entry.symbol, receiptMs);
       }
+      const side = entry.owner === "regular"
+        ? (raw as OpenPosition).direction
+        : (raw as Record<string, unknown>).side === "no" ? "no" : "yes";
+      const ticker = entry.owner === "regular"
+        ? (raw as OpenPosition).ticker
+        : String((raw as Record<string, unknown>).ticker ?? "");
+      const windowKey = entry.owner === "regular"
+        ? (raw as OpenPosition).windowKey
+        : String((raw as Record<string, unknown>).window_key ?? "");
       const evidence = withMarketEvidence(baseEvidence, {
-        side: position.direction,
-        remainingQuantity: position.contractCount,
-        ticker: position.ticker,
-        symbol,
-        windowKey: position.windowKey,
+        side,
+        remainingQuantity: entry.owner === "regular"
+          ? (raw as OpenPosition).contractCount
+          : numeric(raw as Record<string, unknown>, "filled_count") ?? 0,
+        ticker,
+        symbol: entry.symbol,
+        windowKey,
       });
-      scheduleEvaluation(regularSnapshot(position, evidence), evidence);
+      const snapshot = entry.owner === "regular"
+        ? regularSnapshot(raw as OpenPosition, evidence)
+        : scalperSnapshot(raw as Record<string, unknown>, evidence);
+      scheduleEvaluation(snapshot, evidence);
     }));
     lastHotCycleAt = new Date().toISOString();
   } catch (error) {

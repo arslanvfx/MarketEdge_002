@@ -20,13 +20,35 @@ test("collector prewarms every supported crypto at startup and remains active wh
     service.indexOf("async function runCycle"),
     service.indexOf("function stopScheduler"),
   );
-  assert.ok(cycle.indexOf("await collector.collect") < cycle.indexOf("!config.enabled || config.mode === \"off\""));
+  const offBranch = cycle.slice(
+    cycle.indexOf("!config.enabled || config.mode === \"off\""),
+    cycle.indexOf("const regular"),
+  );
+  assert.match(offBranch, /void collectSlowEvidence/);
 
   const stop = service.slice(
     service.indexOf("function stopScheduler"),
     service.indexOf("function startScheduler"),
   );
   assert.doesNotMatch(stop, /collector\.(?:clear|stop)\(/);
+});
+
+test("active slow evidence is collected before inactive prewarming and both owners use the hot lane", () => {
+  const slowCycle = service.slice(
+    service.indexOf("async function runCycle"),
+    service.indexOf("async function runHotCycle"),
+  );
+  assert.ok(slowCycle.indexOf("await Promise.all(entries.map") >= 0);
+  assert.ok(slowCycle.indexOf("await Promise.all(entries.map") < slowCycle.indexOf("inactivePrewarmable"));
+  assert.match(slowCycle, /void collectSlowEvidence\(coin\.symbol, coin\.product\)/);
+
+  const hotCycle = service.slice(
+    service.indexOf("async function runHotCycle"),
+    service.indexOf("function stopScheduler"),
+  );
+  assert.match(hotCycle, /cachedScalperPositions\.filter/);
+  assert.match(hotCycle, /collectHotSpot\(entry\.symbol, definition\.product\)/);
+  assert.match(hotCycle, /scalperSnapshot\(raw as Record<string, unknown>, evidence\)/);
 });
 
 test("evidence recovery cannot create a duplicate owner exit request", () => {
