@@ -602,6 +602,7 @@ export interface ScalperConfig {
     maxBand?: number | null;
     windowSeconds?: number | null;
     budgetDollars?: number | null;
+    targetProximityThresholdPct?: number | null;
   }>;
 }
 

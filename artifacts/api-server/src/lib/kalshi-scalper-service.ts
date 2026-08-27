@@ -52,6 +52,7 @@ import type {
 } from "./kalshi-scalper-types.ts";
 import {
   DEFAULT_SCALP_CONFIG,
+  MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
 } from "./kalshi-scalper-types.ts";
 import {
   resolveEffectiveParams,
@@ -5035,7 +5036,7 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
           targetProximityGuardEnabled:
             _config.targetProximityGuardEnabled,
           targetProximityThresholdPct:
-            _config.targetProximityThresholdPct,
+            params.targetProximityThresholdPct,
           secondsRemaining,
           rapidMoveEnabled: _config.rapidMoveGuardEnabled,
           rapidMoveLookbackSeconds: _config.rapidMoveLookbackSeconds,
@@ -5058,7 +5059,7 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
         const proximity = checkTargetProximityGuard(
           latestSample?.price,
           Number(cached?.value),
-          _config.targetProximityThresholdPct,
+          params.targetProximityThresholdPct,
         );
         targetProximityBlocked = proximity.blocked || !proximity.evaluable;
         targetDistancePct = proximity.distancePct;
@@ -6035,7 +6036,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
     rapidMoveLookbackSeconds: 4,
     rapidMoveThresholdPct: 0.5,
     targetProximityGuardEnabled: options.targetProximityGuardEnabled ?? false,
-    targetProximityThresholdPct: 0.05,
+    targetProximityThresholdPct: MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
     circuitBreakerEnabled: true,
     circuitBreaker: false,
     circuitBreakerReason: null,

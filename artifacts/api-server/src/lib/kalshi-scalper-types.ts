@@ -12,6 +12,7 @@ export interface ScalpPerMarketOverride {
   maxBand?: number;       // override global max (0-1), direct contract cost
   windowSeconds?: number; // override final-window seconds
   budgetDollars?: number; // override per-order budget
+  targetProximityThresholdPct?: number; // override target-distance minimum
 }
 
 export interface ScalpConfig {
@@ -99,6 +100,7 @@ export interface EffectiveScalpParams {
   bandMax: number;
   finalWindowSeconds: number;
   budgetDollars: number;
+  targetProximityThresholdPct: number;
 }
 
 // ---------------------------------------------------------------------------

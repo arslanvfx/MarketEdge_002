@@ -591,7 +591,7 @@ describe("real Scalper service Freefall boundary", () => {
       side: "no",
       targetProximityGuardEnabled: true,
       coordinatedDirectionClearanceEnabled: true,
-      adversePrices: [99.85, 99.9, 99.95, 99.9, 99.94],
+      adversePrices: [99.7, 99.75, 99.8, 99.75, 99.79],
     });
     const blocked = result.skippedAttempts.find(
       (attempt) =>
@@ -618,8 +618,8 @@ describe("real Scalper service Freefall boundary", () => {
       blocked.evidence?.coordinatedDirectionClearanceReason,
       "coordinated_direction_clearance_projected_too_close_no",
     );
-    assert.ok((blocked.evidence?.projectedDistancePct ?? Infinity) <= 0.05);
-    assert.equal(blocked.evidence?.minimumPct, 0.05);
+    assert.ok((blocked.evidence?.projectedDistancePct ?? Infinity) <= 0.2);
+    assert.equal(blocked.evidence?.minimumPct, 0.2);
     assert.ok((blocked.evidence?.secondsRemaining ?? 0) > 0);
   });
 
@@ -679,7 +679,7 @@ describe("real Scalper service Freefall boundary", () => {
         (evidence) =>
           evidence.phase === "final_pre_submit"
           && evidence.targetProximityGuardEnabled
-          && evidence.minimumPct === 0.05
+          && evidence.minimumPct === 0.2
           && evidence.targetPrice === 100,
       ),
     );

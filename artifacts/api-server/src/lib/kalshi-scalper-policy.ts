@@ -62,6 +62,10 @@ export function resolveEffectiveParams(
     bandMax: override?.maxBand ?? config.globalBandMax,
     finalWindowSeconds: override?.windowSeconds ?? config.finalWindowSeconds,
     budgetDollars: override?.budgetDollars ?? config.budgetDollars,
+    targetProximityThresholdPct: Math.max(
+      MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
+      override?.targetProximityThresholdPct ?? config.targetProximityThresholdPct,
+    ),
   };
 }
 
@@ -1760,7 +1764,7 @@ export interface ExecutionRiskSnapshot {
   rapidMoveThresholdPct: number;
   // Target proximity guard config
   targetProximityGuardEnabled: boolean;
-  targetProximityThresholdPct: number;
+  targetProximityThresholdPct?: number;
   // Enablement
   enabled: boolean;
 }
@@ -1795,6 +1799,7 @@ export interface RiskParamsLike {
   finalWindowSeconds: number;
   budgetDollars: number;
   paused: boolean;
+  targetProximityThresholdPct: number;
 }
 
 /**
@@ -1840,7 +1845,10 @@ export function buildExecutionRiskSnapshot(
     rapidMoveLookbackSeconds: config.rapidMoveLookbackSeconds ?? 4,
     rapidMoveThresholdPct: config.rapidMoveThresholdPct ?? 0.5,
     targetProximityGuardEnabled: config.targetProximityGuardEnabled,
-    targetProximityThresholdPct: config.targetProximityThresholdPct,
+    targetProximityThresholdPct: Math.max(
+      MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
+      params.targetProximityThresholdPct ?? config.targetProximityThresholdPct,
+    ),
     enabled: config.enabled,
   });
 }
@@ -1924,7 +1932,13 @@ export function compareRiskSnapshot(
   if (!eqNum(currentConfig.rapidMoveLookbackSeconds ?? 4, snapshot.rapidMoveLookbackSeconds)) changed.push("rapidMoveLookbackSeconds");
   if (!eqNum(currentConfig.rapidMoveThresholdPct ?? 0.5, snapshot.rapidMoveThresholdPct)) changed.push("rapidMoveThresholdPct");
   if (currentConfig.targetProximityGuardEnabled !== snapshot.targetProximityGuardEnabled) changed.push("targetProximityGuardEnabled");
-  if (!eqNum(currentConfig.targetProximityThresholdPct, snapshot.targetProximityThresholdPct)) changed.push("targetProximityThresholdPct");
+  if (!eqNum(
+    Math.max(
+      MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
+      currentParams.targetProximityThresholdPct ?? currentConfig.targetProximityThresholdPct,
+    ),
+    snapshot.targetProximityThresholdPct,
+  )) changed.push("targetProximityThresholdPct");
 
   return {
     unchanged: changed.length === 0,
@@ -2600,6 +2614,12 @@ export function validateScalpConfigPartial(
           if (!Number.isFinite(v) || v < 1 || v > 900)
             errors.push(`perMarketOverrides[${sym}].windowSeconds must be 1-900`);
         }
+        if (ov["targetProximityThresholdPct"] != null) {
+          const v = Number(ov["targetProximityThresholdPct"]);
+          if (!Number.isFinite(v) || v < MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT || v > 10) {
+            errors.push(`perMarketOverrides[${sym}].targetProximityThresholdPct must be ≥ ${MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT} and ≤ 10`);
+          }
+        }
       }
     }
   }
@@ -2726,6 +2746,7 @@ export interface ScalpPerMarketOverridePatch {
   maxBand?: number | null;
   windowSeconds?: number | null;
   budgetDollars?: number | null;
+  targetProximityThresholdPct?: number | null;
 }
 
 export interface ScalpConfigPatch {
@@ -2798,6 +2819,7 @@ const ALLOWED_OVERRIDE_FIELDS = new Set<string>([
   "maxBand",
   "windowSeconds",
   "budgetDollars",
+  "targetProximityThresholdPct",
 ]);
 
 /** True only for a real, finite JSON number (rejects strings, NaN, Infinity). */
@@ -2978,7 +3000,7 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
         }
 
         const ovNumOrNull = (
-          field: "minBand" | "maxBand" | "windowSeconds" | "budgetDollars",
+          field: "minBand" | "maxBand" | "windowSeconds" | "budgetDollars" | "targetProximityThresholdPct",
           ok: (v: number) => boolean,
           msg: string,
         ): void => {
@@ -2992,6 +3014,11 @@ export function parseScalpConfigPatch(input: unknown): ParseScalpConfigResult {
         ovNumOrNull("maxBand", (v) => v > 0 && v < 1, `perMarketOverrides[${sym}].maxBand must be a number in (0, 1) or null`);
         ovNumOrNull("windowSeconds", (v) => v >= 1 && v <= 900, `perMarketOverrides[${sym}].windowSeconds must be a number 1-900 or null`);
         ovNumOrNull("budgetDollars", (v) => v > 0 && v <= 1000, `perMarketOverrides[${sym}].budgetDollars must be a number > 0 and ≤ 1000 or null`);
+        ovNumOrNull(
+          "targetProximityThresholdPct",
+          (v) => v >= MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT && v <= 10,
+          `perMarketOverrides[${sym}].targetProximityThresholdPct must be a number ≥ ${MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT} and ≤ 10 or null`,
+        );
 
         // Effective per-override band min < max when BOTH are concrete numbers.
         if (

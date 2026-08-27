@@ -1851,6 +1851,27 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
                               disabled={isPaused}
                             />
                           </div>
+
+                          <div className={`flex items-center gap-1 ${isPaused ? "opacity-50" : ""}`}>
+                            <span className="text-[10px] text-muted-foreground">distance</span>
+                            <input
+                              type="number"
+                              min={0.2}
+                              max={10}
+                              step={0.01}
+                              placeholder={merged.targetProximityThresholdPct.toFixed(2)}
+                              value={pm.targetProximityThresholdPct ?? ""}
+                              onChange={e => handleMarketChange(
+                                sym,
+                                "targetProximityThresholdPct",
+                                e.target.value ? parseFloat(e.target.value) : null,
+                              )}
+                              className="w-16 bg-background border border-border rounded px-1.5 py-0.5 text-[11px] font-mono text-center focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                              disabled={isPaused || !merged.targetProximityGuardEnabled}
+                              aria-label={`${sym} minimum target distance percent`}
+                            />
+                            <span className="text-[10px] text-muted-foreground">%</span>
+                          </div>
                           
                           <div className={`flex items-center gap-1 ${isPaused ? "opacity-50" : ""}`}>
                             <span className="text-[10px] text-muted-foreground">window</span>

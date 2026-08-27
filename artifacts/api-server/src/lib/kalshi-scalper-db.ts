@@ -645,7 +645,12 @@ function mergeScalpConfig(defaults: ScalpConfig, raw: Record<string, unknown>): 
     circuitBreaker: typeof raw["circuitBreaker"] === "boolean" ? raw["circuitBreaker"] : defaults.circuitBreaker,
     circuitBreakerReason: typeof raw["circuitBreakerReason"] === "string" ? raw["circuitBreakerReason"] : (raw["circuitBreakerReason"] === null ? null : defaults.circuitBreakerReason),
     perMarketOverrides: Array.isArray(raw["perMarketOverrides"])
-      ? raw["perMarketOverrides"] as ScalpConfig["perMarketOverrides"]
+      ? (raw["perMarketOverrides"] as ScalpConfig["perMarketOverrides"]).map((override) => ({
+          ...override,
+          targetProximityThresholdPct: typeof override.targetProximityThresholdPct === "number"
+            ? Math.max(MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT, override.targetProximityThresholdPct)
+            : undefined,
+        }))
       : defaults.perMarketOverrides,
   };
 }

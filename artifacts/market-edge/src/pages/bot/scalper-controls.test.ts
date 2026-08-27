@@ -60,6 +60,14 @@ describe("Scalper control wiring", () => {
     assert.match(panelSource, /regardless of which side is in band/i);
   });
 
+  it("offers a target-distance override for every Scalper market", () => {
+    assert.match(panelSource, /minimum target distance percent/);
+    assert.match(
+      panelSource,
+      /handleMarketChange\(\s*sym,\s*"targetProximityThresholdPct"/,
+    );
+  });
+
   it("offers a configurable one-second directional streak guard", () => {
     assert.match(panelSource, /Real-Time Direction Guard/);
     assert.match(panelSource, /one fresh underlying price every second/i);

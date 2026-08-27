@@ -2209,7 +2209,15 @@ describe("resolveEffectiveParams", () => {
     const config = {
       ...DEFAULT_SCALP_CONFIG,
       perMarketOverrides: [
-        { symbol: "BTC", minBand: 0.92, maxBand: 0.97, paused: true, budgetDollars: 5, windowSeconds: 60 },
+        {
+          symbol: "BTC",
+          minBand: 0.92,
+          maxBand: 0.97,
+          paused: true,
+          budgetDollars: 5,
+          windowSeconds: 60,
+          targetProximityThresholdPct: 0.35,
+        },
       ],
     };
     const params = resolveEffectiveParams(config, "btc", "BTC-TICKER");
@@ -2218,7 +2226,19 @@ describe("resolveEffectiveParams", () => {
     assert.equal(params.paused, true);
     assert.equal(params.budgetDollars, 5);
     assert.equal(params.finalWindowSeconds, 60);
+    assert.equal(params.targetProximityThresholdPct, 0.35);
     assert.equal(params.symbol, "BTC"); // normalized to uppercase
+  });
+
+  it("never resolves a per-market target distance below the hard safety floor", () => {
+    const config = {
+      ...DEFAULT_SCALP_CONFIG,
+      perMarketOverrides: [{ symbol: "BTC", targetProximityThresholdPct: 0.05 }],
+    };
+    assert.equal(
+      resolveEffectiveParams(config, "BTC", "BTC-TICKER").targetProximityThresholdPct,
+      0.2,
+    );
   });
 
   it("symbol match is case-insensitive", () => {
@@ -2303,7 +2323,7 @@ const baseCfg = (): RiskConfigLike => ({
   rapidMoveLookbackSeconds: 4,
   rapidMoveThresholdPct: 0.5,
   targetProximityGuardEnabled: true,
-  targetProximityThresholdPct: 0.05,
+  targetProximityThresholdPct: 0.2,
 });
 const baseParams = (): RiskParamsLike => ({
   bandMin: 0.91,
@@ -2311,6 +2331,7 @@ const baseParams = (): RiskParamsLike => ({
   finalWindowSeconds: 120,
   budgetDollars: 2,
   paused: false,
+  targetProximityThresholdPct: 0.2,
 });
 const baseIdentity = () => ({ symbol: "BTC", windowKey: "WK-1", ticker: "T-1", closeTime: "2025-01-01T00:00:00Z" });
 
@@ -2318,6 +2339,14 @@ describe("buildExecutionRiskSnapshot", () => {
   it("captures budgetDollars from effective params (reserved amount)", () => {
     const s = buildExecutionRiskSnapshot(baseCfg(), { ...baseParams(), budgetDollars: 3.5 }, baseIdentity());
     assert.equal(s.budgetDollars, 3.5);
+  });
+  it("captures a per-market target-distance override from effective params", () => {
+    const s = buildExecutionRiskSnapshot(
+      baseCfg(),
+      { ...baseParams(), targetProximityThresholdPct: 0.35 },
+      baseIdentity(),
+    );
+    assert.equal(s.targetProximityThresholdPct, 0.35);
   });
   it("captures caps, band, window, guards, identity, mode, enabled", () => {
     const s = buildExecutionRiskSnapshot(baseCfg(), baseParams(), baseIdentity());
@@ -2336,7 +2365,7 @@ describe("buildExecutionRiskSnapshot", () => {
     assert.equal(s.rapidMoveLookbackSeconds, 4);
     assert.equal(s.rapidMoveThresholdPct, 0.5);
     assert.equal(s.targetProximityGuardEnabled, true);
-    assert.equal(s.targetProximityThresholdPct, 0.05);
+    assert.equal(s.targetProximityThresholdPct, 0.2);
     assert.equal(s.ticker, "T-1");
     assert.equal(s.closeTime, "2025-01-01T00:00:00Z");
     assert.equal(s.mode, "live");
@@ -2447,7 +2476,12 @@ describe("compareRiskSnapshot (fail-closed diff)", () => {
     assert.ok(d.changedFields.includes("targetProximityGuardEnabled"));
   });
   it("target proximity threshold change => rejected", () => {
-    const d = compareRiskSnapshot(snap(), { ...baseCfg(), targetProximityThresholdPct: 0.1 }, baseParams(), baseIdentity());
+    const d = compareRiskSnapshot(
+      snap(),
+      baseCfg(),
+      { ...baseParams(), targetProximityThresholdPct: 0.3 },
+      baseIdentity(),
+    );
     assert.ok(d.changedFields.includes("targetProximityThresholdPct"));
   });
 
@@ -2812,10 +2846,22 @@ describe("parseScalpConfigPatch", () => {
   });
 
   it("normalizes override symbol to uppercase and requires supported symbol", () => {
-    const r = parseScalpConfigPatch({ perMarketOverrides: [{ symbol: "btc", paused: true }] });
+    const r = parseScalpConfigPatch({
+      perMarketOverrides: [{ symbol: "btc", paused: true, targetProximityThresholdPct: 0.35 }],
+    });
     assert.equal(r.ok, true);
-    assert.deepEqual(r.ok && r.value.perMarketOverrides, [{ symbol: "BTC", paused: true }]);
+    assert.deepEqual(r.ok && r.value.perMarketOverrides, [{
+      symbol: "BTC",
+      paused: true,
+      targetProximityThresholdPct: 0.35,
+    }]);
     assert.equal(parseScalpConfigPatch({ perMarketOverrides: [{ symbol: "FAKE" }] }).ok, false);
+  });
+
+  it("rejects per-market target distance below the hard safety floor", () => {
+    assert.equal(parseScalpConfigPatch({
+      perMarketOverrides: [{ symbol: "BTC", targetProximityThresholdPct: 0.19 }],
+    }).ok, false);
   });
 
   it("rejects nested override boolean-as-string and numeric-as-string", () => {
@@ -3620,7 +3666,7 @@ describe("execution wiring (static source assertions)", () => {
     );
     assert.match(
       status,
-      /targetProximityThresholdPct:\s*_config\.targetProximityThresholdPct/,
+      /targetProximityThresholdPct:\s*params\.targetProximityThresholdPct/,
     );
     assert.match(status, /secondsRemaining,/);
   });
