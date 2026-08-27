@@ -1414,6 +1414,8 @@ export interface BotConfig {
   // auto-tune learning.
   liveStatsResetAt: string | null;  // (default null = show all live bets)
   paperStatsResetAt: string | null; // (default null = show all paper bets)
+  livePnlResetAt: string | null;   // visual-only P&L display cutoff for live mode (null = show full day)
+  paperPnlResetAt: string | null;  // visual-only P&L display cutoff for paper mode (null = show full day)
   // Hard cap on the dollar amount of any single bet.  If the computed betAmount
   // would exceed this value the entire trade is aborted and an error is logged.
   // Acts as a safety rail so a misconfigured betSize can never send an outsized
@@ -1763,6 +1765,8 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   shadowPaperIgnoreQuietHours: false,
   liveStatsResetAt: null,
   paperStatsResetAt: null,
+  livePnlResetAt: null,
+  paperPnlResetAt: null,
   // Safety cap: hard-abort any bet whose computed dollar cost exceeds this.
   // Conservative default; raise deliberately when going live.
   maxBetSize: 2.00,

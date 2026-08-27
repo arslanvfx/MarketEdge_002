@@ -22,8 +22,8 @@ export interface DailyTradingPnl {
   totalPnl: number;
 }
 
-export async function getDailyTradingPnl(mode: BotMode): Promise<DailyTradingPnl> {
-  const result = await pool.query(DAILY_TRADING_PNL_SQL, [mode]);
+export async function getDailyTradingPnl(mode: BotMode, pnlResetAt?: string | null): Promise<DailyTradingPnl> {
+  const result = await pool.query(DAILY_TRADING_PNL_SQL, [mode, pnlResetAt ?? null]);
   const row = result.rows[0];
   if (!row) {
     throw new Error("Daily trading P&L query returned no row");

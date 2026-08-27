@@ -7,13 +7,19 @@
  * observational/shadow studies are excluded. The database resolves New York
  * midnight so DST transitions use the correct UTC offset.
  */
+// $1 = mode, $2 = pnlResetAt ISO string or null (visual cutoff; GREATEST with day_start_at)
 export const DAILY_TRADING_PNL_SQL = `
   WITH bounds AS (
     SELECT
       date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')
         AT TIME ZONE 'America/New_York' AS day_start_at,
       (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') + INTERVAL '1 day')
-        AT TIME ZONE 'America/New_York' AS next_reset_at
+        AT TIME ZONE 'America/New_York' AS next_reset_at,
+      GREATEST(
+        date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')
+          AT TIME ZONE 'America/New_York',
+        COALESCE($2::timestamptz, '-infinity'::timestamptz)
+      ) AS effective_start_at
   ),
   regular AS (
     SELECT COALESCE(SUM(b.pnl), 0) AS pnl
@@ -23,7 +29,7 @@ export const DAILY_TRADING_PNL_SQL = `
       AND b.source = 'bot'
       AND b.archived_at IS NULL
       AND b.action IN ('exit', 'late_recovery_exit', 'expired')
-      AND b.exited_at >= bounds.day_start_at
+      AND b.exited_at >= bounds.effective_start_at
       AND b.exited_at < bounds.next_reset_at
   ),
   scalper AS (
@@ -33,7 +39,7 @@ export const DAILY_TRADING_PNL_SQL = `
     WHERE o.mode = $1
       AND o.outcome IN ('win', 'loss')
       AND o.pnl IS NOT NULL
-      AND o.settled_at >= bounds.day_start_at
+      AND o.settled_at >= bounds.effective_start_at
       AND o.settled_at < bounds.next_reset_at
   )
   SELECT

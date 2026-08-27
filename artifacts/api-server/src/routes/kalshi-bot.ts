@@ -596,7 +596,8 @@ router.get("/crypto/bot/status", (_req, res) => {
 });
 
 // GET /crypto/bot/daily-pnl?mode=paper|live — realized regular + Scalper P&L
-// since midnight America/New_York. This is independent of manual stats resets.
+// since midnight America/New_York.  Respects the visual-only livePnlResetAt /
+// paperPnlResetAt cutoff stored in bot_config; history is never deleted.
 router.get("/crypto/bot/daily-pnl", async (req, res) => {
   const requestedMode = req.query.mode;
   const mode: BotMode =
@@ -609,7 +610,23 @@ router.get("/crypto/bot/daily-pnl", async (req, res) => {
       Pragma: "no-cache",
       Expires: "0",
     });
-    res.json(await getDailyTradingPnl(mode));
+    const cfg = getBotState().config;
+    const pnlResetAt = mode === "live" ? (cfg.livePnlResetAt ?? null) : (cfg.paperPnlResetAt ?? null);
+    res.json(await getDailyTradingPnl(mode, pnlResetAt));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /crypto/bot/reset-daily-pnl — visual-only P&L display reset for both modes.
+// Sets livePnlResetAt and paperPnlResetAt to NOW() so the Today's P&L tile
+// shows $0 from this moment forward.  No bets are deleted.
+router.post("/crypto/bot/reset-daily-pnl", requireAuth, async (_req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const { config } = await updateBotConfig({ livePnlResetAt: now, paperPnlResetAt: now });
+    res.json({ ok: true, livePnlResetAt: config.livePnlResetAt, paperPnlResetAt: config.paperPnlResetAt });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
