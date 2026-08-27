@@ -10,8 +10,14 @@ import {
   evaluateSmartExit, modelWinProbability, probabilityDropThreshold,
   resolveSmartExitSensitivity,
   resolveSmartExitTimeBand,
+  resolveAuthoritativeHeldSideMarketEvidence,
 } from "./kalshi-smart-exit-policy.ts";
-import type { SmartExitEvidence, SmartExitPosition } from "./kalshi-smart-exit-types.ts";
+import { computeSmartExitExecutionLimit } from "./kalshi-smart-exit-execution.ts";
+import type {
+  SmartExitEvidence,
+  SmartExitPosition,
+  SmartExitState,
+} from "./kalshi-smart-exit-types.ts";
 
 test("Smart Exit sensitivity resolver is canonical, immutable, and legacy-safe", () => {
   assert.deepEqual(resolveSmartExitSensitivity("more_aggressive").parameters, {
@@ -48,6 +54,7 @@ const evidence = (overrides: Partial<SmartExitEvidence> = {}): SmartExitEvidence
   momentumLogReturn: -0.04, momentumWindowSeconds: 1, tradeFlowImbalance: -1, bookImbalance: -1,
   marketWinProbability: 0.2, marketQuoteObservedAtSeconds: 100, marketBookObservedAtSeconds: 100,
   marketBestBid: 0.3, marketBestAsk: 0.32, marketExecutablePrice: 0.3,
+  marketMinimumExecutablePrice: 0.3,
   marketExecutableQuantity: 10, ...overrides,
 });
 const config = { ...DEFAULT_SMART_EXIT_CONFIG, enabled: true, mode: "shadow" as const, sensitivity: "more_aggressive" as const, debounceCount: 2, confirmationLevel: 0.20, hysteresisSeconds: 0, probabilityShrinkage: 0, fatTailVolatilityMultiplier: 1 };
@@ -72,6 +79,33 @@ test("default is disabled and shadow safe", () => {
   assert.equal(DEFAULT_SMART_EXIT_CONFIG.enabled, false);
   assert.equal(DEFAULT_SMART_EXIT_CONFIG.mode, "shadow");
   assert.equal(evaluateSmartExit(position, evidence(), INITIAL_SMART_EXIT_STATE, DEFAULT_SMART_EXIT_CONFIG, 100).disposition, "OFF");
+});
+
+test("fresh authenticated full-depth price outranks stale public probability without trusting partial depth", () => {
+  assert.deepEqual(resolveAuthoritativeHeldSideMarketEvidence({
+    publicProbability: 0.875,
+    publicObservedAtSeconds: 860,
+    authenticatedExecutablePrice: 0.34,
+    authenticatedExecutableQuantity: 11,
+    requiredQuantity: 11,
+    authenticatedObservedAtSeconds: 870,
+  }), {
+    probability: 0.34,
+    observedAtSeconds: 870,
+    source: "authenticated_full_depth",
+  });
+  assert.deepEqual(resolveAuthoritativeHeldSideMarketEvidence({
+    publicProbability: 0.875,
+    publicObservedAtSeconds: 860,
+    authenticatedExecutablePrice: 0.34,
+    authenticatedExecutableQuantity: 10,
+    requiredQuantity: 11,
+    authenticatedObservedAtSeconds: 870,
+  }), {
+    probability: 0.875,
+    observedAtSeconds: 860,
+    source: "public",
+  });
 });
 test("probability uses log moneyness, seconds, side, tails and shrinkage", () => {
   const yes = modelWinProbability(position, evidence({ underlyingPrice: 110 }), config, 100)!;
@@ -373,7 +407,7 @@ test("final-three-minute value preservation is symmetric for a held NO position"
     { at: 749, spot: 100.02, probability: 0.50, bid: 0.49, ask: 0.51 },
     { at: 751, spot: 100.03, probability: 0.49, bid: 0.48, ask: 0.50 },
   ];
-  let state = {
+  let state: SmartExitState = {
     ...INITIAL_SMART_EXIT_STATE,
     previousUnderlyingPrice: 99.98,
     previousUnderlyingAtSeconds: 744,
@@ -1203,6 +1237,86 @@ test("an unchanged Kalshi event cannot reauthorize a critical live exit", () => 
   assert.equal(decision.marketDirectionConfirmed, false);
   assert.notEqual(decision.disposition, "EXIT_SIGNAL");
   assert.equal(decision.mayExecuteExit, false);
+});
+
+test("XRP-shaped terminal crossing sells on fresh authenticated collapse despite stale optimistic hold value", () => {
+  const terminalDecision = (side: "yes" | "no", executableQuantity = 11) => {
+    const strikePrice = side === "yes" ? 100 : 1.4428;
+    const currentUnderlying = side === "yes" ? 99.9 : 1.4434;
+    const previousUnderlying = side === "yes" ? 100.05 : 1.4426;
+    const flowDirection = side === "yes" ? -1 : 1;
+    return evaluateSmartExit(
+      {
+        ...position,
+        positionId: `terminal-${side}`,
+        side,
+        strikePrice,
+        remainingQuantity: 11,
+        requestedQuantity: 11,
+        entryStake: 9.57,
+        expirySeconds: 900,
+        marketAtEntry: { winProbability: 0.87, observedAtSeconds: 0 },
+      },
+      evidence({
+        observedAtSeconds: 870,
+        spotReceivedAtSeconds: 870,
+        tapeReceivedAtSeconds: null,
+        bookReceivedAtSeconds: 870,
+        spotObservedAtSeconds: 870,
+        tapeObservedAtSeconds: null,
+        bookObservedAtSeconds: 870,
+        underlyingPrice: currentUnderlying,
+        momentumLogReturn: flowDirection * 0.04,
+        tradeFlowImbalance: null,
+        bookImbalance: flowDirection,
+        marketWinProbability: 0.34,
+        marketQuoteObservedAtSeconds: 870,
+        marketBookObservedAtSeconds: 870,
+        marketBestBid: 0.34,
+        marketBestAsk: 0.36,
+        marketExecutablePrice: 0.34,
+        marketMinimumExecutablePrice: 0.30,
+        marketExecutableQuantity: executableQuantity,
+      }),
+      {
+        ...INITIAL_SMART_EXIT_STATE,
+        adverseSampleCount: 2,
+        previousUnderlyingPrice: previousUnderlying,
+        previousUnderlyingAtSeconds: 869,
+        previousMarketWinProbability: 0.87,
+        previousMarketObservedAtSeconds: 869,
+      },
+      { ...config, mode: "live-exit" },
+      870,
+    );
+  };
+
+  for (const side of ["yes", "no"] as const) {
+    const decision = terminalDecision(side);
+    assert.equal(decision.targetAlreadyCrossed, true, side);
+    assert.equal(decision.marketDirectionConfirmed, true, side);
+    assert.equal(decision.marketLossFraction! > 0.6, true, side);
+    assert.equal(decision.executionEvidenceReady, true, side);
+    assert.equal(decision.minimumWinningPrice, 0.30, side);
+    assert.equal(decision.disposition, "EXIT_SIGNAL", side);
+    assert.equal(decision.mayExecuteExit, true, side);
+    assert.match(decision.reason, /terminal target-crossing stop-loss/, side);
+  }
+
+  const partial = terminalDecision("no", 10);
+  assert.equal(partial.executionEvidenceReady, false);
+  assert.notEqual(partial.disposition, "EXIT_SIGNAL");
+  assert.equal(partial.mayExecuteExit, false);
+
+  const terminalLimit = computeSmartExitExecutionLimit({
+    side: "no",
+    quantity: 11,
+    minimumWinningPrice: terminalDecision("no").minimumWinningPrice!,
+    yesDepth: [],
+    noDepth: [[0.30, 5], [0.38, 6]],
+  });
+  assert.equal(terminalLimit.allowed, true);
+  assert.equal(terminalLimit.yesSideLimitPrice, 0.70);
 });
 
 test("final-minute projected crossing is actionable before the target only with both confirmations", () => {

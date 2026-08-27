@@ -178,17 +178,20 @@ test("deteriorated book blocks instead of crossing below the Smart Exit economic
 
 test("final revalidation can only tighten the execution floor and freshness deadline", () => {
   const combined = combineSmartExitExecutionConstraints({
+    authorization: "economic",
     minimumWinningPrice: 0.40,
     evaluatedBookObservedAtSeconds: 100,
     maximumEvidenceAgeSeconds: 5,
     evidenceExpiresAtSeconds: 105,
   }, {
+    authorization: "economic",
     minimumWinningPrice: 0.47,
     evaluatedBookObservedAtSeconds: 102,
     maximumEvidenceAgeSeconds: 2,
     evidenceExpiresAtSeconds: 104,
   });
   assert.deepEqual(combined, {
+    authorization: "economic",
     minimumWinningPrice: 0.47,
     evaluatedBookObservedAtSeconds: 102,
     maximumEvidenceAgeSeconds: 2,
@@ -196,11 +199,19 @@ test("final revalidation can only tighten the execution floor and freshness dead
   });
 
   assert.equal(combineSmartExitExecutionConstraints(combined, {
+    authorization: "economic",
     minimumWinningPrice: 0.43,
     evaluatedBookObservedAtSeconds: 103,
     maximumEvidenceAgeSeconds: 5,
     evidenceExpiresAtSeconds: 108,
   }).minimumWinningPrice, 0.47);
+  assert.throws(() => combineSmartExitExecutionConstraints(combined, {
+    authorization: "terminal_stop",
+    minimumWinningPrice: 0.34,
+    evaluatedBookObservedAtSeconds: 103,
+    maximumEvidenceAgeSeconds: 2,
+    evidenceExpiresAtSeconds: 104,
+  }), /authorization_changed/);
 });
 
 test("NO exits convert the winning-side floor to a bounded YES-book bid", () => {

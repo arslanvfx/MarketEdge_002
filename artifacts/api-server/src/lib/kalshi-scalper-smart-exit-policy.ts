@@ -39,6 +39,8 @@ export interface ScalperExitInput {
   executableQuantity: number;
   remainingQuantity: number;
   depthAtFloor: boolean;
+  terminalStopLossExecutableQuantity: number;
+  terminalStopLossWinningProbability: number | null;
   valuePreservingExecutableQuantity: number;
   valuePreservingWinningProbability: number | null;
   config: ScalperExitConfig;
@@ -70,11 +72,14 @@ export interface ScalperExitDecision {
   targetBreachSpanMs: number | null;
   quoteLagProtectionEligible: boolean;
   quoteLagProtectionFloor: number | null;
+  terminalStopLossEligible: boolean;
+  terminalStopLossFloor: number | null;
 }
 
 export const MAX_SCALPER_EXIT_SAMPLE_GAP_MS = 15_000;
 export const MAX_SCALPER_EXIT_SAMPLE_SPAN_MS = 30_000;
 const QUOTE_LAG_PROTECTION_MIN_GAIN = 0.01;
+export const SCALPER_TERMINAL_STOP_LOSS_FLOOR = 0.10;
 
 function orderableSourceSequence(sequence: string | null | undefined): bigint | null {
   return sequence && /^\d+$/.test(sequence) ? BigInt(sequence) : null;
@@ -182,6 +187,7 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
     sourceAgeMs: null, projectionMethod: null, projectionState: null,
     targetBreachConfirmationCount: 0, targetBreachSpanMs: null,
     quoteLagProtectionEligible: false, quoteLagProtectionFloor: null,
+    terminalStopLossEligible: false, terminalStopLossFloor: null,
   });
   if (!input.config.enabled || input.config.mode === "off") return empty("off", "scalper exit disabled");
   if (!Number.isFinite(input.expiresAtMs) || input.nowMs >= input.expiresAtMs) {
@@ -225,8 +231,15 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
       && sample.sourceSequence === samples[index - 1]!.sourceSequence)) {
     return empty("blocked", "stale, future, or out-of-order source timestamp");
   }
-  if (input.remainingQuantity <= 0 || input.executableQuantity < input.remainingQuantity || !input.depthAtFloor) {
-    return empty("blocked", "fresh depth does not cover remaining quantity at floor");
+  if (input.remainingQuantity <= 0) {
+    return empty("blocked", "remaining quantity is invalid");
+  }
+  const anyAuthorizedDepthCoversPosition =
+    (input.executableQuantity + 1e-9 >= input.remainingQuantity && input.depthAtFloor)
+    || input.terminalStopLossExecutableQuantity + 1e-9 >= input.remainingQuantity
+    || input.valuePreservingExecutableQuantity + 1e-9 >= input.remainingQuantity;
+  if (!anyAuthorizedDepthCoversPosition) {
+    return empty("blocked", "fresh depth does not cover remaining quantity at an authorized floor");
   }
   const last = samples[samples.length - 1]!;
   const direction = input.side === "yes" ? -1 : 1;
@@ -256,8 +269,10 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
   const distance = input.side === "yes" ? last.price - input.target! : input.target! - last.price;
   const distancePct = Math.abs(distance) / input.target! * 100;
   const remaining = Math.max(0, (input.expiresAtMs - input.nowMs) / 1_000);
-  const deterioration = input.currentWinningProbability != null && input.entryWinningProbability > 0
-    ? Math.max(0, (input.entryWinningProbability - input.currentWinningProbability) / input.entryWinningProbability) : null;
+  const authoritativeWinningProbability = input.terminalStopLossWinningProbability
+    ?? input.currentWinningProbability;
+  const deterioration = authoritativeWinningProbability != null && input.entryWinningProbability > 0
+    ? Math.max(0, (input.entryWinningProbability - authoritativeWinningProbability) / input.entryWinningProbability) : null;
   const preset = PRESETS[resolveScalperExitSensitivity(input.config.sensitivity)];
   let targetBreachConfirmationCount = 0;
   let firstTargetBreachAtMs: number | null = null;
@@ -290,6 +305,14 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
     input.valuePreservingExecutableQuantity + 1e-9 >= input.remainingQuantity
     && input.valuePreservingWinningProbability != null
     && input.valuePreservingWinningProbability + 1e-9 >= quoteLagProtectionFloor;
+  const terminalStopLossEligible =
+    input.terminalStopLossExecutableQuantity + 1e-9 >= input.remainingQuantity
+    && input.terminalStopLossWinningProbability != null
+    && input.terminalStopLossWinningProbability + 1e-9 >= SCALPER_TERMINAL_STOP_LOSS_FLOOR
+    && deterioration !== null
+    && deterioration >= preset.minDeterioration;
+  const trajectoryDepthEligible = input.executableQuantity + 1e-9 >= input.remainingQuantity
+    && input.depthAtFloor;
   const persistentTargetBreach = targetBreachConfirmationCount >= preset.breachConfirmations
     && targetBreachSpanMs != null
     && targetBreachSpanMs >= preset.breachPersistenceMs;
@@ -336,11 +359,20 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
     targetBreachSpanMs,
     quoteLagProtectionEligible,
     quoteLagProtectionFloor,
+    terminalStopLossEligible,
+    terminalStopLossFloor: SCALPER_TERMINAL_STOP_LOSS_FLOOR,
   };
   if (persistentTargetBreach && quoteLagProtectionEligible) {
     return {
       disposition: "exit",
       reason: "persistent target breach with value-preserving authenticated depth",
+      ...enriched,
+    };
+  }
+  if (persistentTargetBreach && terminalStopLossEligible) {
+    return {
+      disposition: "exit",
+      reason: "persistent target breach with authenticated full-position stop-loss depth",
       ...enriched,
     };
   }
@@ -351,7 +383,7 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
   // telemetry/projection input, deliberately not an independent exit gate.
   const rapid = projectedVelocity / input.target! * 100 >= preset.minVelocityPctPerSecond;
   const deteriorated = deterioration !== null && deterioration >= preset.minDeterioration;
-  if (rapid && crossingPlausible && deteriorated && confirmations >= preset.confirmations) {
+  if (trajectoryDepthEligible && rapid && crossingPlausible && deteriorated && confirmations >= preset.confirmations) {
     if (isolatedOutlier) {
       return { disposition: "watch", reason: "latest adverse print is an isolated trajectory outlier", ...enriched };
     }
@@ -359,6 +391,8 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
   }
   return { disposition: "watch", reason: !crossingPlausible
     ? "target crossing not plausible before expiry"
+    : !trajectoryDepthEligible && !terminalStopLossEligible && !quoteLagProtectionEligible
+      ? "fresh depth does not cover remaining quantity at an authorized floor"
     : !rapid ? "adverse trajectory is below conservative signal floor"
       : persistentTargetBreach && !quoteLagProtectionEligible
         ? "target breach confirmed but executable value does not preserve entry"

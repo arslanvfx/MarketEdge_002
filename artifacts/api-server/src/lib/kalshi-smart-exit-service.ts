@@ -12,6 +12,7 @@ import {
   INITIAL_SMART_EXIT_STATE,
   evaluateSmartExit,
   modelWinProbability,
+  resolveAuthoritativeHeldSideMarketEvidence,
   resolveSmartExitSensitivity,
 } from "./kalshi-smart-exit-policy.ts";
 import { KalshiSmartExitEvidenceCollector } from "./kalshi-smart-exit-evidence.ts";
@@ -103,7 +104,11 @@ const EVALUATION_PERSISTENCE_MS = 1_000;
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
 const collector = new KalshiSmartExitEvidenceCollector();
 const hotCollector = new KalshiSmartExitEvidenceCollector();
-type BookSnapshot = OrderbookPrices & { receivedAtSeconds: number };
+type BookSnapshot = OrderbookPrices & {
+  receivedAtSeconds: number;
+  observedAtSeconds: number;
+  fingerprint: string;
+};
 
 let config: SmartExitConfig = { ...DEFAULT_SMART_EXIT_CONFIG };
 let interval: ReturnType<typeof setInterval> | null = null;
@@ -189,7 +194,24 @@ async function refreshBook(ticker: string): Promise<void> {
   if (existing) return existing;
   const refresh = fetchOrderbookPrices(ticker)
     .then((book) => {
-      if (book) bookSnapshots.set(ticker, { ...book, receivedAtSeconds: Date.now() / 1_000 });
+      if (book) {
+        const receivedAtSeconds = Date.now() / 1_000;
+        const fingerprint = JSON.stringify([
+          book.yesBid,
+          book.yesAsk,
+          book.yesDepth,
+          book.noDepth,
+        ]);
+        const previous = bookSnapshots.get(ticker);
+        bookSnapshots.set(ticker, {
+          ...book,
+          receivedAtSeconds,
+          observedAtSeconds: previous?.fingerprint === fingerprint
+            ? previous.observedAtSeconds
+            : receivedAtSeconds,
+          fingerprint,
+        });
+      }
     })
     .catch((error) => logger.warn({ error, ticker }, "[kalshi-smart-exit] Kalshi book refresh failed"))
     .finally(() => bookRefreshes.delete(ticker));
@@ -278,20 +300,28 @@ function collectSlowEvidence(
 function executableFromDepth(
   depth: readonly [number, number][],
   quantity: number,
-): { price: number | null; quantity: number } {
-  if (quantity <= 0 || depth.length === 0) return { price: null, quantity: 0 };
+): { price: number | null; floorPrice: number | null; quantity: number } {
+  if (quantity <= 0 || depth.length === 0) {
+    return { price: null, floorPrice: null, quantity: 0 };
+  }
   let remaining = quantity;
   let filled = 0;
   let proceeds = 0;
+  let floorPrice: number | null = null;
   for (const [price, available] of [...depth].reverse()) {
     if (!(price > 0) || !(available > 0)) continue;
     const take = Math.min(remaining, available);
     proceeds += take * price;
     filled += take;
+    floorPrice = price;
     remaining -= take;
     if (remaining <= 0) break;
   }
-  return { price: filled > 0 ? proceeds / filled : null, quantity: filled };
+  return {
+    price: filled > 0 ? proceeds / filled : null,
+    floorPrice: filled > 0 ? floorPrice : null,
+    quantity: filled,
+  };
 }
 
 function withMarketEvidence(
@@ -314,14 +344,28 @@ function withMarketEvidence(
   const bookAsk = position.side === "yes"
     ? book?.yesAsk ?? null
     : book?.yesBid == null ? null : 1 - book.yesBid;
+  const authoritativeMarket = resolveAuthoritativeHeldSideMarketEvidence({
+    publicProbability: marketProbabilityForSide(position.side, market?.yesPrice),
+    publicObservedAtSeconds: market?.at == null ? null : market.at / 1_000,
+    authenticatedExecutablePrice: executable.price,
+    authenticatedExecutableQuantity: executable.quantity,
+    requiredQuantity: position.remainingQuantity,
+    authenticatedObservedAtSeconds: book?.observedAtSeconds ?? null,
+  });
   return {
     ...evidence,
-    marketWinProbability: marketProbabilityForSide(position.side, market?.yesPrice),
-    marketQuoteObservedAtSeconds: market?.at == null ? null : market.at / 1_000,
-    marketBookObservedAtSeconds: book?.receivedAtSeconds ?? null,
+    // A full-position authenticated bid is the price the position can actually
+    // realize.  It must outrank a slower public market snapshot for direction,
+    // deterioration, and terminal stop-loss decisions.
+    marketWinProbability: authoritativeMarket.probability,
+    marketQuoteObservedAtSeconds: authoritativeMarket.observedAtSeconds,
+    // The exchange API exposes no event sequence.  Preserve the first receipt
+    // time for identical books so repeated polls cannot fabricate confirmation.
+    marketBookObservedAtSeconds: book?.observedAtSeconds ?? null,
     marketBestBid: bookBid ?? publicBid,
     marketBestAsk: bookAsk ?? publicAsk,
     marketExecutablePrice: executable.price ?? bookBid ?? publicBid,
+    marketMinimumExecutablePrice: executable.floorPrice,
     marketExecutableQuantity: depth.length > 0 ? executable.quantity : null,
   };
 }
@@ -606,6 +650,8 @@ async function executeAuthorizedExit(
     );
     const valid = finalDecision.disposition === "EXIT_SIGNAL"
       && finalDecision.executionEvidenceReady
+      && finalDecision.executionAuthorization != null
+      && finalDecision.executionAuthorization === evaluation.executionAuthorization
       && (config.mode === "paper-exit" || finalDecision.mayExecuteExit);
     if (
       !valid
@@ -619,6 +665,7 @@ async function executeAuthorizedExit(
       validatedAtMs: Date.now(),
     };
     return {
+      authorization: finalDecision.executionAuthorization,
       minimumWinningPrice: finalDecision.minimumWinningPrice,
       evaluatedBookObservedAtSeconds: finalEvidence.marketBookObservedAtSeconds,
       maximumEvidenceAgeSeconds: finalDecision.maximumExecutionEvidenceAgeSeconds,
@@ -652,11 +699,15 @@ async function executeAuthorizedExit(
     );
     return currentDecision.disposition === "EXIT_SIGNAL"
       && currentDecision.executionEvidenceReady
+      && currentDecision.executionAuthorization != null
+      && currentDecision.executionAuthorization === evaluation.executionAuthorization
       && currentDecision.minimumWinningPrice !== null
       && currentDecision.minimumWinningPrice <= boundMinimumWinningPrice + 1e-9
       && (config.mode === "paper-exit" || currentDecision.mayExecuteExit);
   };
   if (
+    evaluation.executionAuthorization == null
+    ||
     evaluation.minimumWinningPrice == null
     || evaluation.marketBookAgeMs == null
     || evaluation.executionEvidenceExpiresAtSeconds == null
@@ -681,6 +732,7 @@ async function executeAuthorizedExit(
   }
   const executionConstraint: SmartExitExecutionConstraint =
     combineSmartExitExecutionConstraints({
+      authorization: evaluation.executionAuthorization,
       minimumWinningPrice: evaluation.minimumWinningPrice,
       evaluatedBookObservedAtSeconds:
         Date.now() / 1_000 - evaluation.marketBookAgeMs / 1_000,
@@ -703,6 +755,7 @@ async function executeAuthorizedExit(
       exchangeIndex: position.exchangeIndex,
       parameterVersion: authorization.parameterVersion,
        minimumWinningPrice: executionConstraint.minimumWinningPrice,
+       executionAuthorization: executionConstraint.authorization,
        executionEvidenceExpiresAtSeconds: executionConstraint.evidenceExpiresAtSeconds,
        maximumExecutionEvidenceAgeSeconds: executionConstraint.maximumEvidenceAgeSeconds,
     },
@@ -1159,6 +1212,7 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     executableQuantity: evidence.marketExecutableQuantity,
     liquidityCoverage: decision.liquidityCoverage,
     executionEvidenceReady: decision.executionEvidenceReady,
+    executionAuthorization: decision.executionAuthorization,
     minimumWinningPrice: decision.minimumWinningPrice,
     maximumExecutionEvidenceAgeSeconds: decision.maximumExecutionEvidenceAgeSeconds,
     executionEvidenceExpiresAtSeconds: decision.executionEvidenceExpiresAtSeconds,

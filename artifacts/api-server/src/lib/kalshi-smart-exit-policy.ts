@@ -513,6 +513,38 @@ export interface SmartExitTimeScaledRisk {
   readonly actionable: boolean;
 }
 
+export function resolveAuthoritativeHeldSideMarketEvidence(input: {
+  readonly publicProbability: number | null;
+  readonly publicObservedAtSeconds: number | null;
+  readonly authenticatedExecutablePrice: number | null;
+  readonly authenticatedExecutableQuantity: number;
+  readonly requiredQuantity: number;
+  readonly authenticatedObservedAtSeconds: number | null;
+}): {
+  readonly probability: number | null;
+  readonly observedAtSeconds: number | null;
+  readonly source: "authenticated_full_depth" | "public";
+} {
+  const authenticatedFullDepth = finite(input.authenticatedExecutablePrice)
+    && input.authenticatedExecutablePrice! > 0
+    && input.authenticatedExecutablePrice! <= 1
+    && finite(input.authenticatedObservedAtSeconds)
+    && input.authenticatedExecutableQuantity + 1e-9 >= input.requiredQuantity;
+  if (authenticatedFullDepth) {
+    return {
+      probability: input.authenticatedExecutablePrice,
+      observedAtSeconds: input.authenticatedObservedAtSeconds,
+      source: "authenticated_full_depth",
+    };
+  }
+  return {
+    probability: finite(input.publicProbability) ? input.publicProbability : null,
+    observedAtSeconds: finite(input.publicObservedAtSeconds)
+      ? input.publicObservedAtSeconds : null,
+    source: "public",
+  };
+}
+
 /** Shared by live policy and durable replay. Positive distance is on the losing side. */
 export function assessSmartExitTimeScaledRisk(input: {
   readonly side: BinarySide;
@@ -827,6 +859,7 @@ function emptyMetrics(): DecisionMetrics {
     exitEdgePerContract: null,
     liquidityCoverage: null,
     executionEvidenceReady: false,
+    executionAuthorization: null,
     minimumWinningPrice: null,
     maximumExecutionEvidenceAgeSeconds: DEFAULT_SMART_EXIT_CONFIG.maxEvidenceAgeSeconds,
     executionEvidenceExpiresAtSeconds: null,
@@ -1136,7 +1169,7 @@ export function evaluateSmartExit(
   const executionEvidenceExpiresAtSeconds = mandatoryExecutionTimes.every((at) => at !== null)
     ? Math.min(...mandatoryExecutionTimes as number[]) + config.maxEvidenceAgeSeconds
     : null;
-  const executionEvidenceReady = fullSaleEvidenceReady
+  const economicExecutionEvidenceReady = fullSaleEvidenceReady
     && minimumWinningPrice !== null && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice
   const capitalLossFraction = fullSaleEvidenceReady
     && estimatedSaleValue !== null
@@ -1197,7 +1230,8 @@ export function evaluateSmartExit(
     marketCollapseLatchExpiresAtSeconds: marketPressure.collapseLatchActive
       ? marketPressure.collapseLatchUntilSeconds : null,
     valuePreservationTriggered: false,
-    executionEvidenceReady,
+    executionEvidenceReady: economicExecutionEvidenceReady,
+    executionAuthorization: economicExecutionEvidenceReady ? "economic" as const : null,
     minimumWinningPrice,
     maximumExecutionEvidenceAgeSeconds: config.maxEvidenceAgeSeconds,
     executionEvidenceExpiresAtSeconds,
@@ -1241,8 +1275,40 @@ export function evaluateSmartExit(
       && trajectory.adverseExcursionFraction + 1e-12
         >= timeBandParameters.minimumAdverseExcursionFraction,
   });
+  const marketDeteriorated = marketLossFraction !== null
+    && marketLossFraction >= sensitivity.parameters.minMarketLossFraction;
+  const terminalCrossingImminent = !alreadyAcrossTarget
+    && crossingRiskConfirmed
+    && projectedCrossingSeconds !== null
+    && projectedCrossingSeconds <= Math.min(10, Math.max(0, remaining / 2));
+  const rawTerminalExecutionFloor = evidence.marketMinimumExecutablePrice ?? null;
+  const terminalExecutionFloor = finite(rawTerminalExecutionFloor)
+    && rawTerminalExecutionFloor > 0
+    && rawTerminalExecutionFloor < 1
+    ? Math.floor(rawTerminalExecutionFloor * 100) / 100
+    : null;
+  const terminalStopLoss = timeScaledRisk.timeBand === "critical"
+    && (alreadyAcrossTarget || terminalCrossingImminent)
+    && timeScaledRisk.actionable
+    && marketDeteriorated
+    && fullSaleEvidenceReady
+    && terminalExecutionFloor !== null
+    && terminalExecutionFloor > 0;
+  const terminalStopAuthorization = terminalStopLoss && !economicExit;
+  const executionEvidenceReady = economicExecutionEvidenceReady || terminalStopAuthorization;
+  const executionAuthorization = terminalStopAuthorization
+    ? "terminal_stop" as const
+    : valuePreservationCandidate && economicExecutionEvidenceReady
+      ? "value_preservation" as const
+      : economicExecutionEvidenceReady ? "economic" as const : null;
+  const effectiveMinimumWinningPrice = terminalStopAuthorization
+    ? terminalExecutionFloor
+    : minimumWinningPrice;
   const shared = {
     ...common,
+    executionEvidenceReady,
+    executionAuthorization,
+    minimumWinningPrice: effectiveMinimumWinningPrice,
     crossingRiskConfirmed: timeScaledRisk.actionable || valuePreservationCandidate,
     timeBand: timeScaledRisk.timeBand,
     adverseTargetDistanceFraction: timeScaledRisk.adverseTargetDistanceFraction,
@@ -1254,14 +1320,12 @@ export function evaluateSmartExit(
     marketDirectionSampleCount: marketDirection.sampleCount,
   };
   const probabilityDeteriorated = drop !== null && drop < -threshold;
-  const marketDeteriorated = marketLossFraction !== null
-    && marketLossFraction >= sensitivity.parameters.minMarketLossFraction;
   const meaningfulDeterioration = alreadyAcrossTarget
     || probabilityDeteriorated || fastDrop || highRisk || marketDeteriorated;
   const exitReady = (timeScaledRisk.actionable || valuePreservationCandidate)
     && meaningfulDeterioration
     && (alreadyAcrossTarget || marketDeteriorated)
-    && economicExit
+    && (economicExit || terminalStopLoss)
     && executionEvidenceReady;
   const mayExecute = config.mode === "live-exit" && executionEvidenceReady;
   if (exitReady) {
@@ -1289,7 +1353,9 @@ export function evaluateSmartExit(
     }
     return {
       disposition: "EXIT_SIGNAL",
-      reason: valuePreservationCandidate
+      reason: terminalStopAuthorization
+        ? `${timeScaledRisk.timeBand} band: terminal target-crossing stop-loss; fresh authenticated full-position bid overrides stale or optimistic hold value`
+        : valuePreservationCandidate
         ? `${timeScaledRisk.timeBand} band: losing-side spot persisted for ${targetCrossedDurationSeconds.toFixed(1)}s while fresh full-depth Kalshi value remained at or below 55c`
         : `${timeScaledRisk.timeBand} band: ${
             alreadyAcrossTarget

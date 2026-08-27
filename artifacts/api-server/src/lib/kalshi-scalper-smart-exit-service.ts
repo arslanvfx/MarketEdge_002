@@ -25,6 +25,7 @@ import {
 import {
   computeScalperExitExecutableDepth, DEFAULT_SCALPER_EXIT_CONFIG,
   evaluateScalperExit, isScalperExitEvidenceFetchFresh,
+  SCALPER_TERMINAL_STOP_LOSS_FLOOR,
   type ScalperExitConfig,
   type ScalperExitDecision, type ScalperExitInput, type ScalperExitSample,
   type ScalperExitSensitivity,
@@ -208,6 +209,8 @@ function buildInput(params: {
   book: Awaited<ReturnType<typeof fetchOrderbookPrices>>; remainingQuantity: number;
   entryWinningPrice: number; executableQuantity: number;
   executablePrice: number | null; nowMs: number;
+  terminalStopLossExecutableQuantity?: number;
+  terminalStopLossWinningProbability?: number | null;
   valuePreservingExecutableQuantity?: number;
   valuePreservingWinningProbability?: number | null;
   evaluationConfig?: ScalperExitConfig;
@@ -227,6 +230,10 @@ function buildInput(params: {
     executableQuantity: params.executableQuantity,
     remainingQuantity: params.remainingQuantity,
     depthAtFloor: params.executableQuantity >= params.remainingQuantity,
+    terminalStopLossExecutableQuantity:
+      params.terminalStopLossExecutableQuantity ?? params.executableQuantity,
+    terminalStopLossWinningProbability:
+      params.terminalStopLossWinningProbability ?? params.executablePrice,
     valuePreservingExecutableQuantity:
       params.valuePreservingExecutableQuantity ?? params.executableQuantity,
     valuePreservingWinningProbability:
@@ -331,7 +338,7 @@ async function executeExit(params: {
   order: ScalpOrder; lifecycleId: string; remainingQuantity: number;
   floor: number; history: ScalperExitSample[]; expectedExchangeIndex: number;
   configVersion: number; exitMode: ScalperExitConfig["mode"];
-  authorization: "trajectory" | "quote_lag";
+  authorization: "trajectory" | "quote_lag" | "terminal_stop";
 }): Promise<void> {
   const requestId = randomUUID();
   const clientOrderId = `scalp-exit-${requestId}`;
@@ -421,15 +428,23 @@ async function executeExit(params: {
         : Math.min(spotEvidence.publishedAtMs, nowMs),
       spotEvidence.sourceSequence ?? null,
       );
+      const entryWinningPrice = params.order.winningContractCost
+        ?? (params.order.side === "yes" ? params.order.entryYesPrice : 1 - params.order.entryYesPrice);
+      const trajectoryFloor = Math.max(0.01, Math.min(0.99, entryWinningPrice * 0.5));
       const executable = computeScalperExitExecutableDepth(
         params.order.side,
         book.yesDepth,
         book.noDepth,
         params.remainingQuantity,
-        params.floor,
+        trajectoryFloor,
       );
-      const entryWinningPrice = params.order.winningContractCost
-        ?? (params.order.side === "yes" ? params.order.entryYesPrice : 1 - params.order.entryYesPrice);
+      const terminalStopLossExecutable = computeScalperExitExecutableDepth(
+        params.order.side,
+        book.yesDepth,
+        book.noDepth,
+        params.remainingQuantity,
+        SCALPER_TERMINAL_STOP_LOSS_FLOOR,
+      );
       const valuePreservingFloor = Math.min(0.99, entryWinningPrice + 0.01);
       const valuePreservingExecutable = computeScalperExitExecutableDepth(
         params.order.side,
@@ -443,12 +458,14 @@ async function executeExit(params: {
         remainingQuantity: params.remainingQuantity, entryWinningPrice,
         executableQuantity: executable.quantity,
         executablePrice: executable.price,
+        terminalStopLossExecutableQuantity: terminalStopLossExecutable.quantity,
+        terminalStopLossWinningProbability: terminalStopLossExecutable.price,
         valuePreservingExecutableQuantity: valuePreservingExecutable.quantity,
         valuePreservingWinningProbability: valuePreservingExecutable.price,
         nowMs,
         evaluationConfig: latest.config,
       }));
-      if (finalDecision.disposition !== "exit" || executable.price == null) {
+      if (finalDecision.disposition !== "exit") {
         return {
           ready: false as const,
           reason: `final policy revalidation: ${finalDecision.reason}`,
@@ -457,17 +474,40 @@ async function executeExit(params: {
       }
       const finalUsesQuoteLagProtection = finalDecision.reason
         === "persistent target breach with value-preserving authenticated depth";
-      if (finalUsesQuoteLagProtection && params.authorization !== "quote_lag") {
+      const finalUsesTerminalStopLoss = finalDecision.reason
+        === "persistent target breach with authenticated full-position stop-loss depth";
+      const finalAuthorization = finalUsesQuoteLagProtection
+        ? "quote_lag"
+        : finalUsesTerminalStopLoss ? "terminal_stop" : "trajectory";
+      if (finalAuthorization !== params.authorization) {
         return {
           ready: false as const,
-          reason: "final policy requires a stronger value-preserving order floor",
-          evidence: { stage: "pre_submit_policy_floor", finalDecision },
+          reason: "final policy authorization changed before submission",
+          evidence: {
+            stage: "pre_submit_policy_floor",
+            finalDecision,
+            expectedAuthorization: params.authorization,
+            finalAuthorization,
+          },
+        };
+      }
+      const selectedExecutable = params.authorization === "quote_lag"
+        ? valuePreservingExecutable
+        : params.authorization === "terminal_stop"
+          ? terminalStopLossExecutable
+          : executable;
+      if (selectedExecutable.price == null
+        || selectedExecutable.quantity + 1e-9 < params.remainingQuantity) {
+        return {
+          ready: false as const,
+          reason: "final authorized depth does not cover the remaining position",
+          evidence: { stage: "pre_submit_authorized_depth", finalDecision },
         };
       }
       return {
         ready: true as const,
         value: {
-          executablePrice: executable.price,
+          executablePrice: selectedExecutable.price,
           exchangeIndex: refreshedMarket.exchangeIndex,
           finalDecision,
         },
@@ -651,11 +691,20 @@ async function processOrder(
     remainingQuantity,
     valuePreservingFloor,
   );
+  const terminalStopLossExecutable = computeScalperExitExecutableDepth(
+    order.side,
+    bookReceipt.value.yesDepth,
+    bookReceipt.value.noDepth,
+    remainingQuantity,
+    SCALPER_TERMINAL_STOP_LOSS_FLOOR,
+  );
   const nowMs = receiptAt;
   const input = buildInput({
     order, target, history, book: bookReceipt.value, remainingQuantity, entryWinningPrice,
     executableQuantity: executable.quantity,
     executablePrice: executable.price,
+    terminalStopLossExecutableQuantity: terminalStopLossExecutable.quantity,
+    terminalStopLossWinningProbability: terminalStopLossExecutable.price,
     valuePreservingExecutableQuantity: valuePreservingExecutable.quantity,
     valuePreservingWinningProbability: valuePreservingExecutable.price,
     nowMs,
@@ -695,8 +744,14 @@ async function processOrder(
   }
   const quoteLagAuthorization = decision.reason
     === "persistent target breach with value-preserving authenticated depth";
-  const authorizedFloor = quoteLagAuthorization ? valuePreservingFloor : floor;
-  const authorizedExecutable = quoteLagAuthorization ? valuePreservingExecutable : executable;
+  const terminalStopAuthorization = decision.reason
+    === "persistent target breach with authenticated full-position stop-loss depth";
+  const authorizedFloor = quoteLagAuthorization
+    ? valuePreservingFloor
+    : terminalStopAuthorization ? SCALPER_TERMINAL_STOP_LOSS_FLOOR : floor;
+  const authorizedExecutable = quoteLagAuthorization
+    ? valuePreservingExecutable
+    : terminalStopAuthorization ? terminalStopLossExecutable : executable;
   const lifecycle = await runSmartExitDb(() => claimScalperExitLifecycle({
     id: randomUUID(), scalpOrderId: order.id, mode: evaluationConfig.mode, symbol: order.symbol,
     ticker: order.ticker, windowKey: order.windowKey, side: order.side, remainingQuantity,
@@ -711,7 +766,8 @@ async function processOrder(
     expectedExchangeIndex: refreshedMarket.exchangeIndex,
     configVersion: evaluationVersion,
     exitMode: evaluationConfig.mode,
-    authorization: quoteLagAuthorization ? "quote_lag" : "trajectory",
+    authorization: quoteLagAuthorization
+      ? "quote_lag" : terminalStopAuthorization ? "terminal_stop" : "trajectory",
   });
 }
 

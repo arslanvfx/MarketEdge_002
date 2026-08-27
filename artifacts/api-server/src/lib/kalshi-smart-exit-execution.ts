@@ -6,6 +6,7 @@ import type {
 } from "./kalshi-smart-exit-types.ts";
 
 export interface SmartExitExecutionConstraint {
+  readonly authorization: import("./kalshi-smart-exit-types.ts").SmartExitExecutionAuthorization;
   readonly minimumWinningPrice: number;
   readonly evaluatedBookObservedAtSeconds: number;
   readonly maximumEvidenceAgeSeconds: number;
@@ -16,7 +17,11 @@ export function combineSmartExitExecutionConstraints(
   original: SmartExitExecutionConstraint,
   revalidated: SmartExitExecutionConstraint,
 ): SmartExitExecutionConstraint {
+  if (original.authorization !== revalidated.authorization) {
+    throw new Error("smart_exit_authorization_changed");
+  }
   return {
+    authorization: original.authorization,
     minimumWinningPrice: Math.max(
       original.minimumWinningPrice,
       revalidated.minimumWinningPrice,

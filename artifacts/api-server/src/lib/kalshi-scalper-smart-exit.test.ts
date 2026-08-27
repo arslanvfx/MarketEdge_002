@@ -42,6 +42,8 @@ function input(overrides: Partial<ScalperExitInput> = {}): ScalperExitInput {
     executableQuantity: 10,
     remainingQuantity: 10,
     depthAtFloor: true,
+    terminalStopLossExecutableQuantity: 10,
+    terminalStopLossWinningProbability: 0.55,
     valuePreservingExecutableQuantity: 10,
     valuePreservingWinningProbability: 0.81,
     config: {
@@ -92,6 +94,8 @@ test("fails closed on stale evidence, target retreat, and insufficient depth", (
   assert.equal(evaluateScalperExit(input({
     executableQuantity: 9,
     depthAtFloor: false,
+    terminalStopLossExecutableQuantity: 9,
+    valuePreservingExecutableQuantity: 9,
   })).disposition, "blocked");
 });
 
@@ -283,6 +287,46 @@ test("quote-lag target-breach protection is symmetric for NO positions", () => {
   assert.equal(result.disposition, "exit");
   assert.equal(result.targetBreachConfirmationCount, 3);
   assert.equal(result.quoteLagProtectionEligible, true);
+});
+
+test("terminal target breach preserves remaining Scalper capital with full authenticated stop-loss depth", () => {
+  const breachedSamples: ScalperExitSample[] = [
+    { atMs: 6_000, price: 101, sourceAtMs: 5_900, sourceSequence: "a" },
+    { atMs: 7_000, price: 100.4, sourceAtMs: 6_900, sourceSequence: "b" },
+    { atMs: 8_000, price: 99.8, sourceAtMs: 7_900, sourceSequence: "c" },
+    { atMs: 9_000, price: 99.6, sourceAtMs: 8_900, sourceSequence: "d" },
+    { atMs: 10_000, price: 99.5, sourceAtMs: 9_900, sourceSequence: "e" },
+  ];
+  const decision = evaluateScalperExit(input({
+    samples: breachedSamples,
+    entryWinningProbability: 0.90,
+    currentWinningProbability: 0.34,
+    terminalStopLossExecutableQuantity: 10,
+    terminalStopLossWinningProbability: 0.34,
+    valuePreservingExecutableQuantity: 0,
+    valuePreservingWinningProbability: null,
+    requireSourceTimestamps: true,
+  }));
+  assert.equal(decision.disposition, "exit");
+  assert.equal(
+    decision.reason,
+    "persistent target breach with authenticated full-position stop-loss depth",
+  );
+  assert.equal(decision.quoteLagProtectionEligible, false);
+
+  const partial = evaluateScalperExit(input({
+    samples: breachedSamples,
+    entryWinningProbability: 0.90,
+    currentWinningProbability: 0.34,
+    executableQuantity: 9,
+    terminalStopLossExecutableQuantity: 9,
+    terminalStopLossWinningProbability: 0.34,
+    valuePreservingExecutableQuantity: 0,
+    valuePreservingWinningProbability: null,
+    requireSourceTimestamps: true,
+  }));
+  assert.equal(partial.disposition, "blocked");
+  assert.match(partial.reason, /depth does not cover remaining quantity/);
 });
 
 test("Pyth whole-second timestamps accept distinct authoritative updates without fabricating duplicates", () => {
@@ -550,6 +594,8 @@ test("NO exits use converted YES depth and block when full floor depth is absent
     executableQuantity: unsafe.quantity,
     remainingQuantity: 10,
     depthAtFloor: false,
+    terminalStopLossExecutableQuantity: unsafe.quantity,
+    valuePreservingExecutableQuantity: unsafe.quantity,
   })).disposition, "blocked");
 });
 

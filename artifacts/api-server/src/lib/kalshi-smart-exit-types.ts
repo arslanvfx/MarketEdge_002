@@ -111,6 +111,8 @@ export interface SmartExitEvidence {
   readonly marketBestBid: number | null;
   readonly marketBestAsk: number | null;
   readonly marketExecutablePrice: number | null;
+  /** Lowest held-side bid consumed by a full-position executable sale. */
+  readonly marketMinimumExecutablePrice?: number | null;
   readonly marketExecutableQuantity: number | null;
 }
 
@@ -216,6 +218,10 @@ export interface SmartExitMarketPressureSample {
 export type SmartExitDisposition = "OFF" | "HOLD" | "WATCH" | "PREPARE_EXIT" | "EXIT_SIGNAL" | "UNAVAILABLE";
 export type SmartExitTimeBand = "monitor" | "escalation" | "urgent" | "critical";
 export type SmartExitMarketDirection = "adverse" | "recovering" | "flat" | "unknown";
+export type SmartExitExecutionAuthorization =
+  | "economic"
+  | "value_preservation"
+  | "terminal_stop";
 
 export interface SmartExitDecision {
   readonly disposition: SmartExitDisposition;
@@ -271,6 +277,7 @@ export interface SmartExitDecision {
   readonly exitEdgePerContract: number | null;
   readonly liquidityCoverage: number | null;
   readonly executionEvidenceReady: boolean;
+  readonly executionAuthorization: SmartExitExecutionAuthorization | null;
   readonly minimumWinningPrice: number | null;
   readonly maximumExecutionEvidenceAgeSeconds: number;
   readonly executionEvidenceExpiresAtSeconds: number | null;
@@ -367,6 +374,8 @@ export interface SmartExitEvaluationRecord {
   readonly executableQuantity: number | null;
   readonly liquidityCoverage: number | null;
   readonly executionEvidenceReady: boolean;
+  /** Missing only on legacy evaluations created before typed authorization. */
+  readonly executionAuthorization?: SmartExitExecutionAuthorization | null;
   readonly minimumWinningPrice: number | null;
   readonly maximumExecutionEvidenceAgeSeconds: number;
   readonly executionEvidenceExpiresAtSeconds: number | null;
