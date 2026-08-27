@@ -5,6 +5,7 @@ import { logger } from "./logger.ts";
 import { randomUUID } from "node:crypto";
 import { fetchKalshiTarget, fetchOrderbookPrices, getKalshiCachedData } from "./crypto-kalshi.ts";
 import { getTickerFresh } from "./crypto-data.ts";
+import { CRYPTO_COINS } from "./market-defs.ts";
 import { getUnsettledScalpOrders } from "./kalshi-scalper-db.ts";
 import {
   computeScalpExitYesLimitPrice,
@@ -39,11 +40,18 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let inFlight = false;
 const samples = new Map<string, ScalperExitSample[]>();
 const latestEvaluations = new Map<string, Record<string, unknown>>();
+const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol.toUpperCase(), coin.product]));
 let lastReconciledAt = 0;
 let lastSettlementAt = 0;
 
 function numeric(value: unknown): number | null { const n = Number(value); return Number.isFinite(n) ? n : null; }
 function expiry(windowKey: string): number { const at = Date.parse(`${windowKey}:00Z`); return Number.isFinite(at) ? at + 900_000 : 0; }
+function modeIncludesOrder(order: ScalpOrder): boolean {
+  if (config.mode === "shadow") return true;
+  if (config.mode === "paper-exit") return order.mode === "paper";
+  if (config.mode === "live-exit") return order.mode === "live";
+  return false;
+}
 function appendSample(orderId: string, price: number, atMs = Date.now()): ScalperExitSample[] {
   const history = samples.get(orderId) ?? [];
   const prior = history[history.length - 1];
@@ -182,8 +190,16 @@ async function executeExit(params: {
         };
       }
       const fetchStartedAt = Date.now();
+      const product = PRODUCT_BY_SYMBOL.get(params.order.symbol.toUpperCase());
+      if (!product) {
+        return {
+          ready: false as const,
+          reason: "final spot product identity is unavailable",
+          evidence: { stage: "pre_submit_product_identity" },
+        };
+      }
       const [spot, target, book] = await Promise.all([
-        getTickerFresh(params.order.symbol).catch(() => null),
+        getTickerFresh(product).catch(() => null),
         fetchKalshiTarget(params.order.symbol, new Date(expiry(params.order.windowKey)), true).catch(() => null),
         fetchOrderbookPrices(params.order.ticker).catch(() => null),
       ]);
@@ -315,19 +331,26 @@ async function processOrder(order: ScalpOrder): Promise<void> {
   const previouslySold = await getScalperExitFilledQuantity(order.id);
   const remainingQuantity = Math.max(0, order.filledCount - previouslySold);
   if (remainingQuantity <= 0) return;
-  const initialMarket = getKalshiCachedData(order.symbol);
-  if (!initialMarket || initialMarket.ticker !== order.ticker) return;
+  const product = PRODUCT_BY_SYMBOL.get(order.symbol.toUpperCase());
+  if (!product) throw new Error(`unsupported Scalper Smart Exit product: ${order.symbol}`);
   const fetchStartedAt = Date.now();
+  const cachedMarket = getKalshiCachedData(order.symbol);
+  const targetPromise = cachedMarket?.ticker === order.ticker
+    ? Promise.resolve(cachedMarket.target)
+    : fetchKalshiTarget(
+        order.symbol,
+        new Date(expiry(order.windowKey)),
+        true,
+      ).catch(() => null);
   const [spot, target, book] = await Promise.all([
-    getTickerFresh(order.symbol).catch(() => null),
-    fetchKalshiTarget(order.symbol, new Date(expiry(order.windowKey)), true).catch(() => null),
+    getTickerFresh(product).catch(() => null),
+    targetPromise,
     fetchOrderbookPrices(order.ticker).catch(() => null),
   ]);
   const refreshedMarket = getKalshiCachedData(order.symbol);
   const receiptAt = Date.now();
   if (spot == null || !book || !refreshedMarket || refreshedMarket.ticker !== order.ticker
-    || initialMarket.exchangeIndex == null
-    || refreshedMarket.exchangeIndex !== initialMarket.exchangeIndex
+    || refreshedMarket.exchangeIndex == null
     || !isScalperExitEvidenceFetchFresh(
       fetchStartedAt,
       receiptAt,
@@ -377,7 +400,7 @@ async function processOrder(order: ScalpOrder): Promise<void> {
   if (!lifecycle.claimed && lifecycle.status !== "zero_fill") return;
   await executeExit({
     order, lifecycleId: lifecycle.id, remainingQuantity, floor, history,
-    expectedExchangeIndex: initialMarket.exchangeIndex,
+    expectedExchangeIndex: refreshedMarket.exchangeIndex,
   });
 }
 
@@ -396,11 +419,18 @@ async function monitor(): Promise<void> {
     }
     if (!config.enabled || config.mode === "off") return;
     const orders = await getUnsettledScalpOrders();
-    for (const order of orders.filter((row) => (row.status === "filled" || row.status === "paper") && row.filledCount > 0)) {
-      await processOrder(order).catch((error) => {
+    const activeOrders = orders.filter((order) =>
+      (order.status === "filled" || order.status === "paper")
+      && order.filledCount > 0
+      && expiry(order.windowKey) > Date.now()
+      && modeIncludesOrder(order));
+    await Promise.allSettled(activeOrders.map((order) =>
+      processOrder(order).catch((error) => {
         logger.warn({ error, orderId: order.id }, "[kalshi-scalper-exit] order evaluation failed closed");
-      });
-    }
+        throw error;
+      }),
+    ));
+    lastError = null;
   } catch (error) { lastError = String(error); logger.warn({ error }, "[kalshi-scalper-exit] monitor failed closed"); }
   finally { inFlight = false; }
 }

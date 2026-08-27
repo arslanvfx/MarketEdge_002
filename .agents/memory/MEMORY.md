@@ -132,6 +132,7 @@
 - [Contrarian Pyth excursion cadence](contrarian-pyth-excursion-cadence.md) — commodity reversal detection must use distinct fresh oracle publications on a dedicated lane; local polling cadence cannot stand in for Pyth cadence
 - [Optional Scalper guard composition](optional-scalper-guard-composition.md) — additive guards may block on positive evidence but cannot veto normal entries merely because their own history is warming or unavailable
 - [Scalper paper/live parity](scalper-paper-live-parity.md) — compare outcomes only with matching entry timing, overrides, and guard toggles; otherwise each mode evaluates different market evidence
+- [Scalper Fast Smart Exit monitoring](scalper-fast-smart-exit-monitoring.md) — use real product IDs and exact windows; evaluate only active same-mode fills concurrently.
 - [Daily trading P&L boundary](daily-trading-pnl-boundary.md) — resets at DST-aware New York midnight; includes only regular bot plus canonical High-Value Scalper settlements
 - [Smart Exit ownership boundary](smart-exit-ownership-boundary.md) — recommendations never own positions; execution requires durable owner delegation and final pre-submit revalidation.
 - [Smart Exit effectiveness accounting](smart-exit-effectiveness-accounting.md) — confirmed fills prove execution; only authoritative settlement determines whether exiting helped.

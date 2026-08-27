@@ -18,6 +18,43 @@ test("Scalper Smart Exit is isolated from regular and Contrarian close ownership
   assert.match(service, /getUnsettledScalpOrders/);
 });
 
+test("filled positions use the configured spot product and refresh their exact market before identity checks", () => {
+  assert.match(service, /PRODUCT_BY_SYMBOL = new Map\(CRYPTO_COINS/);
+  const processOrder = service.slice(
+    service.indexOf("async function processOrder"),
+    service.indexOf("async function monitor"),
+  );
+  assert.match(processOrder, /getTickerFresh\(product\)/);
+  assert.doesNotMatch(processOrder, /getTickerFresh\(order\.symbol\)/);
+  assert.match(processOrder, /cachedMarket\?\.ticker === order\.ticker/);
+  assert.ok(
+    processOrder.indexOf("fetchKalshiTarget(")
+      < processOrder.indexOf("const refreshedMarket = getKalshiCachedData"),
+  );
+  assert.match(processOrder, /cachedMarket\?\.ticker === order\.ticker[\s\S]*Promise\.resolve\(cachedMarket\.target\)[\s\S]*fetchKalshiTarget/);
+});
+
+test("final pre-submit spot validation uses the configured product rather than the display symbol", () => {
+  const execute = service.slice(
+    service.indexOf("async function executeExit"),
+    service.indexOf("async function processOrder"),
+  );
+  assert.match(execute, /PRODUCT_BY_SYMBOL\.get\(params\.order\.symbol\.toUpperCase\(\)\)/);
+  assert.match(execute, /getTickerFresh\(product\)/);
+  assert.doesNotMatch(execute, /getTickerFresh\(params\.order\.symbol\)/);
+});
+
+test("the monitor excludes expired and cross-mode orders before concurrently evaluating active fills", () => {
+  const monitor = service.slice(
+    service.indexOf("async function monitor"),
+    service.indexOf("export async function initScalperSmartExit"),
+  );
+  assert.match(monitor, /expiry\(order\.windowKey\) > Date\.now\(\)/);
+  assert.match(monitor, /modeIncludesOrder\(order\)/);
+  assert.match(monitor, /Promise\.allSettled\(activeOrders\.map/);
+  assert.doesNotMatch(monitor, /for \(const order of orders/);
+});
+
 test("live activation requires one authenticated request with mode and enabled", () => {
   assert.match(route, /requireOperator/);
   assert.match(service, /patch\.mode === "live-exit"/);
