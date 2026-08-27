@@ -4,7 +4,7 @@
 import { logger } from "./logger.ts";
 import { randomUUID } from "node:crypto";
 import { fetchKalshiTarget, fetchOrderbookPrices, getKalshiCachedData } from "./crypto-kalshi.ts";
-import { getTickerFresh } from "./crypto-data.ts";
+import { getTickerFreshEvidence } from "./crypto-data.ts";
 import { CRYPTO_COINS } from "./market-defs.ts";
 import { getUnsettledScalpOrders } from "./kalshi-scalper-db.ts";
 import {
@@ -15,7 +15,7 @@ import {
 } from "./kalshi-scalper-exchange.ts";
 import {
   claimScalperExitLifecycle, claimScalperExitRequest, listScalperExitEvidenceForReplay,
-  finalizeSettledScalperExitLifecycles, getScalperExitFilledQuantity,
+  finalizeSettledScalperExitLifecycles, getScalperExitOrderStates,
   getScalperExitLifecyclesByOrderIds,
   listPendingScalperExitRequests, listScalperExitLifecycles, loadScalperExitConfig,
   recordScalperExitEvaluation, releaseScalperExitLifecycle, resolveScalperExitRequest,
@@ -30,35 +30,164 @@ import {
   type ScalperExitSensitivity,
 } from "./kalshi-scalper-smart-exit-policy.ts";
 import { runClaimedScalperExitLifecycle } from "./kalshi-scalper-smart-exit-lifecycle.ts";
+import {
+  advanceScalperExitSamples,
+  AbortableRequestRegistry,
+  type AbortableCoalescedRequest,
+  ScalperHotCadenceTracker,
+  selectScalperHotCandidates,
+} from "./kalshi-scalper-smart-exit-scheduler.ts";
 import type { ScalpOrder } from "./kalshi-scalper-types.ts";
 
 let config: ScalperExitConfig = { ...DEFAULT_SCALPER_EXIT_CONFIG };
 let version = 0;
 let started = false;
 let lastError: string | null = null;
-let timer: ReturnType<typeof setInterval> | null = null;
-let inFlight = false;
+let hotTimer: ReturnType<typeof setInterval> | null = null;
+let discoveryTimer: ReturnType<typeof setInterval> | null = null;
+let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 const samples = new Map<string, ScalperExitSample[]>();
 const latestEvaluations = new Map<string, Record<string, unknown>>();
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol.toUpperCase(), coin.product]));
 let lastReconciledAt = 0;
 let lastSettlementAt = 0;
+let lastEvaluationFlushAt = 0;
+let discoveryInFlight = false;
+let maintenanceInFlight = false;
+const hotOrdersInFlight = new Set<string>();
+const activeOrders = new Map<string, { order: ScalpOrder; remainingQuantity: number }>();
+const pendingEvaluationWrites = new Map<string, Parameters<typeof recordScalperExitEvaluation>[0]>();
+const HOT_SCHEDULER_MS = 250;
+const DISCOVERY_SCHEDULER_MS = 500;
+const MAINTENANCE_SCHEDULER_MS = 1_000;
+const MAX_HOT_CONCURRENCY = Math.max(16, CRYPTO_COINS.length * 2);
+const HOT_EVIDENCE_DEADLINE_MS = 700;
+const MAX_SAMPLE_HISTORY = 32;
+let latestHotTickGapMs: number | null = null;
+let worstRecentHotTickGapMs: number | null = null;
+const hotCadence = new ScalperHotCadenceTracker();
+let coalescedHotOrderPasses = 0;
+let completedHotOrderPasses = 0;
+let lastDiscoveryAtMs: number | null = null;
+let hotEvidenceDeadlineBreaches = 0;
+let hotOverloadBreaches = 0;
+let lastHotOverloadAtMs: number | null = null;
+type HotReceipt<T> = { value: T; receivedAtMs: number };
+type HotSpotEvidence = Awaited<ReturnType<typeof getTickerFreshEvidence>>;
+type HotBookEvidence = NonNullable<Awaited<ReturnType<typeof fetchOrderbookPrices>>>;
+const hotSpotRequests = new AbortableRequestRegistry<HotReceipt<HotSpotEvidence> | null>();
+const hotBookRequests = new AbortableRequestRegistry<HotReceipt<HotBookEvidence> | null>();
+const hotTargetRequests = new AbortableRequestRegistry<number | null>();
 
 function numeric(value: unknown): number | null { const n = Number(value); return Number.isFinite(n) ? n : null; }
 function expiry(windowKey: string): number { const at = Date.parse(`${windowKey}:00Z`); return Number.isFinite(at) ? at + 900_000 : 0; }
+function isBeforeExpiry(order: ScalpOrder, nowMs = Date.now()): boolean {
+  const expiresAtMs = expiry(order.windowKey);
+  return expiresAtMs > 0 && nowMs < expiresAtMs;
+}
 function modeIncludesOrder(order: ScalpOrder): boolean {
   if (config.mode === "shadow") return true;
   if (config.mode === "paper-exit") return order.mode === "paper";
   if (config.mode === "live-exit") return order.mode === "live";
   return false;
 }
-function appendSample(orderId: string, price: number, atMs = Date.now()): ScalperExitSample[] {
-  const history = samples.get(orderId) ?? [];
-  const prior = history[history.length - 1];
-  if (!prior || atMs > prior.atMs) history.push({ atMs, price });
-  while (history.length > 6) history.shift();
+function appendSample(
+  orderId: string,
+  price: number,
+  atMs = Date.now(),
+  sourceAtMs: number | null = null,
+  sourceSequence: string | null = null,
+): ScalperExitSample[] {
+  const history = advanceScalperExitSamples(
+    samples.get(orderId) ?? [],
+    { atMs, price, sourceAtMs, sourceSequence },
+    MAX_SAMPLE_HISTORY,
+  );
   samples.set(orderId, history);
   return history;
+}
+
+function getHotSpotReceipt(
+  product: string,
+): AbortableCoalescedRequest<HotReceipt<HotSpotEvidence> | null> {
+  return hotSpotRequests.getOrCreate(product, (signal) =>
+    getTickerFreshEvidence(product, signal)
+    .then((value) => ({ value, receivedAtMs: Date.now() }))
+    .catch(() => null));
+}
+
+function getHotBookReceipt(
+  ticker: string,
+): AbortableCoalescedRequest<HotReceipt<HotBookEvidence> | null> {
+  return hotBookRequests.getOrCreate(ticker, (signal) =>
+    fetchOrderbookPrices(ticker, signal)
+    .then((value) => value == null ? null : ({ value, receivedAtMs: Date.now() }))
+    .catch(() => null));
+}
+
+function getHotTarget(
+  order: ScalpOrder,
+  cachedMarket: ReturnType<typeof getKalshiCachedData>,
+): AbortableCoalescedRequest<number | null> {
+  if (cachedMarket?.ticker === order.ticker) {
+    return { promise: Promise.resolve(cachedMarket.value), abort: () => {} };
+  }
+  return hotTargetRequests.getOrCreate(order.ticker, (signal) => fetchKalshiTarget(
+    order.symbol,
+    new Date(expiry(order.windowKey)),
+    true,
+    signal,
+  ).catch(() => null));
+}
+
+async function withinHotEvidenceDeadline<T>(
+  work: Promise<T>,
+  startedAtMs: number,
+  onTimeout?: () => void,
+): Promise<{ ready: true; value: T } | { ready: false }> {
+  const remainingMs = HOT_EVIDENCE_DEADLINE_MS - (Date.now() - startedAtMs);
+  if (remainingMs <= 0) return { ready: false };
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<{ ready: false }>((resolve) => {
+    timer = setTimeout(() => {
+      onTimeout?.();
+      resolve({ ready: false });
+    }, remainingMs);
+    timer.unref?.();
+  });
+  const result = await Promise.race([
+    work.then((value) => ({ ready: true as const, value })),
+    timeout,
+  ]);
+  if (timer) clearTimeout(timer);
+  return result;
+}
+
+function publishHotBlock(
+  order: ScalpOrder,
+  remainingQuantity: number,
+  reason: string,
+  slaBreached: boolean,
+): void {
+  const nowMs = Date.now();
+  latestEvaluations.set(order.id, {
+    orderId: order.id,
+    symbol: order.symbol,
+    ticker: order.ticker,
+    side: order.side,
+    mode: config.mode,
+    remainingQuantity,
+    disposition: "blocked",
+    reason,
+    secondsRemaining: Math.max(0, (expiry(order.windowKey) - nowMs) / 1_000),
+    sampleCount: samples.get(order.id)?.length ?? 0,
+    latestGapMs: null,
+    worstGapMs: null,
+    sourceAgeMs: null,
+    schedulerGapMs: latestHotTickGapMs,
+    slaBreached,
+    updatedAt: new Date(nowMs).toISOString(),
+  });
 }
 
 function buildInput(params: {
@@ -66,6 +195,9 @@ function buildInput(params: {
   book: Awaited<ReturnType<typeof fetchOrderbookPrices>>; remainingQuantity: number;
   entryWinningPrice: number; executableQuantity: number;
   executablePrice: number | null; nowMs: number;
+  evaluationConfig?: ScalperExitConfig;
+  quoteAtMs?: number;
+  bookAtMs?: number;
 }): ScalperExitInput {
   return {
     side: params.order.side,
@@ -75,12 +207,13 @@ function buildInput(params: {
     expiresAtMs: expiry(params.order.windowKey),
     entryWinningProbability: params.entryWinningPrice,
     currentWinningProbability: params.executablePrice,
-    quoteAtMs: params.nowMs,
-    bookAtMs: params.nowMs,
+    quoteAtMs: params.quoteAtMs ?? params.nowMs,
+    bookAtMs: params.bookAtMs ?? params.nowMs,
     executableQuantity: params.executableQuantity,
     remainingQuantity: params.remainingQuantity,
     depthAtFloor: params.executableQuantity >= params.remainingQuantity,
-    config,
+    config: params.evaluationConfig ?? config,
+    requireSourceTimestamps: true,
   };
 }
 
@@ -175,21 +308,38 @@ async function reconcilePendingRequests(): Promise<void> {
 async function executeExit(params: {
   order: ScalpOrder; lifecycleId: string; remainingQuantity: number;
   floor: number; history: ScalperExitSample[]; expectedExchangeIndex: number;
+  configVersion: number; exitMode: ScalperExitConfig["mode"];
 }): Promise<void> {
   const requestId = randomUUID();
   const clientOrderId = `scalp-exit-${requestId}`;
   const yesLimitPrice = computeScalpExitYesLimitPrice(params.order.side, params.floor);
   await runClaimedScalperExitLifecycle({
     revalidate: async () => {
+      if (!isBeforeExpiry(params.order)) {
+        return {
+          ready: false as const,
+          reason: "market expired before final revalidation",
+          evidence: { stage: "pre_submit_expiry" },
+        };
+      }
       const latest = await loadScalperExitConfig();
-      if (!latest.config.enabled || latest.config.mode !== config.mode || latest.version !== version) {
+      if (!latest.config.enabled || latest.config.mode !== params.exitMode
+        || latest.version !== params.configVersion) {
         return {
           ready: false as const,
           reason: "config version changed during final pre-submit validation",
           evidence: { stage: "pre_submit_config" },
         };
       }
+      if (!isBeforeExpiry(params.order)) {
+        return {
+          ready: false as const,
+          reason: "market expired while loading final configuration",
+          evidence: { stage: "post_config_expiry" },
+        };
+      }
       const fetchStartedAt = Date.now();
+      const finalEvidenceController = new AbortController();
       const product = PRODUCT_BY_SYMBOL.get(params.order.symbol.toUpperCase());
       if (!product) {
         return {
@@ -198,19 +348,39 @@ async function executeExit(params: {
           evidence: { stage: "pre_submit_product_identity" },
         };
       }
-      const [spot, target, book] = await Promise.all([
-        getTickerFresh(product).catch(() => null),
-        fetchKalshiTarget(params.order.symbol, new Date(expiry(params.order.windowKey)), true).catch(() => null),
-        fetchOrderbookPrices(params.order.ticker).catch(() => null),
-      ]);
+      const finalBatch = await withinHotEvidenceDeadline(Promise.all([
+        getTickerFreshEvidence(product, finalEvidenceController.signal).catch(() => null),
+        fetchKalshiTarget(
+          params.order.symbol,
+          new Date(expiry(params.order.windowKey)),
+          true,
+          finalEvidenceController.signal,
+        ).catch(() => null),
+        fetchOrderbookPrices(params.order.ticker, finalEvidenceController.signal).catch(() => null),
+      ]), fetchStartedAt, () => finalEvidenceController.abort());
+      if (!finalBatch.ready) {
+        return {
+          ready: false as const,
+          reason: `final evidence exceeded ${HOT_EVIDENCE_DEADLINE_MS}ms deadline`,
+          evidence: { stage: "pre_submit_evidence_deadline" },
+        };
+      }
+      const [spotEvidence, target, book] = finalBatch.value;
       const refreshedMarket = getKalshiCachedData(params.order.symbol);
       const receiptAt = Date.now();
+      if (!isBeforeExpiry(params.order, receiptAt)) {
+        return {
+          ready: false as const,
+          reason: "market expired during final evidence fetch",
+          evidence: { stage: "post_fetch_expiry" },
+        };
+      }
       const freshEvidence = isScalperExitEvidenceFetchFresh(
         fetchStartedAt,
         receiptAt,
         latest.config.maxEvidenceAgeSeconds,
       );
-      if (spot == null || !book || !refreshedMarket || refreshedMarket.ticker !== params.order.ticker
+      if (!spotEvidence || !book || !refreshedMarket || refreshedMarket.ticker !== params.order.ticker
         || refreshedMarket.exchangeIndex !== params.expectedExchangeIndex || !freshEvidence) {
         return {
           ready: false as const,
@@ -219,7 +389,15 @@ async function executeExit(params: {
         };
       }
       const nowMs = Date.now();
-      const finalHistory = appendSample(params.order.id, spot, nowMs);
+      const finalHistory = appendSample(
+        params.order.id,
+        spotEvidence.price,
+        nowMs,
+      spotEvidence.publishedAtMs == null
+        ? null
+        : Math.min(spotEvidence.publishedAtMs, nowMs),
+      spotEvidence.sourceSequence ?? null,
+      );
       const executable = computeScalperExitExecutableDepth(
         params.order.side,
         book.yesDepth,
@@ -235,6 +413,7 @@ async function executeExit(params: {
         executableQuantity: executable.quantity,
         executablePrice: executable.price,
         nowMs,
+        evaluationConfig: latest.config,
       }));
       if (finalDecision.disposition !== "exit" || executable.price == null) {
         return {
@@ -258,11 +437,19 @@ async function executeExit(params: {
       evidence: blocked.evidence,
     }),
     claimRequest: async () => {
+      if (!isBeforeExpiry(params.order)) {
+        await releaseScalperExitLifecycle({
+          id: params.lifecycleId,
+          reason: "market expired before durable request claim",
+          evidence: { stage: "request_claim_expiry" },
+        });
+        return false;
+      }
       const request = await claimScalperExitRequest({
         id: requestId, lifecycleId: params.lifecycleId, clientOrderId,
         payload: {
           orderId: params.order.id, ticker: params.order.ticker, side: params.order.side,
-          remainingQuantity: params.remainingQuantity, configVersion: version, yesLimitPrice,
+          remainingQuantity: params.remainingQuantity, configVersion: params.configVersion, yesLimitPrice,
           exchangeIndex: params.expectedExchangeIndex,
         },
       });
@@ -270,8 +457,8 @@ async function executeExit(params: {
     },
     submit: async (prepared) => {
       const submitConfig = await loadScalperExitConfig();
-      if (!submitConfig.config.enabled || submitConfig.config.mode !== config.mode
-        || submitConfig.version !== version) {
+      if (!submitConfig.config.enabled || submitConfig.config.mode !== params.exitMode
+        || submitConfig.version !== params.configVersion) {
         await resolveScalperExitRequest({
           id: requestId,
           status: "blocked",
@@ -280,7 +467,16 @@ async function executeExit(params: {
         });
         return;
       }
-      if (config.mode === "paper-exit") {
+      if (!isBeforeExpiry(params.order)) {
+        await resolveScalperExitRequest({
+          id: requestId,
+          status: "blocked",
+          reason: "market expired after durable request claim, before broker submit",
+          evidence: { stage: "broker_submit_expiry" },
+        });
+        return;
+      }
+      if (params.exitMode === "paper-exit") {
         await resolveScalperExitRequest({
           id: requestId, status: "filled", reason: "paper simulated canonical executable fill",
           fillQuantity: params.remainingQuantity, winningPrice: prepared.executablePrice,
@@ -288,7 +484,7 @@ async function executeExit(params: {
         });
         return;
       }
-      if (config.mode !== "live-exit") {
+      if (params.exitMode !== "live-exit") {
         await resolveScalperExitRequest({
           id: requestId, status: "blocked",
           reason: "execution adapter unavailable for current mode",
@@ -296,6 +492,15 @@ async function executeExit(params: {
         return;
       }
       try {
+        if (!isBeforeExpiry(params.order)) {
+          await resolveScalperExitRequest({
+            id: requestId,
+            status: "blocked",
+            reason: "market expired at final broker boundary",
+            evidence: { stage: "final_broker_boundary_expiry" },
+          });
+          return;
+        }
         const result = await placeScalpExitOrderStrict({
           ticker: params.order.ticker,
           exchangeIndex: prepared.exchangeIndex,
@@ -327,88 +532,258 @@ async function executeExit(params: {
   });
 }
 
-async function processOrder(order: ScalpOrder): Promise<void> {
-  const previouslySold = await getScalperExitFilledQuantity(order.id);
-  const remainingQuantity = Math.max(0, order.filledCount - previouslySold);
+async function processOrder(
+  order: ScalpOrder,
+  remainingQuantity: number,
+  evaluationConfig: ScalperExitConfig,
+  evaluationVersion: number,
+): Promise<void> {
   if (remainingQuantity <= 0) return;
+  if (!isBeforeExpiry(order)) {
+    publishHotBlock(order, remainingQuantity, "market already expired", false);
+    return;
+  }
   const product = PRODUCT_BY_SYMBOL.get(order.symbol.toUpperCase());
   if (!product) throw new Error(`unsupported Scalper Smart Exit product: ${order.symbol}`);
   const fetchStartedAt = Date.now();
   const cachedMarket = getKalshiCachedData(order.symbol);
-  const targetPromise = cachedMarket?.ticker === order.ticker
-    ? Promise.resolve(cachedMarket.target)
-    : fetchKalshiTarget(
-        order.symbol,
-        new Date(expiry(order.windowKey)),
-        true,
-      ).catch(() => null);
-  const [spot, target, book] = await Promise.all([
-    getTickerFresh(product).catch(() => null),
-    targetPromise,
-    fetchOrderbookPrices(order.ticker).catch(() => null),
-  ]);
+  const spotRequest = getHotSpotReceipt(product);
+  const targetRequest = getHotTarget(order, cachedMarket);
+  const bookRequest = getHotBookReceipt(order.ticker);
+  const evidenceBatch = await withinHotEvidenceDeadline(Promise.all([
+    spotRequest.promise,
+    targetRequest.promise,
+    bookRequest.promise,
+  ]), fetchStartedAt, () => {
+    spotRequest.abort();
+    targetRequest.abort();
+    bookRequest.abort();
+  });
+  if (!evidenceBatch.ready) {
+    hotEvidenceDeadlineBreaches += 1;
+    publishHotBlock(
+      order,
+      remainingQuantity,
+      `hot evidence exceeded ${HOT_EVIDENCE_DEADLINE_MS}ms deadline`,
+      true,
+    );
+    return;
+  }
+  const [spotReceipt, target, bookReceipt] = evidenceBatch.value;
   const refreshedMarket = getKalshiCachedData(order.symbol);
   const receiptAt = Date.now();
-  if (spot == null || !book || !refreshedMarket || refreshedMarket.ticker !== order.ticker
+  if (!spotReceipt || !bookReceipt?.value || !refreshedMarket || refreshedMarket.ticker !== order.ticker
     || refreshedMarket.exchangeIndex == null
     || !isScalperExitEvidenceFetchFresh(
       fetchStartedAt,
       receiptAt,
-      config.maxEvidenceAgeSeconds,
-    )) return;
-  const nowMs = Date.now();
-  const history = appendSample(order.id, spot, nowMs);
+      evaluationConfig.maxEvidenceAgeSeconds,
+    )) {
+    publishHotBlock(order, remainingQuantity, "hot evidence unavailable or exact identity changed", false);
+    return;
+  }
+  const history = appendSample(
+    order.id,
+    spotReceipt.value.price,
+    spotReceipt.receivedAtMs,
+    spotReceipt.value.publishedAtMs == null
+      ? null
+      : Math.min(spotReceipt.value.publishedAtMs, spotReceipt.receivedAtMs),
+    spotReceipt.value.sourceSequence ?? null,
+  );
   const entryWinningPrice = order.winningContractCost
     ?? (order.side === "yes" ? order.entryYesPrice : 1 - order.entryYesPrice);
   const floor = Math.max(0.01, Math.min(0.99, entryWinningPrice * 0.5));
   const executable = computeScalperExitExecutableDepth(
     order.side,
-    book.yesDepth,
-    book.noDepth,
+    bookReceipt.value.yesDepth,
+    bookReceipt.value.noDepth,
     remainingQuantity,
     floor,
   );
+  const nowMs = receiptAt;
   const input = buildInput({
-    order, target, history, book, remainingQuantity, entryWinningPrice,
+    order, target, history, book: bookReceipt.value, remainingQuantity, entryWinningPrice,
     executableQuantity: executable.quantity,
     executablePrice: executable.price,
     nowMs,
+    evaluationConfig,
+    quoteAtMs: spotReceipt.receivedAtMs,
+    bookAtMs: bookReceipt.receivedAtMs,
   });
   const decision = evaluateScalperExit(input);
   const evidence = {
     decision, input: { ...input, samples: history }, target,
     entryWinningPrice, executablePrice: executable.price, floor,
+    scheduler: {
+      schedulerMs: HOT_SCHEDULER_MS,
+      latestHotTickGapMs,
+      worstRecentHotTickGapMs,
+      coalescedHotOrderPasses,
+    },
   };
   latestEvaluations.set(order.id, {
     orderId: order.id, symbol: order.symbol, ticker: order.ticker, side: order.side,
-    mode: config.mode, remainingQuantity, ...decision, updatedAt: new Date(nowMs).toISOString(),
+    mode: evaluationConfig.mode, remainingQuantity, ...decision,
+    sampleGapMs: decision.latestGapMs,
+    schedulerGapMs: latestHotTickGapMs,
+    updatedAt: new Date(nowMs).toISOString(),
   });
-  await recordScalperExitEvaluation({
-    id: randomUUID(), scalpOrderId: order.id, mode: config.mode, symbol: order.symbol,
+  pendingEvaluationWrites.set(order.id, {
+    id: randomUUID(), scalpOrderId: order.id, mode: evaluationConfig.mode, symbol: order.symbol,
     ticker: order.ticker, windowKey: order.windowKey, side: order.side,
     remainingQuantity, evidence,
   });
   if (decision.disposition !== "exit") return;
+  if (version !== evaluationVersion || config.mode !== evaluationConfig.mode
+    || !config.enabled) return;
+  if (!isBeforeExpiry(order)) {
+    publishHotBlock(order, remainingQuantity, "market expired before ownership claim", false);
+    return;
+  }
   const lifecycle = await claimScalperExitLifecycle({
-    id: randomUUID(), scalpOrderId: order.id, mode: config.mode, symbol: order.symbol,
+    id: randomUUID(), scalpOrderId: order.id, mode: evaluationConfig.mode, symbol: order.symbol,
     ticker: order.ticker, windowKey: order.windowKey, side: order.side, remainingQuantity,
-    status: config.mode === "shadow" ? "advisory" : "requested",
+    status: evaluationConfig.mode === "shadow" ? "advisory" : "requested",
     triggerReason: decision.reason, evidence, executableQuantity: executable.quantity,
-    executablePrice: executable.price, entryWinningPrice, configVersion: version,
+    executablePrice: executable.price, entryWinningPrice, configVersion: evaluationVersion,
   });
-  if (!lifecycle.id || config.mode === "shadow") return;
+  if (!lifecycle.id || evaluationConfig.mode === "shadow") return;
   if (!lifecycle.claimed && lifecycle.status !== "zero_fill") return;
   await executeExit({
     order, lifecycleId: lifecycle.id, remainingQuantity, floor, history,
     expectedExchangeIndex: refreshedMarket.exchangeIndex,
+    configVersion: evaluationVersion,
+    exitMode: evaluationConfig.mode,
   });
 }
 
-async function monitor(): Promise<void> {
-  if (inFlight) return;
-  inFlight = true;
+async function refreshActiveOrders(): Promise<void> {
+  if (discoveryInFlight) return;
+  discoveryInFlight = true;
+  try {
+    if (!config.enabled || config.mode === "off") {
+      activeOrders.clear();
+      return;
+    }
+    const orders = await getUnsettledScalpOrders();
+    const eligible = orders.filter((order) =>
+      (order.status === "filled" || order.status === "paper")
+      && order.filledCount > 0
+      && expiry(order.windowKey) > Date.now()
+      && modeIncludesOrder(order));
+    const statesByOrder = await getScalperExitOrderStates(eligible.map((order) => order.id));
+    const nextIds = new Set<string>();
+    for (const order of eligible) {
+      const orderState = statesByOrder.get(order.id);
+      if (orderState?.hasUnresolvedOwner
+        || (config.mode === "shadow" && orderState?.hasShadowAdvisory)) {
+        continue;
+      }
+      const remainingQuantity = Math.max(
+        0,
+        order.filledCount - (orderState?.filledQuantity ?? 0),
+      );
+      if (remainingQuantity <= 0) continue;
+      nextIds.add(order.id);
+      activeOrders.set(order.id, { order, remainingQuantity });
+    }
+    for (const orderId of activeOrders.keys()) {
+      if (!nextIds.has(orderId)) {
+        activeOrders.delete(orderId);
+        samples.delete(orderId);
+        latestEvaluations.delete(orderId);
+        pendingEvaluationWrites.delete(orderId);
+      }
+    }
+    lastDiscoveryAtMs = Date.now();
+    lastError = null;
+  } catch (error) {
+    lastError = String(error);
+    logger.warn({ error }, "[kalshi-scalper-exit] active-order discovery failed closed");
+  } finally {
+    discoveryInFlight = false;
+  }
+}
+
+function noteHotTick(nowMs: number): void {
+  const cadence = hotCadence.recordTick(nowMs);
+  latestHotTickGapMs = cadence.latestGapMs;
+  worstRecentHotTickGapMs = cadence.worstRecentGapMs;
+}
+
+function runHotMonitorPass(): void {
+  noteHotTick(Date.now());
+  if (!config.enabled || config.mode === "off") return;
+  const evaluationConfig = { ...config };
+  const evaluationVersion = version;
+  const selection = selectScalperHotCandidates(
+    [...activeOrders.values()].map((candidate) => ({
+      ...candidate,
+      id: candidate.order.id,
+      lastSampleAtMs: samples.get(candidate.order.id)?.at(-1)?.atMs ?? 0,
+    })),
+    hotOrdersInFlight,
+    MAX_HOT_CONCURRENCY,
+  );
+  if (activeOrders.size > MAX_HOT_CONCURRENCY) {
+    hotOverloadBreaches += 1;
+    lastHotOverloadAtMs = Date.now();
+    const selectedIds = new Set(selection.selected.map((candidate) => candidate.id));
+    for (const candidate of activeOrders.values()) {
+      if (!selectedIds.has(candidate.order.id)
+        && !hotOrdersInFlight.has(candidate.order.id)) {
+        publishHotBlock(
+          candidate.order,
+          candidate.remainingQuantity,
+          "hot-lane capacity exceeded; evaluation deferred by oldest-sample priority",
+          true,
+        );
+      }
+    }
+  }
+  for (const candidate of selection.selected) {
+    hotOrdersInFlight.add(candidate.order.id);
+    void processOrder(
+      candidate.order,
+      candidate.remainingQuantity,
+      evaluationConfig,
+      evaluationVersion,
+    ).catch((error) => {
+      lastError = String(error);
+      logger.warn(
+        { error, orderId: candidate.order.id },
+        "[kalshi-scalper-exit] hot order evaluation failed closed",
+      );
+    }).finally(() => {
+      completedHotOrderPasses += 1;
+      hotOrdersInFlight.delete(candidate.order.id);
+    });
+  }
+  coalescedHotOrderPasses += selection.coalescedCount;
+}
+
+async function flushEvaluationWrites(): Promise<void> {
+  if (pendingEvaluationWrites.size === 0) return;
+  const writes = [...pendingEvaluationWrites.values()];
+  pendingEvaluationWrites.clear();
+  const results = await Promise.allSettled(writes.map((write) => recordScalperExitEvaluation(write)));
+  for (let index = 0; index < results.length; index++) {
+    if (results[index]!.status === "rejected") {
+      pendingEvaluationWrites.set(writes[index]!.scalpOrderId, writes[index]!);
+    }
+  }
+}
+
+async function runMaintenance(): Promise<void> {
+  if (maintenanceInFlight) return;
+  maintenanceInFlight = true;
   try {
     const now = Date.now();
+    if (now - lastEvaluationFlushAt >= 1_000) {
+      await flushEvaluationWrites();
+      lastEvaluationFlushAt = now;
+    }
     if (now - lastReconciledAt >= 5_000) {
       await reconcilePendingRequests();
       lastReconciledAt = now;
@@ -417,22 +792,12 @@ async function monitor(): Promise<void> {
       await finalizeSettledScalperExitLifecycles();
       lastSettlementAt = now;
     }
-    if (!config.enabled || config.mode === "off") return;
-    const orders = await getUnsettledScalpOrders();
-    const activeOrders = orders.filter((order) =>
-      (order.status === "filled" || order.status === "paper")
-      && order.filledCount > 0
-      && expiry(order.windowKey) > Date.now()
-      && modeIncludesOrder(order));
-    await Promise.allSettled(activeOrders.map((order) =>
-      processOrder(order).catch((error) => {
-        logger.warn({ error, orderId: order.id }, "[kalshi-scalper-exit] order evaluation failed closed");
-        throw error;
-      }),
-    ));
-    lastError = null;
-  } catch (error) { lastError = String(error); logger.warn({ error }, "[kalshi-scalper-exit] monitor failed closed"); }
-  finally { inFlight = false; }
+  } catch (error) {
+    lastError = String(error);
+    logger.warn({ error }, "[kalshi-scalper-exit] maintenance lane failed closed");
+  } finally {
+    maintenanceInFlight = false;
+  }
 }
 
 export async function initScalperSmartExit(): Promise<void> {
@@ -441,14 +806,42 @@ export async function initScalperSmartExit(): Promise<void> {
   config = loaded.config; version = loaded.version; started = true;
   await reconcilePendingRequests();
   await finalizeSettledScalperExitLifecycles();
-  if (timer) clearInterval(timer);
-  timer = setInterval(() => void monitor(), 1_000); timer.unref?.();
-  // A future monitor is intentionally only scheduled when enabled. This keeps
-  // the protected 250ms entry lane untouched while the exit subsystem is off.
-  logger.info({ mode: config.mode, enabled: config.enabled }, "[kalshi-scalper-exit] initialized isolated subsystem");
+  await refreshActiveOrders();
+  if (hotTimer) clearInterval(hotTimer);
+  if (discoveryTimer) clearInterval(discoveryTimer);
+  if (maintenanceTimer) clearInterval(maintenanceTimer);
+  hotTimer = setInterval(runHotMonitorPass, HOT_SCHEDULER_MS); hotTimer.unref?.();
+  discoveryTimer = setInterval(() => void refreshActiveOrders(), DISCOVERY_SCHEDULER_MS);
+  discoveryTimer.unref?.();
+  maintenanceTimer = setInterval(() => void runMaintenance(), MAINTENANCE_SCHEDULER_MS);
+  maintenanceTimer.unref?.();
+  logger.info({
+    mode: config.mode,
+    enabled: config.enabled,
+    hotSchedulerMs: HOT_SCHEDULER_MS,
+    discoverySchedulerMs: DISCOVERY_SCHEDULER_MS,
+  }, "[kalshi-scalper-exit] initialized isolated sub-second subsystem");
 }
 export function getScalperSmartExitStatus() {
-  return { started, config: { ...config }, configVersion: version, lastError, schedulerMs: 1_000,
+  return { started, config: { ...config }, configVersion: version, lastError,
+    schedulerMs: HOT_SCHEDULER_MS,
+    scheduler: {
+      hotSchedulerMs: HOT_SCHEDULER_MS,
+      discoverySchedulerMs: DISCOVERY_SCHEDULER_MS,
+      activeOrders: activeOrders.size,
+      activeEvaluations: hotOrdersInFlight.size,
+      latestHotTickGapMs,
+      worstRecentHotTickGapMs,
+      coalescedHotOrderPasses,
+      completedHotOrderPasses,
+      evidenceDeadlineMs: HOT_EVIDENCE_DEADLINE_MS,
+      evidenceDeadlineBreaches: hotEvidenceDeadlineBreaches,
+      overloadBreaches: hotOverloadBreaches,
+      lastOverloadAt: lastHotOverloadAtMs == null
+        ? null
+        : new Date(lastHotOverloadAtMs).toISOString(),
+      lastDiscoveryAt: lastDiscoveryAtMs == null ? null : new Date(lastDiscoveryAtMs).toISOString(),
+    },
     evaluations: [...latestEvaluations.values()],
     isolation: "dedicated_scalper_exit_ledger_and_exchange_boundary" };
 }

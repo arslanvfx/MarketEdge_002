@@ -6,7 +6,14 @@ import {
   evaluateScalperExit,
   isScalperExitEvidenceFetchFresh,
   type ScalperExitInput,
+  type ScalperExitSample,
 } from "./kalshi-scalper-smart-exit-policy.ts";
+import {
+  advanceScalperExitSamples,
+  AbortableRequestRegistry,
+  ScalperHotCadenceTracker,
+  selectScalperHotCandidates,
+} from "./kalshi-scalper-smart-exit-scheduler.ts";
 import { runClaimedScalperExitLifecycle } from "./kalshi-scalper-smart-exit-lifecycle.ts";
 import {
   buildScalpExitOrderBody,
@@ -20,9 +27,9 @@ function input(overrides: Partial<ScalperExitInput> = {}): ScalperExitInput {
     side: "yes",
     target: 100,
     samples: [
-      { atMs: 7_000, price: 102.2 },
-      { atMs: 8_000, price: 102.0 },
-      { atMs: 9_000, price: 101.5 },
+      { atMs: 7_750, price: 102.2 },
+      { atMs: 8_500, price: 102.0 },
+      { atMs: 9_250, price: 101.5 },
       { atMs: 10_000, price: 100.7 },
     ],
     nowMs,
@@ -53,9 +60,9 @@ test("YES and NO use side-aware adverse acceleration toward target", () => {
   const no = evaluateScalperExit(input({
     side: "no",
     samples: [
-      { atMs: 7_000, price: 97.8 },
-      { atMs: 8_000, price: 98.0 },
-      { atMs: 9_000, price: 98.5 },
+      { atMs: 7_750, price: 97.8 },
+      { atMs: 8_500, price: 98.0 },
+      { atMs: 9_250, price: 98.5 },
       { atMs: 10_000, price: 99.3 },
     ],
   }));
@@ -73,9 +80,9 @@ test("fails closed on stale evidence, target retreat, and insufficient depth", (
   })).disposition, "blocked");
   assert.equal(evaluateScalperExit(input({
     samples: [
-      { atMs: 7_000, price: 100.7 },
-      { atMs: 8_000, price: 101.0 },
-      { atMs: 9_000, price: 101.4 },
+      { atMs: 7_750, price: 100.7 },
+      { atMs: 8_500, price: 101.0 },
+      { atMs: 9_250, price: 101.4 },
       { atMs: 10_000, price: 101.9 },
     ],
   })).disposition, "watch");
@@ -83,6 +90,162 @@ test("fails closed on stale evidence, target retreat, and insufficient depth", (
     executableQuantity: 9,
     depthAtFloor: false,
   })).disposition, "blocked");
+});
+
+test("projection rejects gaps and source timestamp freshness/order failures", () => {
+  assert.equal(evaluateScalperExit(input({
+    samples: [
+      { atMs: 7_000, price: 102.2 }, { atMs: 8_000, price: 102.0 },
+      { atMs: 9_000, price: 101.5 }, { atMs: 10_000, price: 100.7 },
+    ],
+  })).disposition, "blocked");
+  const sourced = [
+    { atMs: 7_750, price: 102.2, sourceAtMs: 7_740 },
+    { atMs: 8_500, price: 102.0, sourceAtMs: 8_490 },
+    { atMs: 9_250, price: 101.5, sourceAtMs: 9_240 },
+    { atMs: 10_000, price: 100.7, sourceAtMs: 9_990 },
+  ];
+  assert.equal(evaluateScalperExit(input({ samples: sourced })).disposition, "exit");
+  assert.equal(evaluateScalperExit(input({
+    samples: sourced.map((sample, index) => ({ ...sample, sourceAtMs: index === 3 ? 9_000 : sample.sourceAtMs })),
+  })).disposition, "blocked");
+  assert.equal(evaluateScalperExit(input({
+    samples: sourced.map((sample, index) => ({ ...sample, sourceAtMs: index === 3 ? 10_001 : sample.sourceAtMs })),
+  })).disposition, "blocked");
+  assert.equal(evaluateScalperExit(input({
+    samples: sourced.map((sample, index) => ({ ...sample, sourceAtMs: index === 3 ? 7_000 : sample.sourceAtMs })),
+  })).disposition, "blocked");
+  assert.equal(evaluateScalperExit(input({
+    requireSourceTimestamps: true,
+    samples: sourced.map((sample, index) => index === 2
+      ? { atMs: sample.atMs, price: sample.price }
+      : sample),
+  })).disposition, "blocked");
+  assert.equal(evaluateScalperExit(input({
+    samples: sourced,
+    nowMs: 20_000,
+    quoteAtMs: 20_000,
+    bookAtMs: 20_000,
+    expiresAtMs: 20_000,
+  })).disposition, "blocked");
+});
+
+test("clock-controlled hot cadence and contention stay bounded without starving the oldest sample", () => {
+  const cadence = new ScalperHotCadenceTracker(3);
+  cadence.recordTick(1_000);
+  cadence.recordTick(1_250);
+  cadence.recordTick(1_500);
+  cadence.recordTick(2_200);
+  cadence.recordTick(2_450);
+  assert.deepEqual(cadence.snapshot(), {
+    latestGapMs: 250,
+    worstRecentGapMs: 700,
+    tickCount: 5,
+  });
+  const candidates = [
+    { id: "new", lastSampleAtMs: 1_900 },
+    { id: "old", lastSampleAtMs: 1_000 },
+    { id: "busy", lastSampleAtMs: 500 },
+    { id: "middle", lastSampleAtMs: 1_500 },
+  ];
+  const selected = selectScalperHotCandidates(candidates, new Set(["busy"]), 3);
+  assert.deepEqual(selected.selected.map((row) => row.id), ["old", "middle"]);
+  assert.equal(selected.coalescedCount, 2);
+});
+
+test("source discontinuity resets the projection window and fresh observations recover promptly", () => {
+  let history: ScalperExitSample[] = [
+    { atMs: 1_000, price: 102, sourceAtMs: 990, sourceSequence: "a" },
+    { atMs: 1_250, price: 101.8, sourceAtMs: 1_240, sourceSequence: "b" },
+  ];
+  history = advanceScalperExitSamples(
+    history,
+    { atMs: 2_500, price: 101.5, sourceAtMs: 2_490, sourceSequence: "c" },
+  );
+  assert.equal(history.length, 1);
+  history = advanceScalperExitSamples(history, { atMs: 2_750, price: 101.2, sourceAtMs: 2_740, sourceSequence: "d" });
+  history = advanceScalperExitSamples(history, { atMs: 3_000, price: 100.9, sourceAtMs: 2_990, sourceSequence: "e" });
+  history = advanceScalperExitSamples(history, { atMs: 3_250, price: 100.6, sourceAtMs: 3_240, sourceSequence: "f" });
+  assert.equal(history.length, 4);
+  assert.deepEqual(
+    advanceScalperExitSamples(history, { atMs: 3_500, price: 100.4, sourceAtMs: 3_240, sourceSequence: "f" }),
+    history,
+  );
+  assert.deepEqual(
+    advanceScalperExitSamples(history, { atMs: 3_500, price: 100.4, sourceAtMs: null }),
+    history,
+  );
+});
+
+test("Pyth whole-second timestamps accept distinct authoritative updates without fabricating duplicates", () => {
+  const pythSamples: ScalperExitSample[] = [
+    { atMs: 9_250, price: 102.2, sourceAtMs: 9_000, sourceSequence: "9000:10220:10" },
+    { atMs: 9_500, price: 102.0, sourceAtMs: 9_000, sourceSequence: "9000:10200:10" },
+    { atMs: 9_750, price: 101.5, sourceAtMs: 9_000, sourceSequence: "9000:10150:10" },
+    { atMs: 10_000, price: 100.7, sourceAtMs: 9_000, sourceSequence: "9000:10070:10" },
+  ];
+  assert.equal(evaluateScalperExit(input({
+    samples: pythSamples,
+    requireSourceTimestamps: true,
+  })).disposition, "exit");
+  assert.equal(
+    advanceScalperExitSamples(
+      pythSamples,
+      { atMs: 10_250, price: 100.7, sourceAtMs: 9_000, sourceSequence: "9000:10070:10" },
+    ).length,
+    pythSamples.length,
+  );
+});
+
+test("aborting a hung coalesced request evicts only that generation and permits an immediate replacement", async () => {
+  const registry = new AbortableRequestRegistry<string>();
+  let firstAborted = false;
+  const first = registry.getOrCreate("BTC", (signal) => new Promise<string>((resolve) => {
+    signal.addEventListener("abort", () => {
+      firstAborted = true;
+      resolve("aborted");
+    }, { once: true });
+  }));
+  assert.equal(registry.getOrCreate("BTC", async () => "unexpected"), first);
+  first.abort();
+  assert.equal(firstAborted, true);
+  const second = registry.getOrCreate("BTC", async () => "fresh");
+  assert.notEqual(second, first);
+  assert.equal(await second.promise, "fresh");
+  assert.equal(await first.promise, "aborted");
+  assert.equal(registry.size(), 0);
+});
+
+test("robust projection rejects an outlier, tiny noise, and deceleration that stops short", () => {
+  const outlier = evaluateScalperExit(input({ samples: [
+    { atMs: 7_750, price: 102.0 }, { atMs: 8_500, price: 101.8 },
+    { atMs: 9_250, price: 101.6 }, { atMs: 10_000, price: 99.0 },
+  ] }));
+  assert.equal(outlier.disposition, "watch");
+  assert.match(outlier.reason, /outlier/);
+  assert.equal(evaluateScalperExit(input({ samples: [
+    { atMs: 7_750, price: 100.30 }, { atMs: 8_500, price: 100.29 },
+    { atMs: 9_250, price: 100.28 }, { atMs: 10_000, price: 100.27 },
+  ] })).disposition, "watch");
+  const decelerating = evaluateScalperExit(input({ samples: [
+    { atMs: 7_750, price: 103.0 }, { atMs: 8_500, price: 102.4 },
+    { atMs: 9_250, price: 102.0 }, { atMs: 10_000, price: 101.8 },
+  ] }));
+  assert.equal(decelerating.disposition, "watch");
+  assert.equal(decelerating.projectionState, "decelerates_before_target");
+});
+
+test("a harsh but insufficient trajectory does not qualify before reserve deadline", () => {
+  const result = evaluateScalperExit(input({
+    expiresAtMs: 14_000,
+    samples: [
+      { atMs: 7_750, price: 104.0 }, { atMs: 8_500, price: 103.5 },
+      { atMs: 9_250, price: 103.0 }, { atMs: 10_000, price: 102.5 },
+    ],
+  }));
+  assert.equal(result.disposition, "watch");
+  assert.ok((result.projectedCrossingSeconds ?? 0) > 1);
+  assert.equal(result.reserveSeconds, 3);
 });
 
 test("YES exits use converted NO depth and preserve the frozen proceeds floor", () => {
@@ -170,25 +333,24 @@ test("a blocked final revalidation releases ownership and a later valid trigger 
   assert.equal(submissions, 1);
 });
 
-test("acceleration is required independently of adverse velocity", () => {
+test("constant rapid sustained adverse velocity qualifies without acceleration", () => {
   const result = evaluateScalperExit(input({
     samples: [
-      { atMs: 7_000, price: 102.2 },
-      { atMs: 8_000, price: 101.6 },
-      { atMs: 9_000, price: 101.1 },
-      { atMs: 10_000, price: 100.7 },
+      { atMs: 7_750, price: 102.2 },
+      { atMs: 8_500, price: 101.6 },
+      { atMs: 9_250, price: 101.0 },
+      { atMs: 10_000, price: 100.4 },
     ],
   }));
-  assert.equal(result.disposition, "watch");
-  assert.match(result.reason, /not accelerating/);
+  assert.equal(result.disposition, "exit");
 });
 
 test("replay sensitivity changes only policy thresholds on the same snapshot", () => {
   const shared = input({
     samples: [
-      { atMs: 7_000, price: 102.0 },
-      { atMs: 8_000, price: 101.85 },
-      { atMs: 9_000, price: 101.55 },
+      { atMs: 7_750, price: 102.0 },
+      { atMs: 8_500, price: 101.85 },
+      { atMs: 9_250, price: 101.55 },
       { atMs: 10_000, price: 101.10 },
     ],
     currentWinningProbability: 0.64,

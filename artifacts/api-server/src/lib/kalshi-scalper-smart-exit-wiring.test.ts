@@ -22,16 +22,18 @@ test("filled positions use the configured spot product and refresh their exact m
   assert.match(service, /PRODUCT_BY_SYMBOL = new Map\(CRYPTO_COINS/);
   const processOrder = service.slice(
     service.indexOf("async function processOrder"),
-    service.indexOf("async function monitor"),
+    service.indexOf("async function refreshActiveOrders"),
   );
-  assert.match(processOrder, /getTickerFresh\(product\)/);
-  assert.doesNotMatch(processOrder, /getTickerFresh\(order\.symbol\)/);
-  assert.match(processOrder, /cachedMarket\?\.ticker === order\.ticker/);
-  assert.ok(
-    processOrder.indexOf("fetchKalshiTarget(")
-      < processOrder.indexOf("const refreshedMarket = getKalshiCachedData"),
+  assert.match(processOrder, /getHotSpotReceipt\(product\)/);
+  assert.doesNotMatch(processOrder, /getHotSpotReceipt\(order\.symbol\)/);
+  assert.match(processOrder, /getHotTarget\(order, cachedMarket\)/);
+  const targetHelper = service.slice(
+    service.indexOf("function getHotTarget"),
+    service.indexOf("async function withinHotEvidenceDeadline"),
   );
-  assert.match(processOrder, /cachedMarket\?\.ticker === order\.ticker[\s\S]*Promise\.resolve\(cachedMarket\.target\)[\s\S]*fetchKalshiTarget/);
+  assert.match(targetHelper, /cachedMarket\?\.ticker === order\.ticker/);
+  assert.match(targetHelper, /Promise\.resolve\(cachedMarket\.value\)/);
+  assert.match(targetHelper, /fetchKalshiTarget\(/);
 });
 
 test("final pre-submit spot validation uses the configured product rather than the display symbol", () => {
@@ -40,19 +42,64 @@ test("final pre-submit spot validation uses the configured product rather than t
     service.indexOf("async function processOrder"),
   );
   assert.match(execute, /PRODUCT_BY_SYMBOL\.get\(params\.order\.symbol\.toUpperCase\(\)\)/);
-  assert.match(execute, /getTickerFresh\(product\)/);
-  assert.doesNotMatch(execute, /getTickerFresh\(params\.order\.symbol\)/);
+  assert.match(execute, /getTickerFreshEvidence\(product, finalEvidenceController\.signal\)/);
+  assert.doesNotMatch(execute, /getTickerFreshEvidence\(params\.order\.symbol\)/);
 });
 
-test("the monitor excludes expired and cross-mode orders before concurrently evaluating active fills", () => {
-  const monitor = service.slice(
-    service.indexOf("async function monitor"),
-    service.indexOf("export async function initScalperSmartExit"),
+test("discovery excludes expired and cross-mode orders before warming the active-order read view", () => {
+  const discovery = service.slice(
+    service.indexOf("async function refreshActiveOrders"),
+    service.indexOf("function noteHotTick"),
   );
-  assert.match(monitor, /expiry\(order\.windowKey\) > Date\.now\(\)/);
-  assert.match(monitor, /modeIncludesOrder\(order\)/);
-  assert.match(monitor, /Promise\.allSettled\(activeOrders\.map/);
-  assert.doesNotMatch(monitor, /for \(const order of orders/);
+  assert.match(discovery, /expiry\(order\.windowKey\) > Date\.now\(\)/);
+  assert.match(discovery, /modeIncludesOrder\(order\)/);
+  assert.match(discovery, /getScalperExitOrderStates/);
+  assert.match(discovery, /hasUnresolvedOwner/);
+  assert.match(discovery, /activeOrders\.set/);
+});
+
+test("the 250ms hot lane is coalesced per order and bounded independently of maintenance", () => {
+  const hot = service.slice(
+    service.indexOf("function runHotMonitorPass"),
+    service.indexOf("async function flushEvaluationWrites"),
+  );
+  assert.match(service, /const HOT_SCHEDULER_MS = 250/);
+  assert.match(hot, /selectScalperHotCandidates/);
+  assert.match(hot, /hotOrdersInFlight\.add/);
+  assert.match(hot, /processOrder\(/);
+  assert.match(hot, /hotOrdersInFlight\.delete/);
+  assert.doesNotMatch(hot, /reconcilePendingRequests|finalizeSettledScalperExitLifecycles|getUnsettledScalpOrders/);
+});
+
+test("hot evidence is deadline-bounded and coalesced instead of spawning overlapping provider calls", () => {
+  assert.match(service, /const HOT_EVIDENCE_DEADLINE_MS = 700/);
+  assert.match(service, /hotSpotRequests\.getOrCreate\(product/);
+  assert.match(service, /hotBookRequests\.getOrCreate\(ticker/);
+  assert.match(service, /withinHotEvidenceDeadline\(Promise\.all/);
+  assert.match(service, /publishHotBlock\([\s\S]*hot evidence exceeded/);
+  assert.match(service, /spotRequest\.abort\(\)/);
+  assert.match(service, /targetRequest\.abort\(\)/);
+  assert.match(service, /bookRequest\.abort\(\)/);
+  assert.match(service, /hot-lane capacity exceeded; evaluation deferred/);
+});
+
+test("expiry is rechecked before ownership, durable request claim, and broker submission", () => {
+  const processOrder = service.slice(
+    service.indexOf("async function processOrder"),
+    service.indexOf("async function refreshActiveOrders"),
+  );
+  const execute = service.slice(
+    service.indexOf("async function executeExit"),
+    service.indexOf("async function processOrder"),
+  );
+  assert.match(processOrder, /market expired before ownership claim/);
+  assert.match(execute, /market expired before final revalidation/);
+  assert.match(execute, /market expired during final evidence fetch/);
+  assert.match(execute, /market expired before durable request claim/);
+  assert.match(execute, /market expired after durable request claim, before broker submit/);
+  const finalBoundary = execute.indexOf("market expired at final broker boundary");
+  const brokerSubmit = execute.indexOf("placeScalpExitOrderStrict");
+  assert.ok(finalBoundary >= 0 && finalBoundary < brokerSubmit);
 });
 
 test("live activation requires one authenticated request with mode and enabled", () => {
@@ -62,9 +109,13 @@ test("live activation requires one authenticated request with mode and enabled",
 });
 
 test("reconciliation and settlement continue while execution is disabled", () => {
-  const monitor = service.slice(service.indexOf("async function monitor"));
-  assert.ok(monitor.indexOf("reconcilePendingRequests()") < monitor.indexOf("!config.enabled"));
-  assert.ok(monitor.indexOf("finalizeSettledScalperExitLifecycles()") < monitor.indexOf("!config.enabled"));
+  const maintenance = service.slice(
+    service.indexOf("async function runMaintenance"),
+    service.indexOf("export async function initScalperSmartExit"),
+  );
+  assert.match(maintenance, /reconcilePendingRequests\(\)/);
+  assert.match(maintenance, /finalizeSettledScalperExitLifecycles\(\)/);
+  assert.doesNotMatch(maintenance, /!config\.enabled/);
 });
 
 test("successful live submit responses remain unresolved until authenticated history", () => {

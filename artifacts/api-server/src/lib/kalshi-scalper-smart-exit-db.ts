@@ -303,6 +303,35 @@ export async function getScalperExitFilledQuantity(scalpOrderId: string): Promis
     WHERE l.scalp_order_id=$1 AND r.status IN ('filled','partial')`, [scalpOrderId]);
   return Number(result.rows[0]?.quantity) || 0;
 }
+export interface ScalperExitOrderState {
+  filledQuantity: number;
+  hasUnresolvedOwner: boolean;
+  hasShadowAdvisory: boolean;
+}
+export async function getScalperExitOrderStates(
+  scalpOrderIds: readonly string[],
+): Promise<Map<string, ScalperExitOrderState>> {
+  if (scalpOrderIds.length === 0) return new Map();
+  const result = await pool.query(`SELECT l.scalp_order_id,
+      COALESCE(SUM(r.fill_quantity) FILTER (
+        WHERE r.status IN ('filled','partial')
+      ),0) AS quantity,
+      BOOL_OR(l.status IN ('requested','unknown')
+        OR r.status IN ('requested','unknown')) AS has_unresolved_owner,
+      BOOL_OR(l.status='advisory') AS has_shadow_advisory
+    FROM kalshi_scalper_exit_lifecycles l
+    LEFT JOIN kalshi_scalper_exit_requests r ON r.lifecycle_id=l.id
+    WHERE l.scalp_order_id = ANY($1::text[])
+    GROUP BY l.scalp_order_id`, [scalpOrderIds]);
+  return new Map(result.rows.map((row) => [
+    String(row.scalp_order_id),
+    {
+      filledQuantity: Number(row.quantity) || 0,
+      hasUnresolvedOwner: row.has_unresolved_owner === true,
+      hasShadowAdvisory: row.has_shadow_advisory === true,
+    },
+  ]));
+}
 export async function listPendingScalperExitRequests(): Promise<Record<string, unknown>[]> {
   return (await pool.query(`SELECT r.*, l.ticker,l.side,l.remaining_quantity,l.scalp_order_id,l.created_at AS lifecycle_created_at
     FROM kalshi_scalper_exit_requests r JOIN kalshi_scalper_exit_lifecycles l ON l.id=r.lifecycle_id

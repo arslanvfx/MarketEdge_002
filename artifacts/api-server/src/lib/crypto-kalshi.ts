@@ -126,6 +126,7 @@ export type OrderbookPrices = {
 
 export async function fetchOrderbookPrices(
   ticker: string,
+  signal?: AbortSignal,
 ): Promise<OrderbookPrices | null> {
   const keyId = process.env["KALSHI_API_KEY_ID"] ?? null;
   const rawKey = process.env["KALSHI_PRIVATE_KEY"] ?? null;
@@ -162,7 +163,9 @@ export async function fetchOrderbookPrices(
         "KALSHI-ACCESS-TIMESTAMP": tsMs,
         "KALSHI-ACCESS-SIGNATURE": signature,
       },
-      signal: AbortSignal.timeout(4000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(4000)])
+        : AbortSignal.timeout(4000),
     });
     if (!resp.ok) {
       logger.warn(
@@ -241,6 +244,7 @@ export async function fetchOrderbookPrices(
       noDepth: [],
     };
   } catch (err) {
+    if (signal?.aborted) return null;
     logger.warn(
       { ticker, err: err instanceof Error ? err.message : String(err) },
       "[kalshi] fetchOrderbookPrices: request failed",
@@ -249,7 +253,12 @@ export async function fetchOrderbookPrices(
   }
 }
 
-export async function fetchKalshiTarget(symbol: string, targetTime?: Date, forceRefresh = false): Promise<number | null> {
+export async function fetchKalshiTarget(
+  symbol: string,
+  targetTime?: Date,
+  forceRefresh = false,
+  signal?: AbortSignal,
+): Promise<number | null> {
   const sym = symbol.toUpperCase();
   const series = KALSHI_SERIES[sym];
   if (!series) return null;
@@ -271,7 +280,12 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
   try {
     const resp = await fetch(
       `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=10`,
-      { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) },
+      {
+        headers: { accept: "application/json" },
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(5000)])
+          : AbortSignal.timeout(5000),
+      },
     );
     if (!resp.ok) {
       // Log the actual HTTP status so production failures are diagnosable.
@@ -412,7 +426,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
       // endpoint which has access to live resting orders even when the public
       // market summary is stale or missing price fields.
       if (yesPrice == null && selected.ticker) {
-        const ob = await fetchOrderbookPrices(selected.ticker);
+        const ob = await fetchOrderbookPrices(selected.ticker, signal);
         if (ob != null) {
           const obYesAsk = ob.yesAsk;
           const obYesBid = ob.yesBid;
@@ -456,6 +470,7 @@ export async function fetchKalshiTarget(symbol: string, targetTime?: Date, force
     if (!targetTime && !forceRefresh) kalshiTargetCache.set(sym, { value: null, at: Date.now() });
     return null;
   } catch (err) {
+    if (signal?.aborted) return null;
     logger.warn(
       { sym, err: err instanceof Error ? err.message : String(err) },
       "[kalshi] fetchKalshiTarget: exception (network/timeout/parse error)",

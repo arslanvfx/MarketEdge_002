@@ -164,7 +164,7 @@ function ScalperSmartExitSection({
           <div>
             <h2 className="text-sm font-bold tracking-tight text-amber-50">High-Value Scalper · Fast Smart Exit</h2>
             <p className="mt-0.5 text-[10px] text-amber-100/50">
-              Dedicated 1-second owner, ledger, authenticated depth and reconciliation boundary.
+              Dedicated 250ms projection lane with isolated ownership, authenticated depth and reconciliation.
             </p>
           </div>
         </div>
@@ -206,7 +206,12 @@ function ScalperSmartExitSection({
             <div>
               <div className="text-[9px] font-black uppercase tracking-[0.18em] text-amber-200/65">Current fast evaluations</div>
               <div className="mt-1 font-mono text-[9px] text-amber-50/35">
-                {status?.started ? "MONITOR ONLINE" : "MONITOR OFFLINE"} · {status?.schedulerMs ?? 1_000}ms · v{status?.configVersion ?? 0}
+                {status?.started ? "MONITOR ONLINE" : "MONITOR OFFLINE"} · {status?.schedulerMs ?? 250}ms ·
+                {" "}gap {status?.scheduler?.latestHotTickGapMs?.toFixed(0) ?? "—"}ms ·
+                {" "}worst {status?.scheduler?.worstRecentHotTickGapMs?.toFixed(0) ?? "—"}ms ·
+                {" "}deadline breaches {status?.scheduler?.evidenceDeadlineBreaches ?? 0} ·
+                {" "}overload {status?.scheduler?.overloadBreaches ?? 0} ·
+                {" "}v{status?.configVersion ?? 0}
               </div>
             </div>
             <div className="flex rounded-md border border-amber-200/10 bg-black/40 p-0.5">
@@ -230,17 +235,17 @@ function ScalperSmartExitSection({
           <div className="max-h-64 overflow-auto">
             <table className="w-full min-w-[720px] text-left text-[10px]">
               <thead className="sticky top-0 bg-[#0a0907] text-[8px] uppercase tracking-wider text-amber-100/35">
-                <tr><th className="px-4 py-2">Market</th><th className="px-3 py-2">Decision</th><th className="px-3 py-2">Velocity / Accel</th><th className="px-3 py-2">Crossing</th><th className="px-3 py-2">Kalshi</th><th className="px-3 py-2">Qty</th></tr>
+                <tr><th className="px-4 py-2">Market</th><th className="px-3 py-2">Decision</th><th className="px-3 py-2">Velocity / Noise</th><th className="px-3 py-2">Projection</th><th className="px-3 py-2">Cadence</th><th className="px-3 py-2">Kalshi / Qty</th></tr>
               </thead>
               <tbody>
                 {(status?.evaluations ?? []).map((evaluation) => (
                   <tr key={evaluation.orderId} className="border-t border-amber-200/[0.06] text-amber-50/75">
                     <td className="px-4 py-2"><span className="font-bold text-amber-100">{evaluation.symbol}</span><div className="max-w-32 truncate font-mono text-[8px] text-amber-100/35">{evaluation.ticker}</div></td>
                     <td className="px-3 py-2"><span className={`rounded border px-1.5 py-0.5 font-black uppercase ${evaluation.disposition === "exit" ? "border-red-400/40 bg-red-500/15 text-red-200" : evaluation.disposition === "blocked" ? "border-amber-400/30 bg-amber-400/10 text-amber-200" : "border-white/10 bg-white/5 text-white/55"}`}>{evaluation.disposition}</span><div className="mt-1 max-w-48 truncate text-[8px] text-amber-50/35" title={evaluation.reason}>{evaluation.reason}</div></td>
-                    <td className="px-3 py-2 font-mono">{evaluation.adverseVelocityPerSecond?.toFixed(3) ?? "—"} / {evaluation.adverseAccelerationPerSecond2?.toFixed(3) ?? "—"}</td>
-                    <td className="px-3 py-2 font-mono">{evaluation.projectedCrossingSeconds?.toFixed(1) ?? "—"}s <span className="text-amber-100/30">/ {evaluation.secondsRemaining.toFixed(1)}s</span></td>
-                    <td className="px-3 py-2 font-mono">{evaluation.marketDeterioration == null ? "—" : `${(evaluation.marketDeterioration * 100).toFixed(1)}¢`}</td>
-                    <td className="px-3 py-2 font-mono">{evaluation.remainingQuantity}</td>
+                    <td className="px-3 py-2 font-mono">{evaluation.normalizedAdverseVelocityPctPerSecond?.toFixed(3) ?? "—"}%/s<div className="text-[8px] text-amber-100/30">noise {evaluation.noiseFloorPctPerSecond?.toFixed(3) ?? "—"}%</div></td>
+                    <td className="px-3 py-2 font-mono">{evaluation.projectedCrossingSeconds?.toFixed(1) ?? "—"}s <span className="text-amber-100/30">/ {evaluation.secondsRemaining.toFixed(1)}s</span><div className="text-[8px] text-amber-100/30">{evaluation.projectionState ?? "—"} · reserve {evaluation.reserveSeconds ?? "—"}s</div></td>
+                    <td className="px-3 py-2 font-mono">{evaluation.latestGapMs?.toFixed(0) ?? "—"}ms<div className="text-[8px] text-amber-100/30">worst {evaluation.worstGapMs?.toFixed(0) ?? "—"} · source {evaluation.sourceAgeMs?.toFixed(0) ?? "—"}ms</div></td>
+                    <td className="px-3 py-2 font-mono">{evaluation.marketDeterioration == null ? "—" : `${(evaluation.marketDeterioration * 100).toFixed(1)}%`}<div className="text-[8px] text-amber-100/30">qty {evaluation.remainingQuantity}</div></td>
                   </tr>
                 ))}
                 {!status?.evaluations?.length && <tr><td colSpan={6} className="px-4 py-8 text-center font-mono text-amber-50/30">No filled Scalper positions are currently being monitored.</td></tr>}

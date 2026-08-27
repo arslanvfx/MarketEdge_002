@@ -972,6 +972,20 @@ export interface ScalperSmartExitEvaluation {
   secondsRemaining: number;
   marketDeterioration: number | null;
   confirmationCount: number;
+  normalizedAdverseVelocityPctPerSecond: number | null;
+  normalizedAdverseAccelerationPctPerSecond2: number | null;
+  volatilityPctPerSecond: number | null;
+  noiseFloorPctPerSecond: number | null;
+  projectedPriceAtDeadline: number | null;
+  reserveSeconds: number | null;
+  sampleCount: number;
+  latestGapMs: number | null;
+  worstGapMs: number | null;
+  sourceAgeMs: number | null;
+  projectionMethod: string | null;
+  projectionState: string | null;
+  sampleGapMs?: number | null;
+  schedulerGapMs?: number | null;
   updatedAt: string;
 }
 
@@ -981,6 +995,21 @@ export interface ScalperSmartExitStatus {
   configVersion: number;
   lastError: string | null;
   schedulerMs: number;
+  scheduler?: {
+    hotSchedulerMs: number;
+    discoverySchedulerMs: number;
+    activeOrders: number;
+    activeEvaluations: number;
+    latestHotTickGapMs: number | null;
+    worstRecentHotTickGapMs: number | null;
+    coalescedHotOrderPasses: number;
+    completedHotOrderPasses: number;
+    evidenceDeadlineMs: number;
+    evidenceDeadlineBreaches: number;
+    overloadBreaches: number;
+    lastOverloadAt: string | null;
+    lastDiscoveryAt: string | null;
+  };
   evaluations: ScalperSmartExitEvaluation[];
   isolation: string;
 }

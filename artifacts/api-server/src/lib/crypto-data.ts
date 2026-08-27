@@ -107,9 +107,16 @@ export interface CoinStats {
 // Fetch helpers with short in-memory caches
 // ---------------------------------------------------------------------------
 
-export async function fetchJson<T>(url: string, timeoutMs = 8000): Promise<T> {
+export async function fetchJson<T>(
+  url: string,
+  timeoutMs = 8000,
+  signal?: AbortSignal,
+): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const abortFromCaller = () => ctrl.abort();
+  if (signal?.aborted) ctrl.abort();
+  else signal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
     const res = await fetch(url, {
       headers: { "User-Agent": UA, Accept: "application/json" },
@@ -119,6 +126,7 @@ export async function fetchJson<T>(url: string, timeoutMs = 8000): Promise<T> {
     return (await res.json()) as T;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
@@ -193,11 +201,13 @@ function pythSymbol(product: string): string {
 // symbol via the search endpoint, then cached for the process lifetime.
 const pythFeedIdCache = new Map<string, string>();
 
-async function getPythFeedId(symbol: string): Promise<string> {
+async function getPythFeedId(symbol: string, signal?: AbortSignal): Promise<string> {
   const hit = pythFeedIdCache.get(symbol);
   if (hit) return hit;
   const results = await fetchJson<Array<{ id: string; attributes: { symbol?: string } }>>(
     `${PYTH_HERMES}/v2/price_feeds?query=${encodeURIComponent(symbol.split(".").pop() ?? symbol)}`,
+    8_000,
+    signal,
   );
   const match = results.find((r) => r.attributes?.symbol === symbol);
   if (!match) throw new Error(`Pyth feed id not found for ${symbol}`);
@@ -214,8 +224,10 @@ const PYTH_SPOT_MAX_AGE_S = 60;
 export const PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S = 5;
 export interface FreshTickerEvidence {
   price: number;
-  /** Pyth oracle publish time; null for Coinbase products. */
+  /** Authoritative source event time when the provider exposes one. */
   publishedAtMs: number | null;
+  /** Provider update identity (Pyth price fingerprint or Coinbase trade id). */
+  sourceSequence?: string | null;
 }
 
 /**
@@ -232,12 +244,15 @@ async function fetchPythSpot(
 async function fetchPythSpotEvidence(
   product: string,
   maxAgeSeconds = PYTH_SPOT_MAX_AGE_S,
+  signal?: AbortSignal,
 ): Promise<FreshTickerEvidence> {
   const sym = pythSymbol(product);
-  const id = await getPythFeedId(sym);
+  const id = await getPythFeedId(sym, signal);
   const body = await fetchJson<{
-    parsed?: Array<{ id: string; price: { price: string; expo: number; publish_time: number } }>;
-  }>(`${PYTH_HERMES}/v2/updates/price/latest?ids[]=${id}`, 5000);
+    parsed?: Array<{ id: string; price: {
+      price: string; conf?: string; expo: number; publish_time: number;
+    } }>;
+  }>(`${PYTH_HERMES}/v2/updates/price/latest?ids[]=${id}`, 5000, signal);
   const p = body.parsed?.[0]?.price;
   if (!p) throw new Error(`Pyth spot unavailable for ${sym}`);
   const ageS = Date.now() / 1000 - p.publish_time;
@@ -246,7 +261,11 @@ async function fetchPythSpotEvidence(
   }
   const price = Number(p.price) * Math.pow(10, p.expo);
   if (!Number.isFinite(price) || price <= 0) throw new Error(`Pyth spot invalid for ${sym}`);
-  return { price, publishedAtMs: p.publish_time * 1_000 };
+  return {
+    price,
+    publishedAtMs: p.publish_time * 1_000,
+    sourceSequence: `${p.publish_time}:${p.price}:${p.conf ?? ""}`,
+  };
 }
 
 /** Pyth Benchmarks TradingView-shim OHLC history → Candle[] (v always 0). */
@@ -307,7 +326,10 @@ export async function getTickerFresh(product: string): Promise<number> {
 }
 
 /** Fresh price with source publish metadata for execution-critical consumers. */
-export async function getTickerFreshEvidence(product: string): Promise<FreshTickerEvidence> {
+export async function getTickerFreshEvidence(
+  product: string,
+  signal?: AbortSignal,
+): Promise<FreshTickerEvidence> {
   if (isPythProduct(product)) {
     // fetchPythSpot enforces the publish-age ceiling and throws when the feed
     // is stale/closed — the conviction tick feed treats a throw as a failed
@@ -316,16 +338,24 @@ export async function getTickerFreshEvidence(product: string): Promise<FreshTick
     const evidence = await fetchPythSpotEvidence(
       product,
       PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S,
+      signal,
     );
     tickerCache.set(product, { at: Date.now(), value: evidence.price });
     return evidence;
   }
   const raw = await fetchJson<Record<string, string>>(
     `${COINBASE}/products/${product}/ticker`,
+    8_000,
+    signal,
   );
   const price = parseFloat(raw.price ?? "0");
   if (price > 0) tickerCache.set(product, { at: Date.now(), value: price });
-  return { price, publishedAtMs: null };
+  const publishedAtMs = raw.time ? Date.parse(raw.time) : Number.NaN;
+  return {
+    price,
+    publishedAtMs: Number.isFinite(publishedAtMs) ? publishedAtMs : null,
+    sourceSequence: raw.trade_id ?? (raw.time ? `${raw.time}:${raw.price ?? ""}` : null),
+  };
 }
 
 export async function getCandles(product: string): Promise<Candle[]> {

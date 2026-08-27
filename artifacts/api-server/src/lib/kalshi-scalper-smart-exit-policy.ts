@@ -19,7 +19,13 @@ export const DEFAULT_SCALPER_EXIT_CONFIG: Readonly<ScalperExitConfig> = Object.f
   maxEvidenceAgeSeconds: 2,
 });
 
-export interface ScalperExitSample { atMs: number; price: number; }
+/** Source fields are optional only for legacy replay evidence, never live execution. */
+export interface ScalperExitSample {
+  atMs: number;
+  price: number;
+  sourceAtMs?: number | null;
+  sourceSequence?: string | null;
+}
 export interface ScalperExitInput {
   side: ScalperExitSide;
   target: number | null;
@@ -34,6 +40,7 @@ export interface ScalperExitInput {
   remainingQuantity: number;
   depthAtFloor: boolean;
   config: ScalperExitConfig;
+  requireSourceTimestamps?: boolean;
 }
 export interface ScalperExitDecision {
   disposition: "off" | "blocked" | "watch" | "exit";
@@ -45,6 +52,18 @@ export interface ScalperExitDecision {
   secondsRemaining: number;
   marketDeterioration: number | null;
   confirmationCount: number;
+  normalizedAdverseVelocityPctPerSecond: number | null;
+  normalizedAdverseAccelerationPctPerSecond2: number | null;
+  volatilityPctPerSecond: number | null;
+  noiseFloorPctPerSecond: number | null;
+  projectedPriceAtDeadline: number | null;
+  reserveSeconds: number | null;
+  sampleCount: number;
+  latestGapMs: number | null;
+  worstGapMs: number | null;
+  sourceAgeMs: number | null;
+  projectionMethod: string | null;
+  projectionState: string | null;
 }
 
 const PRESETS: Readonly<Record<ScalperExitSensitivity, Readonly<{
@@ -122,58 +141,135 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
     distancePct: null, projectedCrossingSeconds: null,
     secondsRemaining: Math.max(0, (input.expiresAtMs - input.nowMs) / 1_000),
     marketDeterioration: null, confirmationCount: 0,
+    normalizedAdverseVelocityPctPerSecond: null, normalizedAdverseAccelerationPctPerSecond2: null,
+    volatilityPctPerSecond: null, noiseFloorPctPerSecond: null, projectedPriceAtDeadline: null,
+    reserveSeconds: null, sampleCount: 0, latestGapMs: null, worstGapMs: null,
+    sourceAgeMs: null, projectionMethod: null, projectionState: null,
   });
   if (!input.config.enabled || input.config.mode === "off") return empty("off", "scalper exit disabled");
+  if (!Number.isFinite(input.expiresAtMs) || input.nowMs >= input.expiresAtMs) {
+    return empty("blocked", "market already expired");
+  }
   const age = input.config.maxEvidenceAgeSeconds * 1_000;
   if (!Number.isFinite(input.target) || input.target! <= 0) return empty("blocked", "missing authoritative target");
-  if (input.samples.length < 3) return empty("blocked", "insufficient post-entry samples");
+  if (input.samples.length < 4) return empty("blocked", "insufficient post-entry samples");
   if (input.quoteAtMs == null || input.bookAtMs == null || input.nowMs - input.quoteAtMs > age || input.nowMs - input.bookAtMs > age) {
     return empty("blocked", "stale or missing authenticated quote/book");
   }
-  const samples = input.samples.slice(-6);
-  if (samples.some((sample) => !Number.isFinite(sample.price) || sample.price <= 0 || sample.atMs > input.nowMs)
+  // A bounded window makes this pure policy insensitive to old replay history,
+  // while retaining enough 250ms observations to reject a single bad tick.
+  const samples = input.samples.slice(-28);
+  if (samples.some((sample) => !Number.isFinite(sample.price) || sample.price <= 0
+    || !Number.isFinite(sample.atMs) || sample.atMs > input.nowMs)
     || input.nowMs - samples[samples.length - 1]!.atMs > age) {
     return empty("blocked", "stale or invalid post-entry sample");
+  }
+  const gaps = samples.slice(1).map((sample, index) => sample.atMs - samples[index]!.atMs);
+  const latestGapMs = gaps[gaps.length - 1] ?? null;
+  const worstGapMs = gaps.length ? Math.max(...gaps) : null;
+  if (gaps.some((gap) => gap <= 0 || gap > 900)) return empty("blocked", "sample cadence is discontinuous");
+  const sourced = samples.filter((sample) => sample.sourceAtMs != null);
+  if (input.requireSourceTimestamps && samples.some((sample) =>
+    sample.sourceAtMs == null || !sample.sourceSequence)) {
+    return empty("blocked", "authoritative source timestamp or update identity missing");
+  }
+  const sourceAgeMs = sourced.length ? input.nowMs - sourced[sourced.length - 1]!.sourceAtMs! : null;
+  if (sourced.some((sample) => !Number.isFinite(sample.sourceAtMs) || sample.sourceAtMs! > input.nowMs
+    || sample.sourceAtMs! > sample.atMs)
+    || (sourceAgeMs != null && sourceAgeMs > age)
+    || sourced.some((sample, index) => index > 0 && sample.sourceAtMs! < sourced[index - 1]!.sourceAtMs!)
+    || samples.some((sample, index) => index > 0
+      && sample.sourceAtMs === samples[index - 1]!.sourceAtMs
+      && sample.sourceSequence != null
+      && sample.sourceSequence === samples[index - 1]!.sourceSequence)) {
+    return empty("blocked", "stale, future, or out-of-order source timestamp");
   }
   if (input.remainingQuantity <= 0 || input.executableQuantity < input.remainingQuantity || !input.depthAtFloor) {
     return empty("blocked", "fresh depth does not cover remaining quantity at floor");
   }
   const last = samples[samples.length - 1]!;
-  const prior = samples[samples.length - 2]!;
-  const first = samples[0]!;
-  const dt = (last.atMs - prior.atMs) / 1_000;
-  const fullDt = (last.atMs - first.atMs) / 1_000;
-  if (dt <= 0 || dt > 2.5 || fullDt <= 0) return empty("blocked", "sample cadence is discontinuous");
-  const rawVelocity = (last.price - prior.price) / dt;
-  const adverseVelocity = input.side === "yes" ? -rawVelocity : rawVelocity;
-  const priorVelocity = (prior.price - samples[samples.length - 3]!.price) / ((prior.atMs - samples[samples.length - 3]!.atMs) / 1_000);
-  const adversePriorVelocity = input.side === "yes" ? -priorVelocity : priorVelocity;
-  const acceleration = (adverseVelocity - adversePriorVelocity) / dt;
+  const direction = input.side === "yes" ? -1 : 1;
+  const velocities = samples.slice(1).map((sample, index) =>
+    direction * (sample.price - samples[index]!.price) / ((sample.atMs - samples[index]!.atMs) / 1_000));
+  const weightedMedian = (values: readonly number[]): number => {
+    const weighted = values.map((value, index) => ({ value, weight: index + 1 })).sort((a, b) => a.value - b.value);
+    const half = weighted.reduce((sum, row) => sum + row.weight, 0) / 2;
+    let total = 0;
+    for (const row of weighted) { total += row.weight; if (total >= half) return row.value; }
+    return weighted[weighted.length - 1]!.value;
+  };
+  const adverseVelocity = weightedMedian(velocities);
+  const deviations = velocities.map((velocity) => Math.abs(velocity - adverseVelocity));
+  // MAD is resistant to one print; the absolute floor prevents tiny monotonic
+  // quote noise from being promoted to a trajectory.
+  const volatility = weightedMedian(deviations) * 1.4826;
+  const noiseFloor = Math.max(input.target! * 0.0005, volatility * 0.25);
+  const isolatedOutlier = velocities.length >= 3
+    && Math.abs(velocities[velocities.length - 1]! - adverseVelocity) > Math.max(noiseFloor * 4, input.target! * 0.02);
+  const accelerations = velocities.slice(1).map((velocity, index) =>
+    (velocity - velocities[index]!) / ((samples[index + 2]!.atMs - samples[index + 1]!.atMs) / 1_000));
+  const measuredAcceleration = accelerations.length ? weightedMedian(accelerations) : 0;
+  // Keep projections physical: acceleration is capped rather than allowing an
+  // isolated interval to predict an arbitrary future price.
+  const acceleration = Math.max(-input.target! * 0.08, Math.min(input.target! * 0.08, measuredAcceleration));
   const distance = input.side === "yes" ? last.price - input.target! : input.target! - last.price;
   const distancePct = Math.abs(distance) / input.target! * 100;
-  const crossing = distance <= 0 ? 0 : adverseVelocity > 0 ? distance / adverseVelocity : null;
   const remaining = Math.max(0, (input.expiresAtMs - input.nowMs) / 1_000);
   const deterioration = input.currentWinningProbability != null && input.entryWinningProbability > 0
     ? Math.max(0, (input.entryWinningProbability - input.currentWinningProbability) / input.entryWinningProbability) : null;
   const preset = PRESETS[resolveScalperExitSensitivity(input.config.sensitivity)];
+  // The conservative trajectory starts below robust velocity by its noise
+  // allowance. Positive acceleration is useful but never required; negative
+  // acceleration explicitly stops the projection when it runs out of speed.
+  const projectedVelocity = Math.max(0, adverseVelocity - noiseFloor);
+  const horizon = Math.max(0, remaining - preset.reserveSeconds);
+  const stoppingDistance = acceleration < 0 ? projectedVelocity * projectedVelocity / (-2 * acceleration) : Infinity;
+  let crossing: number | null = null;
+  let projectionState = "no_adverse_trajectory";
+  if (distance <= 0) { crossing = 0; projectionState = "already_at_target"; }
+  else if (projectedVelocity > 0 && stoppingDistance + 1e-9 >= distance) {
+    if (Math.abs(acceleration) < 1e-9) crossing = distance / projectedVelocity;
+    else {
+      const discriminant = projectedVelocity * projectedVelocity + 2 * acceleration * distance;
+      if (discriminant >= 0) crossing = (-projectedVelocity + Math.sqrt(discriminant)) / acceleration;
+    }
+    projectionState = crossing == null || crossing < 0 ? "cannot_reach_target" : "quadratic_robust";
+  } else if (acceleration < 0) projectionState = "decelerates_before_target";
+  else projectionState = "below_noise_floor";
+  const projectionHorizon = acceleration < 0
+    ? Math.min(horizon, projectedVelocity / -acceleration)
+    : horizon;
+  const projectedProgress = projectedVelocity * projectionHorizon
+    + 0.5 * acceleration * projectionHorizon * projectionHorizon;
+  const projectedPrice = input.side === "yes"
+    ? last.price - Math.max(0, projectedProgress)
+    : last.price + Math.max(0, projectedProgress);
   let confirmations = 0;
   for (let index = samples.length - 1; index > 0; index--) {
-    const a = samples[index - 1]!, b = samples[index]!;
-    const velocity = (b.price - a.price) / ((b.atMs - a.atMs) / 1_000);
-    if ((input.side === "yes" ? -velocity : velocity) > 0) confirmations++; else break;
+    if (velocities[index - 1]! >= Math.max(noiseFloor, input.target! * preset.minVelocityPctPerSecond / 100)) confirmations++; else break;
   }
   const common = { adverseVelocityPerSecond: adverseVelocity, adverseAccelerationPerSecond2: acceleration, distancePct,
-    projectedCrossingSeconds: crossing, secondsRemaining: remaining, marketDeterioration: deterioration, confirmationCount: confirmations };
-  const crossingPlausible = crossing !== null && crossing <= Math.max(0, remaining - preset.reserveSeconds);
-  const rapid = adverseVelocity / input.target! * 100 >= preset.minVelocityPctPerSecond;
-  const accelerating = acceleration / input.target! * 100 >= preset.minAccelerationPctPerSecond2;
+    projectedCrossingSeconds: crossing, secondsRemaining: remaining, marketDeterioration: deterioration, confirmationCount: confirmations,
+    normalizedAdverseVelocityPctPerSecond: adverseVelocity / input.target! * 100,
+    normalizedAdverseAccelerationPctPerSecond2: acceleration / input.target! * 100,
+    volatilityPctPerSecond: volatility / input.target! * 100, noiseFloorPctPerSecond: noiseFloor / input.target! * 100,
+    projectedPriceAtDeadline: projectedPrice, reserveSeconds: preset.reserveSeconds, sampleCount: samples.length,
+    latestGapMs, worstGapMs, sourceAgeMs, projectionMethod: "weighted-median-mad-bounded-quadratic", projectionState };
+  const crossingPlausible = remaining > preset.reserveSeconds
+    && crossing !== null
+    && crossing <= remaining - preset.reserveSeconds;
+  // Preset velocity is a normalized, per-second minimum.  Acceleration is
+  // telemetry/projection input, deliberately not an independent exit gate.
+  const rapid = projectedVelocity / input.target! * 100 >= preset.minVelocityPctPerSecond;
   const deteriorated = deterioration !== null && deterioration >= preset.minDeterioration;
-  if (rapid && accelerating && crossingPlausible && deteriorated && confirmations >= preset.confirmations) {
+  if (rapid && crossingPlausible && deteriorated && confirmations >= preset.confirmations) {
+    if (isolatedOutlier) {
+      return { disposition: "watch", reason: "latest adverse print is an isolated trajectory outlier", ...common };
+    }
     return { disposition: "exit", reason: "confirmed rapid adverse target-crossing with Kalshi deterioration", ...common };
   }
   return { disposition: "watch", reason: !crossingPlausible
     ? "target crossing not plausible before expiry"
-    : !accelerating
-      ? "adverse movement is not accelerating"
+    : !rapid ? "adverse trajectory is below conservative signal floor"
       : "awaiting repeated adverse confirmation or Kalshi deterioration", ...common };
 }
