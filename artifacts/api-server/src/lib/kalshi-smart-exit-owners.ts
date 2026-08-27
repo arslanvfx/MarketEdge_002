@@ -12,8 +12,10 @@ import { closePosition } from "./kalshi-bot-close.ts";
 import { fetchOrderbookPrices, getKalshiCachedData } from "./crypto-kalshi.ts";
 import type { SmartExitPosition } from "./kalshi-smart-exit-types.ts";
 import {
+  combineSmartExitExecutionConstraints,
   computeSmartExitExecutionLimit,
   smartExitIdentityMatches,
+  type SmartExitExecutionConstraint,
 } from "./kalshi-smart-exit-execution.ts";
 
 export type SmartExitOwnerCloseResult =
@@ -40,21 +42,16 @@ function regularIdentityMatches(
 export async function requestSmartExitFromOwner(params: {
   position: SmartExitPosition;
   parameterVersion: string;
-  executionConstraint: {
-    minimumWinningPrice: number;
-    evaluatedBookObservedAtSeconds: number;
-    maximumEvidenceAgeSeconds: number;
-    evidenceExpiresAtSeconds: number;
-  };
+  executionConstraint: SmartExitExecutionConstraint;
   isVersionStillAuthorized: (
     position: SmartExitPosition,
     parameterVersion: string,
   ) => boolean;
-  revalidateRisk: () => Promise<boolean>;
-  isRiskStillValid: () => boolean;
+  revalidateRisk: () => Promise<SmartExitExecutionConstraint | null>;
+  isRiskStillValid: (boundMinimumWinningPrice: number) => boolean;
 }): Promise<SmartExitOwnerCloseResult> {
   const { position, parameterVersion } = params;
-  const constraint = params.executionConstraint;
+  let constraint = params.executionConstraint;
   if (position.owner.kind === "scalper") {
     return {
       outcome: "blocked",
@@ -99,8 +96,13 @@ export async function requestSmartExitFromOwner(params: {
   ) {
     return { outcome: "blocked", reason: "fresh exact regular market quote is stale" };
   }
-  if (!await params.revalidateRisk()) {
+  const revalidatedConstraint = await params.revalidateRisk();
+  if (!revalidatedConstraint) {
     return { outcome: "blocked", reason: "fresh spot trajectory or target risk no longer authorizes exit" };
+  }
+  constraint = combineSmartExitExecutionConstraints(constraint, revalidatedConstraint);
+  if (Date.now() / 1_000 > constraint.evidenceExpiresAtSeconds) {
+    return { outcome: "blocked", reason: "fresh economic execution constraint expired before depth check" };
   }
 
   const freshBook = await fetchOrderbookPrices(position.ticker);
@@ -122,7 +124,7 @@ export async function requestSmartExitFromOwner(params: {
   try {
     const finalGuard = () => {
       if (!params.isVersionStillAuthorized(position, parameterVersion)) return false;
-      if (!params.isRiskStillValid()) return false;
+      if (!params.isRiskStillValid(constraint.minimumWinningPrice)) return false;
       if (!regularIdentityMatches(openPositions.get(symbol), position)) return false;
       if (Date.now() / 1_000 > constraint.evidenceExpiresAtSeconds) return false;
       const latestMarket = getKalshiCachedData(symbol);

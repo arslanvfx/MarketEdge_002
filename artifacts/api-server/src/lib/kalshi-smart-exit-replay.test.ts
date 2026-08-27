@@ -172,6 +172,110 @@ test("durable replay uses the same sensitivity debounce boundaries as live polic
   )[0]!.candidateExit?.timestampSeconds, 44);
 });
 
+test("durable replay preserves value after persistent losing-side spot and Kalshi depth pressure", () => {
+  const settlement = {
+    owner: "regular" as const,
+    positionId: "late-btc",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 700,
+    expiryTimestampSeconds: 900,
+    entryContractCost: 0.85,
+    quantity: 1,
+    holdToExpiryPnl: -0.85,
+  };
+  const sample = (
+    at: number,
+    spot: number,
+    probability: number,
+    bid: number,
+    ask: number,
+  ) => durableEvaluation(at, {
+    positionId: "late-btc",
+    secondsRemaining: 900 - at,
+    underlyingPrice: spot,
+    strikePrice: 100,
+    volatilityLogReturnPerSqrtSecond: 0.0001,
+    momentumLogReturn: -0.0003,
+    tradeFlowImbalance: null,
+    bookImbalance: -1,
+    continuationScore: null,
+    marketWinProbability: probability,
+    marketLossFraction: (0.85 - probability) / 0.85,
+    marketBestBid: bid,
+    marketBestAsk: ask,
+    marketExecutablePrice: bid,
+    marketQuoteAgeMs: 0,
+    marketBookAgeMs: 0,
+    spotEventAgeMs: 0,
+    estimatedSaleValue: bid,
+    entryStake: 0.85,
+    exitEdgePerContract: 0.05,
+    liquidityCoverage: 1,
+    executionEvidenceReady: true,
+    maximumExecutionEvidenceAgeSeconds: 3,
+  });
+  const replay = buildCrossingRiskReplayLifecycles([settlement], [
+    sample(745, 99.99, 0.52, 0.51, 0.53),
+    sample(747, 99.985, 0.51, 0.50, 0.52),
+    sample(749, 99.98, 0.50, 0.49, 0.51),
+    sample(751, 99.97, 0.49, 0.48, 0.50),
+  ]);
+  assert.equal(replay[0]!.candidateExit?.timestampSeconds, 751);
+  assert.equal(replay[0]!.candidateExit?.contractPrice, 0.48);
+  assert.match(replay[0]!.candidateExit?.reason ?? "", /full-depth Kalshi value pressure/);
+});
+
+test("replay uses each evaluation's immutable spot evidence-age limit for value preservation", () => {
+  const settlement = {
+    owner: "regular" as const,
+    positionId: "age-limit",
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 700,
+    expiryTimestampSeconds: 900,
+    entryContractCost: 0.85,
+    quantity: 1,
+    holdToExpiryPnl: -0.85,
+  };
+  const samples = [
+    [745, 99.99, 0.51],
+    [747, 99.985, 0.50],
+    [749, 99.98, 0.49],
+    [751, 99.97, 0.48],
+  ].map(([at, spot, bid]) => durableEvaluation(at, {
+    positionId: "age-limit",
+    secondsRemaining: 900 - at,
+    underlyingPrice: spot,
+    strikePrice: 100,
+    volatilityLogReturnPerSqrtSecond: 0.0001,
+    momentumLogReturn: 0.0001,
+    tradeFlowImbalance: null,
+    bookImbalance: -1,
+    continuationScore: null,
+    marketWinProbability: bid,
+    marketLossFraction: (0.85 - bid) / 0.85,
+    marketBestBid: bid,
+    marketBestAsk: bid + 0.02,
+    marketExecutablePrice: bid,
+    marketQuoteAgeMs: 0,
+    marketBookAgeMs: 0,
+    spotEventAgeMs: 4_000,
+    estimatedSaleValue: bid,
+    entryStake: 0.85,
+    exitEdgePerContract: 0.05,
+    liquidityCoverage: 1,
+    executionEvidenceReady: true,
+    maximumExecutionEvidenceAgeSeconds: 5,
+  }));
+  const replay = buildCrossingRiskReplayLifecycles(
+    [settlement],
+    samples,
+    { maxEvidenceAgeSeconds: 3 },
+  );
+  assert.equal(replay[0]!.candidateExit?.timestampSeconds, 751);
+});
+
 test("durable replay honors each evaluation's immutable 2s/5s evidence-age limit for YES and NO", () => {
   const settlement = (side: "yes" | "no") => ({
     owner: "regular" as const,

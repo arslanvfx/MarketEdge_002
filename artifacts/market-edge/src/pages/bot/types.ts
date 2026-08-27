@@ -1497,6 +1497,16 @@ export interface SmartExitEvaluation {
   expectedHoldValue?: number | null;
   marketBestBid?: number | null;
   marketBestAsk?: number | null;
+  marketExecutablePrice?: number | null;
+  marketSpread?: number | null;
+  targetCrossedDurationSeconds?: number;
+  marketPressureConfirmed?: boolean;
+  marketPressureSampleCount?: number;
+  marketPressureWindowSeconds?: number;
+  marketLowDurationSeconds?: number;
+  marketCollapseLatchActive?: boolean;
+  marketCollapseLatchExpiresAtSeconds?: number | null;
+  valuePreservationTriggered?: boolean;
   liquidityCoverage?: number | null;
   currentDataStatus?: "fresh" | "degraded";
   currentUnavailableReason?: string | null;

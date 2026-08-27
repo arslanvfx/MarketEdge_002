@@ -51,7 +51,13 @@ import {
   summarizeSmartExitComparison,
 } from "./kalshi-smart-exit-replay.ts";
 import { fetchKalshiMarketResult } from "./kalshi-trader.ts";
-import { requestSmartExitFromOwner } from "./kalshi-smart-exit-owners.ts";
+import {
+  requestSmartExitFromOwner,
+} from "./kalshi-smart-exit-owners.ts";
+import {
+  combineSmartExitExecutionConstraints,
+  type SmartExitExecutionConstraint,
+} from "./kalshi-smart-exit-execution.ts";
 import {
   authorizeSmartExitExecution,
   hasCompleteSmartExitParameterSnapshot,
@@ -574,8 +580,8 @@ async function executeAuthorizedExit(
     underlyingPrice: number;
     validatedAtMs: number;
   } | null = null;
-  const revalidateRisk = async (): Promise<boolean> => {
-    if (!definition || definition.category === "commodity") return false;
+  const revalidateRisk = async (): Promise<SmartExitExecutionConstraint | null> => {
+    if (!definition || definition.category === "commodity") return null;
     const hot = await collectHotSpot(position.symbol.toUpperCase(), definition.product);
     await refreshBook(position.ticker);
     const finalEvidence = withMarketEvidence(
@@ -586,7 +592,7 @@ async function executeAuthorizedExit(
       finalEvidence.underlyingPrice == null
       || finalEvidence.spotObservedAtSeconds == null
       || finalEvidence.spotReceivedAtSeconds == null
-    ) return false;
+    ) return null;
     const nowSeconds = Date.now() / 1_000;
     const finalDecision = evaluateSmartExit(
       position,
@@ -601,15 +607,25 @@ async function executeAuthorizedExit(
     const valid = finalDecision.disposition === "EXIT_SIGNAL"
       && finalDecision.executionEvidenceReady
       && (config.mode === "paper-exit" || finalDecision.mayExecuteExit);
-    if (!valid) return false;
+    if (
+      !valid
+      || finalDecision.minimumWinningPrice == null
+      || finalEvidence.marketBookObservedAtSeconds == null
+      || finalDecision.executionEvidenceExpiresAtSeconds == null
+    ) return null;
     finalRiskToken = {
       spotObservedAtSeconds: finalEvidence.spotObservedAtSeconds,
       underlyingPrice: finalEvidence.underlyingPrice,
       validatedAtMs: Date.now(),
     };
-    return true;
+    return {
+      minimumWinningPrice: finalDecision.minimumWinningPrice,
+      evaluatedBookObservedAtSeconds: finalEvidence.marketBookObservedAtSeconds,
+      maximumEvidenceAgeSeconds: finalDecision.maximumExecutionEvidenceAgeSeconds,
+      evidenceExpiresAtSeconds: finalDecision.executionEvidenceExpiresAtSeconds,
+    };
   };
-  const isRiskStillValid = (): boolean => {
+  const isRiskStillValid = (boundMinimumWinningPrice: number): boolean => {
     if (!finalRiskToken || Date.now() - finalRiskToken.validatedAtMs > HOT_SCHEDULER_MS * 2) return false;
     const latest = hotCollector.latest(position.symbol.toUpperCase());
     if (
@@ -636,9 +652,25 @@ async function executeAuthorizedExit(
     );
     return currentDecision.disposition === "EXIT_SIGNAL"
       && currentDecision.executionEvidenceReady
+      && currentDecision.minimumWinningPrice !== null
+      && currentDecision.minimumWinningPrice <= boundMinimumWinningPrice + 1e-9
       && (config.mode === "paper-exit" || currentDecision.mayExecuteExit);
   };
-  if (!await revalidateRisk()) {
+  if (
+    evaluation.minimumWinningPrice == null
+    || evaluation.marketBookAgeMs == null
+    || evaluation.executionEvidenceExpiresAtSeconds == null
+  ) {
+    const lifecycle = await getSmartExitLifecycle(position.owner.kind, position.positionId);
+    if (lifecycle) await upsertSmartExitLifecycle({
+      ...lifecycle,
+      executionStatus: "blocked",
+      reason: "immutable economic execution constraint unavailable",
+    });
+    return { ...evaluation, executionStatus: "blocked" };
+  }
+  const revalidatedConstraint = await revalidateRisk();
+  if (!revalidatedConstraint) {
     const lifecycle = await getSmartExitLifecycle(position.owner.kind, position.positionId);
     if (lifecycle) await upsertSmartExitLifecycle({
       ...lifecycle,
@@ -647,6 +679,14 @@ async function executeAuthorizedExit(
     });
     return { ...evaluation, executionStatus: "blocked" };
   }
+  const executionConstraint: SmartExitExecutionConstraint =
+    combineSmartExitExecutionConstraints({
+      minimumWinningPrice: evaluation.minimumWinningPrice,
+      evaluatedBookObservedAtSeconds:
+        Date.now() / 1_000 - evaluation.marketBookAgeMs / 1_000,
+      maximumEvidenceAgeSeconds: evaluation.maximumExecutionEvidenceAgeSeconds,
+      evidenceExpiresAtSeconds: evaluation.executionEvidenceExpiresAtSeconds,
+    }, revalidatedConstraint);
   const requestId = randomUUID();
   const claim = await claimSmartExitRequest({
     id: requestId,
@@ -662,9 +702,9 @@ async function executeAuthorizedExit(
       tradingMode: position.owner.tradingMode,
       exchangeIndex: position.exchangeIndex,
       parameterVersion: authorization.parameterVersion,
-      minimumWinningPrice: evaluation.minimumWinningPrice,
-      executionEvidenceExpiresAtSeconds: evaluation.executionEvidenceExpiresAtSeconds,
-      maximumExecutionEvidenceAgeSeconds: evaluation.maximumExecutionEvidenceAgeSeconds,
+       minimumWinningPrice: executionConstraint.minimumWinningPrice,
+       executionEvidenceExpiresAtSeconds: executionConstraint.evidenceExpiresAtSeconds,
+       maximumExecutionEvidenceAgeSeconds: executionConstraint.maximumEvidenceAgeSeconds,
     },
   });
   if (!claim.claimed) {
@@ -679,10 +719,7 @@ async function executeAuthorizedExit(
     ...lifecycle, requestId, executionStatus: "requested",
   });
   if (
-    evaluation.minimumWinningPrice == null
-    || evaluation.marketBookAgeMs == null
-    || evaluation.executionEvidenceExpiresAtSeconds == null
-    || Date.now() / 1_000 > evaluation.executionEvidenceExpiresAtSeconds
+    Date.now() / 1_000 > executionConstraint.evidenceExpiresAtSeconds
   ) {
     await resolveSmartExitRequest({
       id: requestId,
@@ -699,12 +736,7 @@ async function executeAuthorizedExit(
   const result = await requestSmartExitFromOwner({
     position,
     parameterVersion: authorization.parameterVersion,
-    executionConstraint: {
-      minimumWinningPrice: evaluation.minimumWinningPrice,
-      evaluatedBookObservedAtSeconds: Date.now() / 1_000 - evaluation.marketBookAgeMs / 1_000,
-      maximumEvidenceAgeSeconds: evaluation.maximumExecutionEvidenceAgeSeconds,
-      evidenceExpiresAtSeconds: evaluation.executionEvidenceExpiresAtSeconds,
-    },
+    executionConstraint,
     isVersionStillAuthorized: positionVersionAuthorized,
     revalidateRisk,
     isRiskStillValid,
@@ -1083,6 +1115,16 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     marketDirection: decision.marketDirection,
     marketDirectionConfirmed: decision.marketDirectionConfirmed,
     marketDirectionSampleCount: decision.marketDirectionSampleCount,
+    targetCrossedDurationSeconds: decision.targetCrossedDurationSeconds,
+    marketExecutablePrice: decision.marketExecutablePrice,
+    marketSpread: decision.marketSpread,
+    marketPressureConfirmed: decision.marketPressureConfirmed,
+    marketPressureSampleCount: decision.marketPressureSampleCount,
+    marketPressureWindowSeconds: decision.marketPressureWindowSeconds,
+    marketLowDurationSeconds: decision.marketLowDurationSeconds,
+    marketCollapseLatchActive: decision.marketCollapseLatchActive,
+    marketCollapseLatchExpiresAtSeconds: decision.marketCollapseLatchExpiresAtSeconds,
+    valuePreservationTriggered: decision.valuePreservationTriggered,
     riskStage: decision.riskStage,
     marketLossFraction: decision.marketLossFraction,
     capitalLossFraction: decision.capitalLossFraction,

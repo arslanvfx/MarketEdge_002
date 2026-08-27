@@ -4,6 +4,7 @@ import type {
   SmartExitDecision,
   SmartExitEvidence,
   SmartExitPosition,
+  SmartExitMarketPressureSample,
   SmartExitSensitivity,
   SmartExitState,
   SmartExitTimeBand,
@@ -84,11 +85,23 @@ export const INITIAL_SMART_EXIT_STATE: SmartExitState = Object.freeze({
   adverseRecoverySampleCount: 0,
   latchedAdverseVelocityPerSecond: null,
   latchedAdverseAccelerationPerSecond2: null,
+  targetCrossedSinceSeconds: null,
+  marketPressureSamples: Object.freeze([]),
+  marketCollapseLatchUntilSeconds: 0,
+  marketLowSinceSeconds: null,
 });
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 const finite = (value: number | null): value is number => value !== null && Number.isFinite(value);
 export const SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS = 2.5;
+export const SMART_EXIT_VALUE_PRESERVATION_MAX_PRICE = 0.55;
+export const SMART_EXIT_VALUE_PRESERVATION_MAX_ASK = 0.60;
+export const SMART_EXIT_VALUE_PRESERVATION_MAX_SPREAD = 0.10;
+export const SMART_EXIT_VALUE_PRESERVATION_MIN_MARKET_LOSS = 0.30;
+export const SMART_EXIT_VALUE_PRESERVATION_MIN_CROSS_SECONDS = 5;
+export const SMART_EXIT_VALUE_PRESERVATION_MIN_LOW_SECONDS = 3;
+export const SMART_EXIT_VALUE_PRESERVATION_MARKET_LATCH_SECONDS = 8;
+export const SMART_EXIT_VALUE_PRESERVATION_MIN_SPOT_EXCURSION = 0.0001;
 
 export interface SmartExitTimeBandParameters {
   readonly band: SmartExitTimeBand;
@@ -145,6 +158,134 @@ export interface SmartExitMarketDirectionAssessment {
   readonly adverseSlopePerSecond: number | null;
   readonly sampleCount: number;
   readonly confirmed: boolean;
+}
+
+export interface SmartExitMarketPressureAssessment {
+  readonly samples: readonly SmartExitMarketPressureSample[];
+  readonly spread: number | null;
+  readonly bookHealthy: boolean;
+  readonly pressureConfirmed: boolean;
+  readonly lowSinceSeconds: number | null;
+  readonly lowDurationSeconds: number;
+  readonly collapseLatchActive: boolean;
+  readonly collapseLatchUntilSeconds: number;
+}
+
+/**
+ * Tracks held-side executable value rather than using one public quote. New
+ * receipt-time book samples may prove persistence; unchanged samples never
+ * extend the bounded collapse latch.
+ */
+export function assessSmartExitMarketPressure(input: {
+  readonly nowSeconds: number;
+  readonly remainingSeconds: number;
+  readonly observedAtSeconds: number | null;
+  readonly bestBid: number | null;
+  readonly bestAsk: number | null;
+  readonly executablePrice: number | null;
+  readonly liquidityCoverage: number | null;
+  readonly marketLossFraction: number | null;
+  readonly previousState: SmartExitState;
+  readonly maximumEventAgeSeconds: number;
+}): SmartExitMarketPressureAssessment {
+  const valid = finite(input.observedAtSeconds)
+    && input.observedAtSeconds <= input.nowSeconds
+    && input.nowSeconds - input.observedAtSeconds <= input.maximumEventAgeSeconds
+    && finite(input.bestBid) && input.bestBid >= 0 && input.bestBid <= 1
+    && finite(input.bestAsk) && input.bestAsk >= 0 && input.bestAsk <= 1
+    && finite(input.executablePrice) && input.executablePrice > 0 && input.executablePrice <= 1
+    && finite(input.liquidityCoverage) && input.liquidityCoverage >= 0;
+  if (!valid) {
+    return {
+      samples: [...(input.previousState.marketPressureSamples ?? [])].slice(-30),
+      spread: null,
+      bookHealthy: false,
+      pressureConfirmed: false,
+      lowSinceSeconds: null,
+      lowDurationSeconds: 0,
+      collapseLatchActive: false,
+      collapseLatchUntilSeconds: 0,
+    };
+  }
+
+  const observedAt = input.observedAtSeconds!;
+  let samples = [...(input.previousState.marketPressureSamples ?? [])]
+    .filter((sample) => finite(sample.observedAtSeconds)
+      && sample.observedAtSeconds >= observedAt - 15
+      && sample.observedAtSeconds <= observedAt)
+    .sort((a, b) => a.observedAtSeconds - b.observedAtSeconds)
+    .slice(-29);
+  const sample: SmartExitMarketPressureSample = {
+    observedAtSeconds: observedAt,
+    bestBid: input.bestBid!,
+    bestAsk: input.bestAsk!,
+    executablePrice: input.executablePrice!,
+    liquidityCoverage: input.liquidityCoverage!,
+  };
+  const previous = samples.at(-1);
+  const isNewer = previous == null || observedAt > previous.observedAtSeconds;
+  if (isNewer) {
+    samples.push(sample);
+    samples = samples.slice(-30);
+  } else if (previous != null && observedAt === previous.observedAtSeconds) {
+    samples[samples.length - 1] = sample;
+  }
+
+  const spread = Math.max(0, input.bestAsk! - input.bestBid!);
+  const bookHealthy = input.liquidityCoverage! >= 1
+    && spread <= SMART_EXIT_VALUE_PRESERVATION_MAX_SPREAD;
+  const lowNow = bookHealthy
+    && input.executablePrice! <= SMART_EXIT_VALUE_PRESERVATION_MAX_PRICE
+    && input.bestAsk! <= SMART_EXIT_VALUE_PRESERVATION_MAX_ASK;
+  const recovered = input.executablePrice! > SMART_EXIT_VALUE_PRESERVATION_MAX_PRICE + 0.05
+    || input.bestBid! > SMART_EXIT_VALUE_PRESERVATION_MAX_PRICE + 0.05;
+  const previousSpread = previous == null ? null : previous.bestAsk - previous.bestBid;
+  const previousWasHealthyLow = previous != null
+    && previous.liquidityCoverage >= 1
+    && previousSpread! <= SMART_EXIT_VALUE_PRESERVATION_MAX_SPREAD
+    && previous.executablePrice <= SMART_EXIT_VALUE_PRESERVATION_MAX_PRICE
+    && previous.bestAsk <= SMART_EXIT_VALUE_PRESERVATION_MAX_ASK;
+  const continuousFromPrevious = previous != null
+    && observedAt >= previous.observedAtSeconds
+    && observedAt - previous.observedAtSeconds <= input.maximumEventAgeSeconds;
+  let lowSince = lowNow
+    ? previousWasHealthyLow && continuousFromPrevious
+      ? input.previousState.marketLowSinceSeconds ?? previous!.observedAtSeconds
+      : observedAt
+    : null;
+  if (recovered || !bookHealthy) lowSince = null;
+  const lowDurationSeconds = lowSince == null
+    ? 0 : Math.max(0, observedAt - lowSince);
+  const priceDrop = previous == null
+    ? 0 : previous.executablePrice - input.executablePrice!;
+  const collapseNow = lowNow
+    && input.marketLossFraction !== null
+    && input.marketLossFraction >= SMART_EXIT_VALUE_PRESERVATION_MIN_MARKET_LOSS;
+  let latchUntil = input.previousState.marketCollapseLatchUntilSeconds ?? 0;
+  const hadPriorPressureHistory = (input.previousState.marketPressureSamples ?? []).length > 0;
+  const actualAdverseStep = previous != null && isNewer && priceDrop >= 0.01;
+  if (collapseNow && (!hadPriorPressureHistory || actualAdverseStep)) {
+    latchUntil = input.nowSeconds + SMART_EXIT_VALUE_PRESERVATION_MARKET_LATCH_SECONDS;
+  }
+  if (recovered || !bookHealthy || input.nowSeconds > latchUntil) latchUntil = 0;
+  const collapseLatchActive = latchUntil >= input.nowSeconds && lowNow;
+  const pressureConfirmed = input.remainingSeconds > 0
+    && input.remainingSeconds <= 180
+    && lowNow
+    && lowDurationSeconds >= SMART_EXIT_VALUE_PRESERVATION_MIN_LOW_SECONDS
+    && input.marketLossFraction !== null
+    && input.marketLossFraction >= SMART_EXIT_VALUE_PRESERVATION_MIN_MARKET_LOSS
+    && collapseLatchActive;
+  return {
+    samples,
+    spread,
+    bookHealthy,
+    pressureConfirmed,
+    lowSinceSeconds: lowSince,
+    lowDurationSeconds,
+    collapseLatchActive,
+    collapseLatchUntilSeconds: latchUntil,
+  };
 }
 
 /** Current and previous values are both held-side winning probabilities. */
@@ -652,6 +793,16 @@ function emptyMetrics(): DecisionMetrics {
     marketAdverseSlopePerSecond: null,
     marketDirectionConfirmed: false,
     marketDirectionSampleCount: 0,
+    targetCrossedDurationSeconds: 0,
+    marketExecutablePrice: null,
+    marketSpread: null,
+    marketPressureConfirmed: false,
+    marketPressureSampleCount: 0,
+    marketPressureWindowSeconds: 0,
+    marketLowDurationSeconds: 0,
+    marketCollapseLatchActive: false,
+    marketCollapseLatchExpiresAtSeconds: null,
+    valuePreservationTriggered: false,
     marketLossFraction: null,
     capitalLossFraction: null,
     deepLossHoldActive: false,
@@ -688,12 +839,13 @@ function unavailable(
   state: SmartExitState,
   degradedComponents: readonly string[] = [],
   timeBand: SmartExitTimeBand = "monitor",
+  metrics: Partial<DecisionMetrics> = {},
 ): SmartExitDecision {
   return {
     disposition: "UNAVAILABLE", reason, mayExecuteExit: false,
     modelWinProbability: null, probabilityDropFromEntry: null, threshold: null,
     continuationScore: null, riskStage: "hold", nextState: state,
-    ...emptyMetrics(), timeBand, degradedComponents,
+    ...emptyMetrics(), ...metrics, timeBand, degradedComponents,
   };
 }
 
@@ -771,32 +923,31 @@ export function evaluateSmartExit(
   const targetAlreadyCrossed = position.side === "yes"
     ? evidence.underlyingPrice! <= position.strikePrice
     : evidence.underlyingPrice! >= position.strikePrice;
-  const missingAtCrossing = targetAlreadyCrossed
-    ? missingSmartExitCrossingEvidence(directionalEvidence, {
-        tradeFlowOptional: timeBandParameters.band === "critical",
-      })
-    : [];
-  if (missingAtCrossing.length > 0) {
-    return unavailable(
-      `target crossed while mandatory crossing evidence is unavailable: ${missingAtCrossing.join(", ")}`,
-      state,
-      missingAtCrossing,
-      timeBandParameters.band,
-    );
-  }
-  const probability = modelWinProbability(position, evidence, config, nowSeconds);
-  const continuation = adverseContinuationScore(position.side, directionalEvidence, config);
-  if (probability === null) {
-    return unavailable("model inputs are unavailable", state, [], timeBandParameters.band);
-  }
-
-  const modelEntryProbability = position.modelAtEntry.winProbability;
-  const hasModelEntryBaseline = modelEntryProbability != null
-    && Number.isFinite(modelEntryProbability)
-    && modelEntryProbability >= 0
-    && modelEntryProbability <= 1;
-  const drop = hasModelEntryBaseline ? probability - modelEntryProbability : null;
-  const threshold = probabilityDropThreshold(position.expirySeconds - nowSeconds, config);
+  const previousTargetAlreadyCrossed = finite(state.previousUnderlyingPrice)
+    && (position.side === "yes"
+      ? state.previousUnderlyingPrice <= position.strikePrice
+      : state.previousUnderlyingPrice >= position.strikePrice);
+  const spotContinuityGap = finite(evidence.spotObservedAtSeconds)
+    && finite(state.previousUnderlyingAtSeconds)
+    ? evidence.spotObservedAtSeconds - state.previousUnderlyingAtSeconds
+    : null;
+  const crossingIsContinuous = previousTargetAlreadyCrossed
+    && spotContinuityGap !== null
+    && spotContinuityGap >= 0
+    && spotContinuityGap <= SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS;
+  const crossedSinceSeconds = targetAlreadyCrossed
+    ? crossingIsContinuous
+      ? state.targetCrossedSinceSeconds
+        ?? state.previousUnderlyingAtSeconds
+        ?? evidence.spotObservedAtSeconds
+        ?? nowSeconds
+      : evidence.spotObservedAtSeconds ?? nowSeconds
+    : null;
+  const targetCrossedDurationSeconds = crossedSinceSeconds == null
+    ? 0 : Math.max(
+        0,
+        (evidence.spotObservedAtSeconds ?? nowSeconds) - crossedSinceSeconds,
+      );
   const trajectory = assessSmartExitTrajectory({
     side: position.side,
     strikePrice: position.strikePrice,
@@ -811,6 +962,125 @@ export function evaluateSmartExit(
   const velocity = trajectory.velocityPerSecond;
   const adverseVelocity = trajectory.adverseVelocityPerSecond;
   const adverseAcceleration = trajectory.adverseAccelerationPerSecond2;
+  const entryMarket = position.marketAtEntry.winProbability;
+  const marketLossFraction = finite(evidence.marketWinProbability) && entryMarket > 0
+    ? clamp((entryMarket - evidence.marketWinProbability) / entryMarket, 0, 1)
+    : null;
+  const quantity = Math.max(0, position.remainingQuantity);
+  const liquidityCoverage = finite(evidence.marketExecutableQuantity) && quantity > 0
+    ? evidence.marketExecutableQuantity / quantity : null;
+  const quoteFresh = isFresh(evidence.marketQuoteObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
+  const marketBookFresh = isFresh(evidence.marketBookObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
+  const fullSaleEvidenceReady = quoteFresh && marketBookFresh
+    && finite(evidence.marketExecutablePrice) && evidence.marketExecutablePrice > 0
+    && liquidityCoverage !== null && liquidityCoverage >= 1;
+  const marketPressure = assessSmartExitMarketPressure({
+    nowSeconds,
+    remainingSeconds: remaining,
+    observedAtSeconds: evidence.marketBookObservedAtSeconds,
+    bestBid: evidence.marketBestBid,
+    bestAsk: evidence.marketBestAsk,
+    executablePrice: evidence.marketExecutablePrice,
+    liquidityCoverage,
+    marketLossFraction,
+    previousState: state,
+    maximumEventAgeSeconds: config.maxEvidenceAgeSeconds,
+  });
+  const preliminaryContinuation = adverseContinuationScore(position.side, directionalEvidence, config);
+  const adverseMomentum = finite(evidence.momentumLogReturn)
+    && (position.side === "yes"
+      ? evidence.momentumLogReturn < -1e-6
+      : evidence.momentumLogReturn > 1e-6);
+  const spotRiskForValuePreservation = targetAlreadyCrossed
+    && targetCrossedDurationSeconds >= SMART_EXIT_VALUE_PRESERVATION_MIN_CROSS_SECONDS
+    && (
+      adverseMomentum
+      || (trajectory.adverseLatchActive
+        && trajectory.adverseExcursionFraction + 1e-12
+          >= SMART_EXIT_VALUE_PRESERVATION_MIN_SPOT_EXCURSION)
+    );
+  const valuePreservationCandidate = remaining > 0
+    && remaining <= 180
+    && spotRiskForValuePreservation
+    && marketPressure.pressureConfirmed
+    && fullSaleEvidenceReady;
+  const preflightState: SmartExitState = {
+    ...state,
+    previousUnderlyingPrice: evidence.underlyingPrice,
+    previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
+    previousAdverseVelocity: adverseVelocity,
+    trajectorySamples: trajectory.samples,
+    adverseLatchUntilSeconds: trajectory.adverseLatchUntilSeconds,
+    adverseExcursionFraction: trajectory.adverseExcursionFraction,
+    adverseRecoverySampleCount: trajectory.recoveryProgress,
+    latchedAdverseVelocityPerSecond: trajectory.adverseLatchActive
+      ? adverseVelocity : null,
+    latchedAdverseAccelerationPerSecond2: trajectory.adverseLatchActive
+      ? adverseAcceleration : null,
+    targetCrossedSinceSeconds: crossedSinceSeconds,
+    marketPressureSamples: marketPressure.samples,
+    marketCollapseLatchUntilSeconds: marketPressure.collapseLatchUntilSeconds,
+    marketLowSinceSeconds: marketPressure.lowSinceSeconds,
+  };
+  const missingAtCrossing = targetAlreadyCrossed
+    ? missingSmartExitCrossingEvidence(directionalEvidence, {
+        tradeFlowOptional: timeBandParameters.band === "critical"
+          || valuePreservationCandidate,
+      })
+    : [];
+  if (missingAtCrossing.length > 0) {
+    return unavailable(
+      `target crossed while mandatory crossing evidence is unavailable: ${missingAtCrossing.join(", ")}`,
+      preflightState,
+      missingAtCrossing,
+      timeBandParameters.band,
+      {
+        targetAlreadyCrossed,
+        targetCrossedDurationSeconds,
+        underlyingVelocityPerSecond: velocity,
+        adverseVelocityPerSecond: adverseVelocity,
+        adverseAccelerationPerSecond2: adverseAcceleration,
+        trajectorySampleCount: trajectory.samples.length,
+        trajectoryWindowSeconds: trajectory.samples.length > 1
+          ? trajectory.samples.at(-1)!.observedAtSeconds
+            - trajectory.samples[0].observedAtSeconds
+          : 0,
+        adverseExcursionFraction: trajectory.adverseExcursionFraction,
+        adverseLatchActive: trajectory.adverseLatchActive,
+        adverseLatchExpiresAtSeconds: trajectory.adverseLatchActive
+          ? trajectory.adverseLatchUntilSeconds : null,
+        recoveryProgress: trajectory.recoveryProgress,
+        marketLossFraction,
+        liquidityCoverage,
+        marketExecutablePrice: evidence.marketExecutablePrice,
+        marketSpread: marketPressure.spread,
+        marketPressureConfirmed: marketPressure.pressureConfirmed,
+        marketPressureSampleCount: marketPressure.samples.length,
+        marketPressureWindowSeconds: marketPressure.samples.length > 1
+          ? marketPressure.samples.at(-1)!.observedAtSeconds
+            - marketPressure.samples[0].observedAtSeconds
+          : 0,
+        marketLowDurationSeconds: marketPressure.lowDurationSeconds,
+        marketCollapseLatchActive: marketPressure.collapseLatchActive,
+        marketCollapseLatchExpiresAtSeconds: marketPressure.collapseLatchActive
+          ? marketPressure.collapseLatchUntilSeconds : null,
+        valuePreservationTriggered: false,
+      },
+    );
+  }
+  const probability = modelWinProbability(position, evidence, config, nowSeconds);
+  const continuation = preliminaryContinuation;
+  if (probability === null) {
+    return unavailable("model inputs are unavailable", preflightState, [], timeBandParameters.band);
+  }
+
+  const modelEntryProbability = position.modelAtEntry.winProbability;
+  const hasModelEntryBaseline = modelEntryProbability != null
+    && Number.isFinite(modelEntryProbability)
+    && modelEntryProbability >= 0
+    && modelEntryProbability <= 1;
+  const drop = hasModelEntryBaseline ? probability - modelEntryProbability : null;
+  const threshold = probabilityDropThreshold(position.expirySeconds - nowSeconds, config);
   const crossingRisk = assessSmartExitCrossingRisk({
     side: position.side,
     underlyingPrice: evidence.underlyingPrice!,
@@ -838,10 +1108,6 @@ export function evaluateSmartExit(
     crossingTrajectoryPlausible,
     crossingRiskConfirmed,
   } = crossingRisk;
-  const entryMarket = position.marketAtEntry.winProbability;
-  const marketLossFraction = finite(evidence.marketWinProbability) && entryMarket > 0
-    ? clamp((entryMarket - evidence.marketWinProbability) / entryMarket, 0, 1)
-    : null;
   const marketDirection = assessSmartExitMarketDirection({
     currentProbability: evidence.marketWinProbability,
     currentObservedAtSeconds: evidence.marketQuoteObservedAtSeconds,
@@ -854,14 +1120,11 @@ export function evaluateSmartExit(
     minimumMarketLossFraction: timeBandParameters.minimumMarketLossFraction,
   });
   const highRisk = marketLossFraction != null && marketLossFraction >= config.rapidLossRatio;
-  const quantity = Math.max(0, position.remainingQuantity);
   const estimatedSaleValue = finite(evidence.marketExecutablePrice)
     ? evidence.marketExecutablePrice * quantity : null;
   const expectedHoldValue = probability * quantity;
   const exitEdge = finite(evidence.marketExecutablePrice)
     ? evidence.marketExecutablePrice - probability : null;
-  const liquidityCoverage = finite(evidence.marketExecutableQuantity) && quantity > 0
-    ? evidence.marketExecutableQuantity / quantity : null;
   const minimumWinningPrice = probability + config.minExitEdge < 1
     ? Math.ceil((probability + config.minExitEdge) * 100) / 100
     : null;
@@ -873,11 +1136,6 @@ export function evaluateSmartExit(
   const executionEvidenceExpiresAtSeconds = mandatoryExecutionTimes.every((at) => at !== null)
     ? Math.min(...mandatoryExecutionTimes as number[]) + config.maxEvidenceAgeSeconds
     : null;
-  const quoteFresh = isFresh(evidence.marketQuoteObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
-  const marketBookFresh = isFresh(evidence.marketBookObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
-  const fullSaleEvidenceReady = quoteFresh && marketBookFresh
-    && finite(evidence.marketExecutablePrice) && evidence.marketExecutablePrice > 0
-    && liquidityCoverage !== null && liquidityCoverage >= 1;
   const executionEvidenceReady = fullSaleEvidenceReady
     && minimumWinningPrice !== null && evidence.marketExecutablePrice + 1e-9 >= minimumWinningPrice
   const capitalLossFraction = fullSaleEvidenceReady
@@ -925,6 +1183,20 @@ export function evaluateSmartExit(
     expectedHoldValue,
     exitEdgePerContract: exitEdge,
     liquidityCoverage,
+    targetCrossedDurationSeconds,
+    marketExecutablePrice: evidence.marketExecutablePrice,
+    marketSpread: marketPressure.spread,
+    marketPressureConfirmed: marketPressure.pressureConfirmed,
+    marketPressureSampleCount: marketPressure.samples.length,
+    marketPressureWindowSeconds: marketPressure.samples.length > 1
+      ? marketPressure.samples.at(-1)!.observedAtSeconds
+        - marketPressure.samples[0].observedAtSeconds
+      : 0,
+    marketLowDurationSeconds: marketPressure.lowDurationSeconds,
+    marketCollapseLatchActive: marketPressure.collapseLatchActive,
+    marketCollapseLatchExpiresAtSeconds: marketPressure.collapseLatchActive
+      ? marketPressure.collapseLatchUntilSeconds : null,
+    valuePreservationTriggered: false,
     executionEvidenceReady,
     minimumWinningPrice,
     maximumExecutionEvidenceAgeSeconds: config.maxEvidenceAgeSeconds,
@@ -942,6 +1214,7 @@ export function evaluateSmartExit(
     && continuation >= sensitivity.parameters.confirmationLevel;
   const sustainedAdverseSample = directionalCount > 0;
   const nextBase: SmartExitState = {
+    ...preflightState,
     adverseSampleCount: directionalCount,
     marketAdverseSampleCount: marketDirection.sampleCount,
     holdUntilSeconds: state.holdUntilSeconds,
@@ -951,17 +1224,6 @@ export function evaluateSmartExit(
       ? evidence.marketWinProbability : null,
     previousMarketObservedAtSeconds: finite(evidence.marketWinProbability)
       ? evidence.marketQuoteObservedAtSeconds : null,
-    previousUnderlyingPrice: evidence.underlyingPrice,
-    previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
-    previousAdverseVelocity: adverseVelocity,
-    trajectorySamples: trajectory.samples,
-    adverseLatchUntilSeconds: trajectory.adverseLatchUntilSeconds,
-    adverseExcursionFraction: trajectory.adverseExcursionFraction,
-    adverseRecoverySampleCount: trajectory.recoveryProgress,
-    latchedAdverseVelocityPerSecond: trajectory.adverseLatchActive
-      ? adverseVelocity : null,
-    latchedAdverseAccelerationPerSecond2: trajectory.adverseLatchActive
-      ? adverseAcceleration : null,
   };
   const timeScaledRisk = assessSmartExitTimeScaledRisk({
     side: position.side,
@@ -981,14 +1243,14 @@ export function evaluateSmartExit(
   });
   const shared = {
     ...common,
-    crossingRiskConfirmed: timeScaledRisk.actionable,
+    crossingRiskConfirmed: timeScaledRisk.actionable || valuePreservationCandidate,
     timeBand: timeScaledRisk.timeBand,
     adverseTargetDistanceFraction: timeScaledRisk.adverseTargetDistanceFraction,
     requiredAdverseTargetDistanceFraction: timeScaledRisk.requiredAdverseTargetDistanceFraction,
     marketDirection: marketDirection.direction,
     marketProbabilityDelta: marketDirection.probabilityDelta,
     marketAdverseSlopePerSecond: marketDirection.adverseSlopePerSecond,
-    marketDirectionConfirmed: marketDirection.confirmed,
+    marketDirectionConfirmed: marketDirection.confirmed || marketPressure.pressureConfirmed,
     marketDirectionSampleCount: marketDirection.sampleCount,
   };
   const probabilityDeteriorated = drop !== null && drop < -threshold;
@@ -996,7 +1258,7 @@ export function evaluateSmartExit(
     && marketLossFraction >= sensitivity.parameters.minMarketLossFraction;
   const meaningfulDeterioration = alreadyAcrossTarget
     || probabilityDeteriorated || fastDrop || highRisk || marketDeteriorated;
-  const exitReady = timeScaledRisk.actionable
+  const exitReady = (timeScaledRisk.actionable || valuePreservationCandidate)
     && meaningfulDeterioration
     && (alreadyAcrossTarget || marketDeteriorated)
     && economicExit
@@ -1027,12 +1289,16 @@ export function evaluateSmartExit(
     }
     return {
       disposition: "EXIT_SIGNAL",
-      reason: `${timeScaledRisk.timeBand} band: ${
-        alreadyAcrossTarget
-          ? "continued adverse target crossing"
-          : "sharp adverse move can cross before expiry"
-      }; fresh Kalshi direction and full-liquidity sale evidence confirm exit`,
-      mayExecuteExit: mayExecute, riskStage: "exit", nextState: nextBase, ...shared,
+      reason: valuePreservationCandidate
+        ? `${timeScaledRisk.timeBand} band: losing-side spot persisted for ${targetCrossedDurationSeconds.toFixed(1)}s while fresh full-depth Kalshi value remained at or below 55c`
+        : `${timeScaledRisk.timeBand} band: ${
+            alreadyAcrossTarget
+              ? "continued adverse target crossing"
+              : "sharp adverse move can cross before expiry"
+          }; fresh Kalshi direction and full-liquidity sale evidence confirm exit`,
+      mayExecuteExit: mayExecute, riskStage: "exit", nextState: nextBase,
+      ...shared,
+      valuePreservationTriggered: valuePreservationCandidate,
     };
   }
   if (meaningfulDeterioration && crossingTrajectoryPlausible) {

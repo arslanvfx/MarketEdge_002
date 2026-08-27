@@ -7,12 +7,15 @@ import type { SmartExitEvaluationRecord, SmartExitSensitivity } from "./kalshi-s
 import {
   INITIAL_SMART_EXIT_STATE,
   assessSmartExitMarketDirection,
+  assessSmartExitMarketPressure,
   assessSmartExitCrossingRisk,
   assessSmartExitDeepLossHold,
   assessSmartExitTrajectory,
   assessSmartExitTimeScaledRisk,
   missingSmartExitCrossingEvidence,
   SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
+  SMART_EXIT_VALUE_PRESERVATION_MIN_CROSS_SECONDS,
+  SMART_EXIT_VALUE_PRESERVATION_MIN_SPOT_EXCURSION,
   resolveSmartExitSensitivity,
   resolveSmartExitTimeBand,
 } from "./kalshi-smart-exit-policy.ts";
@@ -372,6 +375,10 @@ export function buildCrossingRiskReplayLifecycles(
         : sample.spotAgeMs != null
           ? sampleAt - sample.spotAgeMs / 1_000
           : sampleAt;
+      const maximumEvidenceAgeSeconds = Number.isFinite(sample.maximumExecutionEvidenceAgeSeconds)
+        && sample.maximumExecutionEvidenceAgeSeconds > 0
+        ? sample.maximumExecutionEvidenceAgeSeconds
+        : settings.maxEvidenceAgeSeconds;
       const trajectory = sample.underlyingPrice != null
         ? assessSmartExitTrajectory({
             side: sample.side,
@@ -381,11 +388,73 @@ export function buildCrossingRiskReplayLifecycles(
             nowSeconds: sampleAt,
             remainingSeconds: sample.secondsRemaining,
             previousState: trajectoryState,
-            maximumEventAgeSeconds: settings.maxEvidenceAgeSeconds,
+            maximumEventAgeSeconds: maximumEvidenceAgeSeconds,
           })
         : null;
       const sampleElapsedSeconds = trajectory?.sampleElapsedSeconds
         ?? (previousSampleAt === null ? null : sampleAt - previousSampleAt);
+      const actualTargetCrossed = sample.underlyingPrice !== null
+        && (sample.side === "yes"
+          ? sample.underlyingPrice <= sample.strikePrice
+          : sample.underlyingPrice >= sample.strikePrice);
+      const previousTargetAlreadyCrossed = sample.underlyingPrice !== null
+        && trajectoryState.previousUnderlyingPrice !== null
+        && (sample.side === "yes"
+          ? trajectoryState.previousUnderlyingPrice <= sample.strikePrice
+          : trajectoryState.previousUnderlyingPrice >= sample.strikePrice);
+      const crossingGap = trajectoryState.previousUnderlyingAtSeconds === null
+        ? null : spotObservedAt - trajectoryState.previousUnderlyingAtSeconds;
+      const crossingIsContinuous = previousTargetAlreadyCrossed
+        && crossingGap !== null
+        && crossingGap >= 0
+        && crossingGap <= SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS;
+      const targetCrossedSinceSeconds = actualTargetCrossed
+        ? crossingIsContinuous
+          ? trajectoryState.targetCrossedSinceSeconds
+            ?? trajectoryState.previousUnderlyingAtSeconds
+            ?? spotObservedAt
+          : spotObservedAt
+        : null;
+      const targetCrossedDurationSeconds = targetCrossedSinceSeconds == null
+        ? 0 : Math.max(0, spotObservedAt - targetCrossedSinceSeconds);
+      const marketExecutablePrice = sample.marketExecutablePrice
+        ?? (sample.estimatedSaleValue !== null && sample.remainingQuantity > 0
+          ? sample.estimatedSaleValue / sample.remainingQuantity
+          : null);
+      const marketBookObservedAt = sample.marketBookAgeMs !== null
+        && sample.marketBookAgeMs >= 0
+        && sample.marketBookAgeMs <= maximumEvidenceAgeSeconds * 1_000
+        ? sampleAt - sample.marketBookAgeMs / 1_000
+        : null;
+      const marketPressure = assessSmartExitMarketPressure({
+        nowSeconds: sampleAt,
+        remainingSeconds: sample.secondsRemaining,
+        observedAtSeconds: marketBookObservedAt,
+        bestBid: sample.marketBestBid,
+        bestAsk: sample.marketBestAsk,
+        executablePrice: marketExecutablePrice,
+        liquidityCoverage: sample.liquidityCoverage,
+        marketLossFraction: sample.marketLossFraction,
+        previousState: trajectoryState,
+        maximumEventAgeSeconds: maximumEvidenceAgeSeconds,
+      });
+      const adverseMomentum = sample.momentumLogReturn !== null
+        && Number.isFinite(sample.momentumLogReturn)
+        && (sample.side === "yes"
+          ? sample.momentumLogReturn < -1e-6
+          : sample.momentumLogReturn > 1e-6);
+      const valuePreservationCandidate = sample.secondsRemaining > 0
+        && sample.secondsRemaining <= 180
+        && actualTargetCrossed
+        && targetCrossedDurationSeconds >= SMART_EXIT_VALUE_PRESERVATION_MIN_CROSS_SECONDS
+        && (
+          adverseMomentum
+          || ((trajectory?.adverseLatchActive ?? sample.adverseLatchActive)
+            && (trajectory?.adverseExcursionFraction
+              ?? sample.adverseExcursionFraction ?? 0) + 1e-12
+                >= SMART_EXIT_VALUE_PRESERVATION_MIN_SPOT_EXCURSION)
+        )
+        && marketPressure.pressureConfirmed;
       const crossingEvidenceReady = missingSmartExitCrossingEvidence({
         volatilityLogReturnPerSqrtSecond: sample.volatilityLogReturnPerSqrtSecond,
         momentumLogReturn: sample.momentumLogReturn,
@@ -393,12 +462,9 @@ export function buildCrossingRiskReplayLifecycles(
         tradeFlowImbalance: sample.tradeFlowImbalance,
         bookImbalance: sample.bookImbalance,
       }, {
-        tradeFlowOptional: timeBand.band === "critical",
+        tradeFlowOptional: timeBand.band === "critical"
+          || valuePreservationCandidate,
       }).length === 0;
-      const actualTargetCrossed = sample.underlyingPrice !== null
-        && (sample.side === "yes"
-          ? sample.underlyingPrice <= sample.strikePrice
-          : sample.underlyingPrice >= sample.strikePrice);
       const crossing = sample.underlyingPrice !== null
         && sample.underlyingPrice > 0
         && sample.strikePrice > 0
@@ -432,10 +498,6 @@ export function buildCrossingRiskReplayLifecycles(
         : null;
       directionalCount = crossing?.directionalCount ?? 0;
       previousSampleAt = sampleAt;
-      const maximumEvidenceAgeSeconds = Number.isFinite(sample.maximumExecutionEvidenceAgeSeconds)
-        && sample.maximumExecutionEvidenceAgeSeconds > 0
-        ? sample.maximumExecutionEvidenceAgeSeconds
-        : settings.maxEvidenceAgeSeconds;
       const marketObservedAt = sample.marketWinProbability !== null
         && sample.marketQuoteAgeMs !== null
         && sample.marketQuoteAgeMs >= 0
@@ -497,6 +559,10 @@ export function buildCrossingRiskReplayLifecycles(
             ? trajectory.adverseVelocityPerSecond : null,
           latchedAdverseAccelerationPerSecond2: trajectory.adverseLatchActive
             ? trajectory.adverseAccelerationPerSecond2 : null,
+          targetCrossedSinceSeconds,
+          marketPressureSamples: marketPressure.samples,
+          marketCollapseLatchUntilSeconds: marketPressure.collapseLatchUntilSeconds,
+          marketLowSinceSeconds: marketPressure.lowSinceSeconds,
         };
       }
       const fullyExecutable = sample.executionEvidenceReady
@@ -523,7 +589,7 @@ export function buildCrossingRiskReplayLifecycles(
         recoveryMinSeconds: settings.deepLossRecoveryMinSeconds,
       });
       if (
-        timeScaledRisk?.actionable
+        (timeScaledRisk?.actionable || valuePreservationCandidate)
         && !deepLossHold.hold
         && (
           crossing!.targetAlreadyCrossed
@@ -539,11 +605,13 @@ export function buildCrossingRiskReplayLifecycles(
         candidateExit = {
           timestampSeconds: sampleAt,
           contractPrice: sample.estimatedSaleValue! / sample.remainingQuantity,
-          reason: `${timeScaledRisk.timeBand} band: ${
-            crossing!.targetAlreadyCrossed
-              ? "continued adverse target crossing"
-              : "sharp projected target crossing"
-          } with fresh Kalshi confirmation and full executable evidence`,
+          reason: valuePreservationCandidate
+            ? `${timeBand.band} band: persistent losing-side spot with full-depth Kalshi value pressure`
+            : `${timeScaledRisk!.timeBand} band: ${
+                crossing!.targetAlreadyCrossed
+                  ? "continued adverse target crossing"
+                  : "sharp projected target crossing"
+              } with fresh Kalshi confirmation and full executable evidence`,
         };
         break;
       }

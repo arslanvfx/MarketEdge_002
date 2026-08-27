@@ -723,6 +723,14 @@ export function BotSmartExitPanel({ authPost }: Props) {
                              <span className="text-slate-300">{ev.marketBestAsk != null ? (ev.marketBestAsk * 100).toFixed(1) + '¢' : "—"}</span>
                            </span>
                         </div>
+                         <div className="flex justify-between items-center w-full">
+                            <span className="text-slate-500">Exec / Spread</span>
+                            <span>
+                              <span className="text-slate-300">{ev.marketExecutablePrice != null ? (ev.marketExecutablePrice * 100).toFixed(1) + '¢' : "—"}</span>
+                              <span className="text-slate-600 mx-1.5">/</span>
+                              <span className="text-slate-300">{ev.marketSpread != null ? (ev.marketSpread * 100).toFixed(1) + '¢' : "—"}</span>
+                            </span>
+                         </div>
                         <div className="flex justify-between items-center w-full">
                            <span className="text-slate-500">Liq Cover</span>
                            {ev.liquidityCoverage != null ? (
@@ -763,6 +771,30 @@ export function BotSmartExitPanel({ authPost }: Props) {
                               <span>
                                 Trajectory {ev.trajectorySampleCount ?? 0} samples
                                 {ev.recoveryProgress ? ` · recovery ${ev.recoveryProgress}/2` : ""}
+                              </span>
+                            )}
+                          </div>
+                          <div
+                            className="text-[9px] font-mono text-slate-500"
+                            title={ev.marketCollapseLatchExpiresAtSeconds != null
+                              ? `Kalshi collapse latch expires ${new Date(ev.marketCollapseLatchExpiresAtSeconds * 1000).toISOString()}`
+                              : "No Kalshi collapse latch"}
+                          >
+                            {ev.marketPressureConfirmed ? (
+                              <span className="text-red-300">
+                                KALSHI PRESSURE · low {(ev.marketLowDurationSeconds ?? 0).toFixed(1)}s
+                                {" · "}cross {(ev.targetCrossedDurationSeconds ?? 0).toFixed(1)}s
+                              </span>
+                            ) : ev.marketCollapseLatchActive ? (
+                              <span className="text-amber-300">
+                                KALSHI LATCH · {ev.marketPressureSampleCount ?? 0} samples
+                              </span>
+                            ) : (
+                              <span>
+                                Kalshi pressure {ev.marketPressureSampleCount ?? 0} samples
+                                {ev.targetCrossedDurationSeconds
+                                  ? ` · cross ${ev.targetCrossedDurationSeconds.toFixed(1)}s`
+                                  : ""}
                               </span>
                             )}
                           </div>

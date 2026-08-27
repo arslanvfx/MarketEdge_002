@@ -4,6 +4,7 @@ import { DEFAULT_SMART_EXIT_CONFIG } from "./kalshi-smart-exit-policy.ts";
 import {
   authorizeSmartExitExecution,
   BASELINE_SMART_EXIT_PARAMETER_VERSION,
+  combineSmartExitExecutionConstraints,
   computeSmartExitExecutionLimit,
   smartExitIdentityMatches,
 } from "./kalshi-smart-exit-execution.ts";
@@ -173,6 +174,33 @@ test("deteriorated book blocks instead of crossing below the Smart Exit economic
   });
   assert.equal(deteriorated.allowed, false);
   assert.equal(deteriorated.reason, "insufficient_depth_at_floor");
+});
+
+test("final revalidation can only tighten the execution floor and freshness deadline", () => {
+  const combined = combineSmartExitExecutionConstraints({
+    minimumWinningPrice: 0.40,
+    evaluatedBookObservedAtSeconds: 100,
+    maximumEvidenceAgeSeconds: 5,
+    evidenceExpiresAtSeconds: 105,
+  }, {
+    minimumWinningPrice: 0.47,
+    evaluatedBookObservedAtSeconds: 102,
+    maximumEvidenceAgeSeconds: 2,
+    evidenceExpiresAtSeconds: 104,
+  });
+  assert.deepEqual(combined, {
+    minimumWinningPrice: 0.47,
+    evaluatedBookObservedAtSeconds: 102,
+    maximumEvidenceAgeSeconds: 2,
+    evidenceExpiresAtSeconds: 104,
+  });
+
+  assert.equal(combineSmartExitExecutionConstraints(combined, {
+    minimumWinningPrice: 0.43,
+    evaluatedBookObservedAtSeconds: 103,
+    maximumEvidenceAgeSeconds: 5,
+    evidenceExpiresAtSeconds: 108,
+  }).minimumWinningPrice, 0.47);
 });
 
 test("NO exits convert the winning-side floor to a bounded YES-book bid", () => {

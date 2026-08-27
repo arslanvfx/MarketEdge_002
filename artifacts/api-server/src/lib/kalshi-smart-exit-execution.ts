@@ -4,6 +4,34 @@ import type {
   SmartExitOwnerKind,
   SmartExitPosition,
 } from "./kalshi-smart-exit-types.ts";
+
+export interface SmartExitExecutionConstraint {
+  readonly minimumWinningPrice: number;
+  readonly evaluatedBookObservedAtSeconds: number;
+  readonly maximumEvidenceAgeSeconds: number;
+  readonly evidenceExpiresAtSeconds: number;
+}
+
+export function combineSmartExitExecutionConstraints(
+  original: SmartExitExecutionConstraint,
+  revalidated: SmartExitExecutionConstraint,
+): SmartExitExecutionConstraint {
+  return {
+    minimumWinningPrice: Math.max(
+      original.minimumWinningPrice,
+      revalidated.minimumWinningPrice,
+    ),
+    evaluatedBookObservedAtSeconds: revalidated.evaluatedBookObservedAtSeconds,
+    maximumEvidenceAgeSeconds: Math.min(
+      original.maximumEvidenceAgeSeconds,
+      revalidated.maximumEvidenceAgeSeconds,
+    ),
+    evidenceExpiresAtSeconds: Math.min(
+      original.evidenceExpiresAtSeconds,
+      revalidated.evidenceExpiresAtSeconds,
+    ),
+  };
+}
 import { resolveSmartExitSensitivity } from "./kalshi-smart-exit-policy.ts";
 
 export function computeSmartExitExecutionLimit(params: {

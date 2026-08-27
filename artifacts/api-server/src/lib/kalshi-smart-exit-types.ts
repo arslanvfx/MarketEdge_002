@@ -190,11 +190,27 @@ export interface SmartExitState {
   readonly adverseRecoverySampleCount: number;
   readonly latchedAdverseVelocityPerSecond: number | null;
   readonly latchedAdverseAccelerationPerSecond2: number | null;
+  /** First fresh observation in the current uninterrupted losing-side crossing. */
+  readonly targetCrossedSinceSeconds: number | null;
+  /** Bounded held-side Kalshi book samples used for value-preservation pressure. */
+  readonly marketPressureSamples: readonly SmartExitMarketPressureSample[];
+  /** Flat quotes may preserve, but never extend, a recent adverse market collapse. */
+  readonly marketCollapseLatchUntilSeconds: number;
+  /** First healthy full-depth sample in the current uninterrupted <=55c run. */
+  readonly marketLowSinceSeconds: number | null;
 }
 
 export interface SmartExitTrajectorySample {
   readonly observedAtSeconds: number;
   readonly price: number;
+}
+
+export interface SmartExitMarketPressureSample {
+  readonly observedAtSeconds: number;
+  readonly bestBid: number;
+  readonly bestAsk: number;
+  readonly executablePrice: number;
+  readonly liquidityCoverage: number;
 }
 
 export type SmartExitDisposition = "OFF" | "HOLD" | "WATCH" | "PREPARE_EXIT" | "EXIT_SIGNAL" | "UNAVAILABLE";
@@ -219,6 +235,16 @@ export interface SmartExitDecision {
   readonly marketAdverseSlopePerSecond: number | null;
   readonly marketDirectionConfirmed: boolean;
   readonly marketDirectionSampleCount: number;
+  readonly targetCrossedDurationSeconds: number;
+  readonly marketExecutablePrice: number | null;
+  readonly marketSpread: number | null;
+  readonly marketPressureConfirmed: boolean;
+  readonly marketPressureSampleCount: number;
+  readonly marketPressureWindowSeconds: number;
+  readonly marketLowDurationSeconds: number;
+  readonly marketCollapseLatchActive: boolean;
+  readonly marketCollapseLatchExpiresAtSeconds: number | null;
+  readonly valuePreservationTriggered: boolean;
   readonly marketLossFraction: number | null;
   /** Loss on a fresh full-position executable sale versus actual remaining entry stake. */
   readonly capitalLossFraction: number | null;
@@ -296,6 +322,16 @@ export interface SmartExitEvaluationRecord {
   readonly marketDirection: SmartExitMarketDirection;
   readonly marketDirectionConfirmed: boolean;
   readonly marketDirectionSampleCount: number;
+  readonly targetCrossedDurationSeconds: number;
+  readonly marketExecutablePrice: number | null;
+  readonly marketSpread: number | null;
+  readonly marketPressureConfirmed: boolean;
+  readonly marketPressureSampleCount: number;
+  readonly marketPressureWindowSeconds: number;
+  readonly marketLowDurationSeconds: number;
+  readonly marketCollapseLatchActive: boolean;
+  readonly marketCollapseLatchExpiresAtSeconds: number | null;
+  readonly valuePreservationTriggered: boolean;
   readonly recommendation: "off" | "hold" | "watch" | "prepare_exit" | "exit" | "unavailable";
   readonly riskStage: SmartExitRiskStage;
   readonly marketLossFraction: number | null;

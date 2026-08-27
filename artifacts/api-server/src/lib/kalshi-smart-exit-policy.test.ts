@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   DEFAULT_SMART_EXIT_CONFIG, INITIAL_SMART_EXIT_STATE, adverseContinuationScore,
   assessSmartExitMarketDirection,
+  assessSmartExitMarketPressure,
   assessSmartExitTrajectory,
   assessSmartExitTimeScaledRisk,
   assessSmartExitDeepLossHold,
@@ -51,6 +52,22 @@ const evidence = (overrides: Partial<SmartExitEvidence> = {}): SmartExitEvidence
 });
 const config = { ...DEFAULT_SMART_EXIT_CONFIG, enabled: true, mode: "shadow" as const, sensitivity: "more_aggressive" as const, debounceCount: 2, confirmationLevel: 0.20, hysteresisSeconds: 0, probabilityShrinkage: 0, fatTailVolatilityMultiplier: 1 };
 
+const evidenceAt = (
+  at: number,
+  overrides: Partial<SmartExitEvidence> = {},
+): SmartExitEvidence => evidence({
+  observedAtSeconds: at,
+  spotReceivedAtSeconds: at,
+  tapeReceivedAtSeconds: at,
+  bookReceivedAtSeconds: at,
+  spotObservedAtSeconds: at,
+  tapeObservedAtSeconds: at,
+  bookObservedAtSeconds: at,
+  marketQuoteObservedAtSeconds: at,
+  marketBookObservedAtSeconds: at,
+  ...overrides,
+});
+
 test("default is disabled and shadow safe", () => {
   assert.equal(DEFAULT_SMART_EXIT_CONFIG.enabled, false);
   assert.equal(DEFAULT_SMART_EXIT_CONFIG.mode, "shadow");
@@ -79,6 +96,360 @@ test("missing, stale, and commodity evidence fail closed", () => {
   assert.equal(evaluateSmartExit(position, evidence({ observedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit(position, evidence({ spotReceivedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit({ ...position, underlyingKind: "commodity" }, evidence(), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
+});
+
+test("missing trade flow blocks execution without erasing fresh spot trajectory", () => {
+  const first = evaluateSmartExit(
+    { ...position, expirySeconds: 900 },
+    evidenceAt(745, {
+      underlyingPrice: 99.99,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.0002,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.52,
+      marketBestBid: 0.51,
+      marketBestAsk: 0.53,
+      marketExecutablePrice: 0.51,
+    }),
+    {
+      ...INITIAL_SMART_EXIT_STATE,
+      previousUnderlyingPrice: 100.02,
+      previousUnderlyingAtSeconds: 744,
+    },
+    config,
+    745,
+  );
+  assert.equal(first.disposition, "UNAVAILABLE");
+  assert.equal(first.targetAlreadyCrossed, true);
+  assert.ok(first.nextState.trajectorySamples.length >= 2);
+  assert.equal(first.nextState.targetCrossedSinceSeconds, 745);
+
+  const second = evaluateSmartExit(
+    { ...position, expirySeconds: 900 },
+    evidenceAt(747, {
+      underlyingPrice: 99.97,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.0003,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.51,
+      marketBestBid: 0.50,
+      marketBestAsk: 0.52,
+      marketExecutablePrice: 0.50,
+    }),
+    first.nextState,
+    config,
+    747,
+  );
+  assert.equal(second.disposition, "UNAVAILABLE");
+  assert.ok(second.nextState.trajectorySamples.length >= 3);
+  assert.equal(second.adverseLatchActive, true);
+  assert.equal(second.targetCrossedDurationSeconds, 2);
+});
+
+test("one low Kalshi print or an unhealthy book cannot create value-preservation pressure", () => {
+  const single = assessSmartExitMarketPressure({
+    nowSeconds: 745,
+    remainingSeconds: 155,
+    observedAtSeconds: 745,
+    bestBid: 0.49,
+    bestAsk: 0.51,
+    executablePrice: 0.49,
+    liquidityCoverage: 1,
+    marketLossFraction: 0.42,
+    previousState: INITIAL_SMART_EXIT_STATE,
+    maximumEventAgeSeconds: 3,
+  });
+  assert.equal(single.pressureConfirmed, false);
+  assert.equal(single.lowDurationSeconds, 0);
+
+  const wide = assessSmartExitMarketPressure({
+    nowSeconds: 749,
+    remainingSeconds: 151,
+    observedAtSeconds: 749,
+    bestBid: 0.45,
+    bestAsk: 0.64,
+    executablePrice: 0.45,
+    liquidityCoverage: 1,
+    marketLossFraction: 0.47,
+    previousState: {
+      ...INITIAL_SMART_EXIT_STATE,
+      marketPressureSamples: single.samples,
+      marketLowSinceSeconds: 745,
+      marketCollapseLatchUntilSeconds: 753,
+    },
+    maximumEventAgeSeconds: 3,
+  });
+  assert.equal(wide.bookHealthy, false);
+  assert.equal(wide.pressureConfirmed, false);
+  assert.equal(wide.collapseLatchActive, false);
+});
+
+test("flat low books cannot re-arm an expired collapse latch", () => {
+  const first = assessSmartExitMarketPressure({
+    nowSeconds: 100,
+    remainingSeconds: 150,
+    observedAtSeconds: 100,
+    bestBid: 0.50,
+    bestAsk: 0.52,
+    executablePrice: 0.50,
+    liquidityCoverage: 1,
+    marketLossFraction: 0.4,
+    previousState: INITIAL_SMART_EXIT_STATE,
+    maximumEventAgeSeconds: 3,
+  });
+  assert.equal(first.collapseLatchActive, true);
+
+  const flatAfterExpiry = assessSmartExitMarketPressure({
+    nowSeconds: 109,
+    remainingSeconds: 141,
+    observedAtSeconds: 109,
+    bestBid: 0.50,
+    bestAsk: 0.52,
+    executablePrice: 0.50,
+    liquidityCoverage: 1,
+    marketLossFraction: 0.4,
+    previousState: {
+      ...INITIAL_SMART_EXIT_STATE,
+      marketPressureSamples: first.samples,
+      marketCollapseLatchUntilSeconds: first.collapseLatchUntilSeconds,
+      marketLowSinceSeconds: first.lowSinceSeconds,
+    },
+    maximumEventAgeSeconds: 3,
+  });
+  assert.equal(flatAfterExpiry.collapseLatchActive, false);
+  assert.equal(flatAfterExpiry.pressureConfirmed, false);
+  assert.equal(flatAfterExpiry.lowDurationSeconds, 0);
+});
+
+test("spot and Kalshi feed gaps reset value-preservation persistence", () => {
+  const decision = evaluateSmartExit(
+    {
+      ...position,
+      expirySeconds: 300,
+      entryStake: 0.85,
+      marketAtEntry: { winProbability: 0.85, observedAtSeconds: 0 },
+    },
+    evidenceAt(120, {
+      underlyingPrice: 99.98,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.0003,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.49,
+      marketBestBid: 0.48,
+      marketBestAsk: 0.50,
+      marketExecutablePrice: 0.48,
+      marketExecutableQuantity: 10,
+    }),
+    {
+      ...INITIAL_SMART_EXIT_STATE,
+      previousUnderlyingPrice: 99.99,
+      previousUnderlyingAtSeconds: 110,
+      targetCrossedSinceSeconds: 105,
+      marketPressureSamples: [{
+        observedAtSeconds: 110,
+        bestBid: 0.48,
+        bestAsk: 0.50,
+        executablePrice: 0.48,
+        liquidityCoverage: 1,
+      }],
+      marketCollapseLatchUntilSeconds: 130,
+      marketLowSinceSeconds: 105,
+    },
+    { ...config, mode: "live-exit" },
+    120,
+  );
+  assert.equal(decision.targetCrossedDurationSeconds, 0);
+  assert.equal(decision.marketLowDurationSeconds, 0);
+  assert.equal(decision.marketPressureConfirmed, false);
+  assert.notEqual(decision.disposition, "EXIT_SIGNAL");
+});
+
+test("persistent losing-side spot plus healthy low Kalshi depth preserves value inside three minutes", () => {
+  const liveConfig = { ...config, mode: "live-exit" as const };
+  const livePosition = {
+    ...position,
+    expirySeconds: 900,
+    entryStake: 0.85,
+    marketAtEntry: { winProbability: 0.85, observedAtSeconds: 700 },
+  };
+  const first = evaluateSmartExit(
+    livePosition,
+    evidenceAt(745, {
+      underlyingPrice: 99.99,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.0002,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.52,
+      marketBestBid: 0.51,
+      marketBestAsk: 0.53,
+      marketExecutablePrice: 0.51,
+      marketExecutableQuantity: 10,
+    }),
+    {
+      ...INITIAL_SMART_EXIT_STATE,
+      previousUnderlyingPrice: 100.02,
+      previousUnderlyingAtSeconds: 744,
+    },
+    liveConfig,
+    745,
+  );
+  assert.equal(first.disposition, "UNAVAILABLE");
+
+  const second = evaluateSmartExit(
+    livePosition,
+    evidenceAt(747, {
+      underlyingPrice: 99.98,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.0003,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.50,
+      marketBestBid: 0.49,
+      marketBestAsk: 0.51,
+      marketExecutablePrice: 0.49,
+      marketExecutableQuantity: 10,
+    }),
+    first.nextState,
+    liveConfig,
+    747,
+  );
+  assert.equal(second.disposition, "UNAVAILABLE");
+
+  const third = evaluateSmartExit(
+    livePosition,
+    evidenceAt(749, {
+      underlyingPrice: 99.975,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.00035,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.495,
+      marketBestBid: 0.485,
+      marketBestAsk: 0.505,
+      marketExecutablePrice: 0.485,
+      marketExecutableQuantity: 10,
+    }),
+    second.nextState,
+    liveConfig,
+    749,
+  );
+  assert.equal(third.disposition, "UNAVAILABLE");
+
+  const fourth = evaluateSmartExit(
+    livePosition,
+    evidenceAt(751, {
+      underlyingPrice: 99.97,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.0004,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.49,
+      marketBestBid: 0.48,
+      marketBestAsk: 0.50,
+      marketExecutablePrice: 0.48,
+      marketExecutableQuantity: 10,
+    }),
+    third.nextState,
+    liveConfig,
+    751,
+  );
+  assert.equal(fourth.disposition, "EXIT_SIGNAL");
+  assert.equal(fourth.mayExecuteExit, true);
+  assert.equal(fourth.valuePreservationTriggered, true);
+  assert.equal(fourth.marketPressureConfirmed, true);
+  assert.ok(fourth.targetCrossedDurationSeconds >= 5);
+  assert.match(fourth.reason, /full-depth Kalshi value/i);
+});
+
+test("final-three-minute value preservation is symmetric for a held NO position", () => {
+  const liveConfig = { ...config, mode: "live-exit" as const };
+  const livePosition = {
+    ...position,
+    side: "no" as const,
+    expirySeconds: 900,
+    entryStake: 0.85,
+    marketAtEntry: { winProbability: 0.85, observedAtSeconds: 700 },
+  };
+  const samples = [
+    { at: 745, spot: 100.01, probability: 0.52, bid: 0.51, ask: 0.53 },
+    { at: 747, spot: 100.015, probability: 0.51, bid: 0.50, ask: 0.52 },
+    { at: 749, spot: 100.02, probability: 0.50, bid: 0.49, ask: 0.51 },
+    { at: 751, spot: 100.03, probability: 0.49, bid: 0.48, ask: 0.50 },
+  ];
+  let state = {
+    ...INITIAL_SMART_EXIT_STATE,
+    previousUnderlyingPrice: 99.98,
+    previousUnderlyingAtSeconds: 744,
+  };
+  let decision = evaluateSmartExit(
+    livePosition,
+    evidenceAt(samples[0].at, {
+      underlyingPrice: samples[0].spot,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: 0.0002,
+      tradeFlowImbalance: null,
+      bookImbalance: 1,
+      marketWinProbability: samples[0].probability,
+      marketBestBid: samples[0].bid,
+      marketBestAsk: samples[0].ask,
+      marketExecutablePrice: samples[0].bid,
+      marketExecutableQuantity: 10,
+    }),
+    state,
+    liveConfig,
+    samples[0].at,
+  );
+  state = decision.nextState;
+  for (const sample of samples.slice(1)) {
+    decision = evaluateSmartExit(
+      livePosition,
+      evidenceAt(sample.at, {
+        underlyingPrice: sample.spot,
+        volatilityLogReturnPerSqrtSecond: 0.0001,
+        momentumLogReturn: 0.0003,
+        tradeFlowImbalance: null,
+        bookImbalance: 1,
+        marketWinProbability: sample.probability,
+        marketBestBid: sample.bid,
+        marketBestAsk: sample.ask,
+        marketExecutablePrice: sample.bid,
+        marketExecutableQuantity: 10,
+      }),
+      state,
+      liveConfig,
+      sample.at,
+    );
+    state = decision.nextState;
+  }
+  assert.equal(decision.disposition, "EXIT_SIGNAL");
+  assert.equal(decision.valuePreservationTriggered, true);
+  assert.equal(decision.mayExecuteExit, true);
+});
+
+test("value-preservation pressure clears immediately when the held-side book recovers", () => {
+  const pressure = assessSmartExitMarketPressure({
+    nowSeconds: 750,
+    remainingSeconds: 150,
+    observedAtSeconds: 750,
+    bestBid: 0.63,
+    bestAsk: 0.65,
+    executablePrice: 0.63,
+    liquidityCoverage: 1,
+    marketLossFraction: 0.25,
+    previousState: {
+      ...INITIAL_SMART_EXIT_STATE,
+      marketLowSinceSeconds: 744,
+      marketCollapseLatchUntilSeconds: 755,
+      marketPressureSamples: [{
+        observedAtSeconds: 748,
+        bestBid: 0.49,
+        bestAsk: 0.51,
+        executablePrice: 0.49,
+        liquidityCoverage: 1,
+      }],
+    },
+    maximumEventAgeSeconds: 3,
+  });
+  assert.equal(pressure.pressureConfirmed, false);
+  assert.equal(pressure.collapseLatchActive, false);
+  assert.equal(pressure.lowSinceSeconds, null);
 });
 test("near-target adverse movement remains watch-only in the monitor band", () => {
   const initialState = {
