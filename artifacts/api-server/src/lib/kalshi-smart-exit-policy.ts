@@ -6,6 +6,7 @@ import type {
   SmartExitPosition,
   SmartExitSensitivity,
   SmartExitState,
+  SmartExitTimeBand,
 } from "./kalshi-smart-exit-types.ts";
 
 export interface SmartExitSensitivityParameters {
@@ -68,9 +69,12 @@ export const DEFAULT_SMART_EXIT_CONFIG: SmartExitConfig = Object.freeze({
 
 export const INITIAL_SMART_EXIT_STATE: SmartExitState = Object.freeze({
   adverseSampleCount: 0,
+  marketAdverseSampleCount: 0,
   holdUntilSeconds: 0,
   previousModelProbability: null,
   previousObservedAtSeconds: null,
+  previousMarketWinProbability: null,
+  previousMarketObservedAtSeconds: null,
   previousUnderlyingPrice: null,
   previousUnderlyingAtSeconds: null,
   previousAdverseVelocity: null,
@@ -79,6 +83,164 @@ export const INITIAL_SMART_EXIT_STATE: SmartExitState = Object.freeze({
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 const finite = (value: number | null): value is number => value !== null && Number.isFinite(value);
 export const SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS = 2.5;
+
+export interface SmartExitTimeBandParameters {
+  readonly band: SmartExitTimeBand;
+  readonly minimumDistanceFraction: number;
+  readonly volatilityReachMultiplier: number;
+  readonly underlyingConfirmationCount: number;
+  readonly marketConfirmationCount: number;
+  readonly minimumMarketLossFraction: number;
+}
+
+/**
+ * Exact remaining-time bands for a 15-minute market. Entries may happen at
+ * different times, so elapsed time is deliberately never inferred.
+ */
+export function resolveSmartExitTimeBand(remainingSeconds: number): SmartExitTimeBandParameters {
+  const remaining = Math.max(0, remainingSeconds);
+  if (remaining > 180) {
+    return {
+      band: "monitor", minimumDistanceFraction: 0.0025,
+      volatilityReachMultiplier: 1.25, underlyingConfirmationCount: 4,
+      marketConfirmationCount: 2, minimumMarketLossFraction: 0.35,
+    };
+  }
+  if (remaining > 120) {
+    return {
+      band: "escalation", minimumDistanceFraction: 0.0015,
+      volatilityReachMultiplier: 0.75, underlyingConfirmationCount: 3,
+      marketConfirmationCount: 2, minimumMarketLossFraction: 0.20,
+    };
+  }
+  if (remaining > 60) {
+    return {
+      band: "urgent", minimumDistanceFraction: 0.00075,
+      volatilityReachMultiplier: 0.35, underlyingConfirmationCount: 2,
+      marketConfirmationCount: 2, minimumMarketLossFraction: 0.10,
+    };
+  }
+  return {
+    band: "critical", minimumDistanceFraction: 0,
+    volatilityReachMultiplier: 0, underlyingConfirmationCount: 1,
+    marketConfirmationCount: 1, minimumMarketLossFraction: 0.05,
+  };
+}
+
+export interface SmartExitMarketDirectionAssessment {
+  readonly direction: "adverse" | "recovering" | "flat" | "unknown";
+  readonly probabilityDelta: number | null;
+  readonly adverseSlopePerSecond: number | null;
+  readonly sampleCount: number;
+  readonly confirmed: boolean;
+}
+
+/** Current and previous values are both held-side winning probabilities. */
+export function assessSmartExitMarketDirection(input: {
+  readonly currentProbability: number | null;
+  readonly currentObservedAtSeconds: number | null;
+  readonly previousProbability: number | null | undefined;
+  readonly previousObservedAtSeconds: number | null | undefined;
+  readonly previousSampleCount: number | undefined;
+  readonly maximumGapSeconds: number;
+  readonly requiredSampleCount: number;
+  readonly marketLossFraction: number | null;
+  readonly minimumMarketLossFraction: number;
+}): SmartExitMarketDirectionAssessment {
+  const current = input.currentProbability;
+  const previous = input.previousProbability;
+  const currentAt = input.currentObservedAtSeconds;
+  const previousAt = input.previousObservedAtSeconds;
+  if (!finite(current) || current < 0 || current > 1
+      || !finite(previous ?? null) || previous! < 0 || previous! > 1
+      || !finite(currentAt) || !finite(previousAt ?? null)) {
+    return {
+      direction: "unknown", probabilityDelta: null, adverseSlopePerSecond: null,
+      sampleCount: 0, confirmed: false,
+    };
+  }
+  const elapsed = currentAt - previousAt!;
+  if (elapsed <= 0 || elapsed > input.maximumGapSeconds) {
+    return {
+      direction: "unknown", probabilityDelta: null, adverseSlopePerSecond: null,
+      sampleCount: 0, confirmed: false,
+    };
+  }
+  const probabilityDelta = current - previous!;
+  const adverseSlopePerSecond = -probabilityDelta / elapsed;
+  const epsilon = 0.001;
+  const direction = probabilityDelta < -epsilon
+    ? "adverse" as const
+    : probabilityDelta > epsilon ? "recovering" as const : "flat" as const;
+  const sampleCount = direction === "adverse"
+    ? Math.max(0, input.previousSampleCount ?? 0) + 1
+    : 0;
+  return {
+    direction,
+    probabilityDelta,
+    adverseSlopePerSecond,
+    sampleCount,
+    confirmed: direction === "adverse"
+      && sampleCount >= input.requiredSampleCount
+      && input.marketLossFraction !== null
+      && input.marketLossFraction >= input.minimumMarketLossFraction,
+  };
+}
+
+export interface SmartExitTimeScaledRisk {
+  readonly timeBand: SmartExitTimeBand;
+  readonly adverseTargetDistanceFraction: number;
+  readonly requiredAdverseTargetDistanceFraction: number;
+  readonly recoveryReachable: boolean;
+  readonly underlyingConfirmed: boolean;
+  readonly actionable: boolean;
+}
+
+/** Shared by live policy and durable replay. Positive distance is on the losing side. */
+export function assessSmartExitTimeScaledRisk(input: {
+  readonly side: BinarySide;
+  readonly underlyingPrice: number;
+  readonly strikePrice: number;
+  readonly remainingSeconds: number;
+  readonly volatilityLogReturnPerSqrtSecond: number;
+  readonly fatTailVolatilityMultiplier: number;
+  readonly directionalCount: number;
+  readonly continuationAdverse: boolean;
+  readonly targetAlreadyCrossed: boolean;
+  readonly projectedCrossingConfirmed: boolean;
+  readonly marketDirectionConfirmed: boolean;
+}): SmartExitTimeScaledRisk {
+  const parameters = resolveSmartExitTimeBand(input.remainingSeconds);
+  const signedDistance = input.side === "yes"
+    ? (input.strikePrice - input.underlyingPrice) / input.strikePrice
+    : (input.underlyingPrice - input.strikePrice) / input.strikePrice;
+  const adverseTargetDistanceFraction = Math.max(0, signedDistance);
+  const volatilityReach = Math.max(0, input.volatilityLogReturnPerSqrtSecond)
+    * Math.sqrt(Math.max(0, input.remainingSeconds))
+    * input.fatTailVolatilityMultiplier;
+  const requiredAdverseTargetDistanceFraction = Math.max(
+    parameters.minimumDistanceFraction,
+    volatilityReach * parameters.volatilityReachMultiplier,
+  );
+  const recoveryReachable = adverseTargetDistanceFraction <= volatilityReach;
+  const underlyingConfirmed = input.directionalCount >= parameters.underlyingConfirmationCount
+    && input.continuationAdverse;
+  const distanceConfirmed = adverseTargetDistanceFraction + 1e-12
+    >= requiredAdverseTargetDistanceFraction;
+  const actionable = input.marketDirectionConfirmed && (
+    parameters.band === "critical"
+      ? input.projectedCrossingConfirmed && underlyingConfirmed
+      : input.targetAlreadyCrossed && underlyingConfirmed && distanceConfirmed
+  );
+  return {
+    timeBand: parameters.band,
+    adverseTargetDistanceFraction,
+    requiredAdverseTargetDistanceFraction,
+    recoveryReachable,
+    underlyingConfirmed,
+    actionable,
+  };
+}
 
 export interface SmartExitCrossingRiskInput {
   readonly side: BinarySide;
@@ -302,6 +464,14 @@ type DecisionMetrics = Omit<SmartExitDecision,
 
 function emptyMetrics(): DecisionMetrics {
   return {
+    timeBand: "monitor",
+    adverseTargetDistanceFraction: 0,
+    requiredAdverseTargetDistanceFraction: 0,
+    marketDirection: "unknown",
+    marketProbabilityDelta: null,
+    marketAdverseSlopePerSecond: null,
+    marketDirectionConfirmed: false,
+    marketDirectionSampleCount: 0,
     marketLossFraction: null,
     capitalLossFraction: null,
     deepLossHoldActive: false,
@@ -460,6 +630,18 @@ export function evaluateSmartExit(
   const marketLossFraction = finite(evidence.marketWinProbability) && entryMarket > 0
     ? clamp((entryMarket - evidence.marketWinProbability) / entryMarket, 0, 1)
     : null;
+  const timeBandParameters = resolveSmartExitTimeBand(remaining);
+  const marketDirection = assessSmartExitMarketDirection({
+    currentProbability: evidence.marketWinProbability,
+    currentObservedAtSeconds: evidence.marketQuoteObservedAtSeconds,
+    previousProbability: state.previousMarketWinProbability,
+    previousObservedAtSeconds: state.previousMarketObservedAtSeconds,
+    previousSampleCount: state.marketAdverseSampleCount,
+    maximumGapSeconds: config.maxEvidenceAgeSeconds,
+    requiredSampleCount: timeBandParameters.marketConfirmationCount,
+    marketLossFraction,
+    minimumMarketLossFraction: timeBandParameters.minimumMarketLossFraction,
+  });
   const highRisk = marketLossFraction != null && marketLossFraction >= config.rapidLossRatio;
   const quantity = Math.max(0, position.remainingQuantity);
   const estimatedSaleValue = finite(evidence.marketExecutablePrice)
@@ -541,20 +723,49 @@ export function evaluateSmartExit(
   const sustainedAdverseSample = directionalCount > 0;
   const nextBase: SmartExitState = {
     adverseSampleCount: directionalCount,
+    marketAdverseSampleCount: marketDirection.sampleCount,
     holdUntilSeconds: state.holdUntilSeconds,
     previousModelProbability: probability,
     previousObservedAtSeconds: evidence.observedAtSeconds,
+    previousMarketWinProbability: finite(evidence.marketWinProbability)
+      ? evidence.marketWinProbability : null,
+    previousMarketObservedAtSeconds: finite(evidence.marketWinProbability)
+      ? evidence.marketQuoteObservedAtSeconds : null,
     previousUnderlyingPrice: evidence.underlyingPrice,
     previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
     previousAdverseVelocity: adverseVelocity,
   };
-  const shared = { ...common, crossingRiskConfirmed };
+  const timeScaledRisk = assessSmartExitTimeScaledRisk({
+    side: position.side,
+    underlyingPrice: evidence.underlyingPrice!,
+    strikePrice: position.strikePrice,
+    remainingSeconds: remaining,
+    volatilityLogReturnPerSqrtSecond: evidence.volatilityLogReturnPerSqrtSecond!,
+    fatTailVolatilityMultiplier: config.fatTailVolatilityMultiplier,
+    directionalCount,
+    continuationAdverse,
+    targetAlreadyCrossed: alreadyAcrossTarget,
+    projectedCrossingConfirmed: crossingRiskConfirmed,
+    marketDirectionConfirmed: marketDirection.confirmed,
+  });
+  const shared = {
+    ...common,
+    crossingRiskConfirmed: timeScaledRisk.actionable,
+    timeBand: timeScaledRisk.timeBand,
+    adverseTargetDistanceFraction: timeScaledRisk.adverseTargetDistanceFraction,
+    requiredAdverseTargetDistanceFraction: timeScaledRisk.requiredAdverseTargetDistanceFraction,
+    marketDirection: marketDirection.direction,
+    marketProbabilityDelta: marketDirection.probabilityDelta,
+    marketAdverseSlopePerSecond: marketDirection.adverseSlopePerSecond,
+    marketDirectionConfirmed: marketDirection.confirmed,
+    marketDirectionSampleCount: marketDirection.sampleCount,
+  };
   const probabilityDeteriorated = drop !== null && drop < -threshold;
   const marketDeteriorated = marketLossFraction !== null
     && marketLossFraction >= sensitivity.parameters.minMarketLossFraction;
   const meaningfulDeterioration = alreadyAcrossTarget
     || probabilityDeteriorated || fastDrop || highRisk || marketDeteriorated;
-  const exitReady = crossingRiskConfirmed
+  const exitReady = timeScaledRisk.actionable
     && meaningfulDeterioration
     && (alreadyAcrossTarget || marketDeteriorated)
     && economicExit
@@ -585,23 +796,29 @@ export function evaluateSmartExit(
     }
     return {
       disposition: "EXIT_SIGNAL",
-      reason: alreadyAcrossTarget
-        ? "target crossed with fresh full-liquidity sale evidence"
-        : "sustained adverse move can cross target before expiry; fresh full-liquidity sale dominates hold value",
+      reason: `${timeScaledRisk.timeBand} band: ${
+        alreadyAcrossTarget
+          ? "continued adverse target crossing"
+          : "sharp adverse move can cross before expiry"
+      }; fresh Kalshi direction and full-liquidity sale evidence confirm exit`,
       mayExecuteExit: mayExecute, riskStage: "exit", nextState: nextBase, ...shared,
     };
   }
   if (meaningfulDeterioration && crossingTrajectoryPlausible) {
     return {
-      disposition: "PREPARE_EXIT",
-      reason: !crossingRiskConfirmed
-        ? "adverse move is near enough to threaten the target; awaiting sustained direction"
-        : !executionEvidenceReady
+      disposition: timeScaledRisk.timeBand === "monitor" ? "WATCH" : "PREPARE_EXIT",
+      reason: !timeScaledRisk.underlyingConfirmed
+        ? `${timeScaledRisk.timeBand} band: monitoring recovery; awaiting sustained adverse direction`
+        : !marketDirection.confirmed
+          ? `${timeScaledRisk.timeBand} band: underlying risk present; awaiting fresh adverse Kalshi direction`
+          : !executionEvidenceReady
           ? "crossing risk confirmed; awaiting fresh full-position executable liquidity"
           : !economicExit
             ? "crossing risk confirmed; current executable sale does not beat hold value"
             : "crossing risk confirmed; awaiting material Kalshi deterioration",
-      mayExecuteExit: false, riskStage: "prepare_exit", nextState: nextBase, ...shared,
+      mayExecuteExit: false,
+      riskStage: timeScaledRisk.timeBand === "monitor" ? "watch" : "prepare_exit",
+      nextState: nextBase, ...shared,
     };
   }
   if (nowSeconds < state.holdUntilSeconds) {
@@ -619,7 +836,9 @@ export function evaluateSmartExit(
   const watch = marketDeteriorated || probabilityDeteriorated || fastDrop || highRisk || sustainedAdverseSample;
   return {
     disposition: watch ? "WATCH" : "HOLD",
-    reason: crossingTrajectoryPlausible
+    reason: marketDirection.direction === "recovering"
+      ? `${timeScaledRisk.timeBand} band: held-side Kalshi probability is recovering`
+      : crossingTrajectoryPlausible
       ? "crossing trajectory is forming but deterioration is not yet actionable"
       : marketDeteriorated || highRisk
         ? "Kalshi repricing is under review; underlying target crossing is not plausible"

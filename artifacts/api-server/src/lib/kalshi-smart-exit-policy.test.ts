@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_SMART_EXIT_CONFIG, INITIAL_SMART_EXIT_STATE, adverseContinuationScore,
+  assessSmartExitMarketDirection,
+  assessSmartExitTimeScaledRisk,
   assessSmartExitDeepLossHold,
   evaluateSmartExit, modelWinProbability, probabilityDropThreshold,
   resolveSmartExitSensitivity,
+  resolveSmartExitTimeBand,
 } from "./kalshi-smart-exit-policy.ts";
 import type { SmartExitEvidence, SmartExitPosition } from "./kalshi-smart-exit-types.ts";
 
@@ -76,7 +79,7 @@ test("missing, stale, and commodity evidence fail closed", () => {
   assert.equal(evaluateSmartExit(position, evidence({ spotReceivedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit({ ...position, underlyingKind: "commodity" }, evidence(), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
 });
-test("near-target adverse movement prepares, then signals only after sustained confirmation", () => {
+test("near-target adverse movement remains watch-only in the monitor band", () => {
   const initialState = {
     ...INITIAL_SMART_EXIT_STATE,
     previousUnderlyingPrice: 101,
@@ -88,7 +91,7 @@ test("near-target adverse movement prepares, then signals only after sustained c
     marketExecutablePrice: 0.9,
   });
   const first = evaluateSmartExit(position, current, initialState, config, 100);
-  assert.equal(first.disposition, "PREPARE_EXIT");
+  assert.equal(first.disposition, "WATCH");
   assert.equal(first.crossingRiskConfirmed, false);
   const second = evaluateSmartExit(
     position,
@@ -107,8 +110,8 @@ test("near-target adverse movement prepares, then signals only after sustained c
     config,
     101,
   );
-  assert.equal(second.disposition, "EXIT_SIGNAL");
-  assert.equal(second.crossingRiskConfirmed, true);
+  assert.equal(second.disposition, "WATCH");
+  assert.equal(second.crossingRiskConfirmed, false);
   assert.equal(second.mayExecuteExit, false);
 });
 test("fast catastrophic probability drop cannot bypass crossing confirmation", () => {
@@ -136,7 +139,7 @@ test("fast catastrophic probability drop cannot bypass crossing confirmation", (
   assert.equal(decision.mayExecuteExit, false);
 });
 
-test("80-cent entry collapsing below 40 cents escalates immediately with crossing projection and economics", () => {
+test("an early market collapse cannot exit without fresh Kalshi direction confirmation", () => {
   const state = {
     ...INITIAL_SMART_EXIT_STATE,
     previousUnderlyingPrice: 101,
@@ -158,7 +161,7 @@ test("80-cent entry collapsing below 40 cents escalates immediately with crossin
   assert.equal(decision.highRisk, true);
   assert.equal(decision.targetAlreadyCrossed, true);
   assert.equal(decision.projectedCrossBeforeExpiry, true);
-  assert.equal(decision.disposition, "EXIT_SIGNAL");
+  assert.equal(decision.disposition, "WATCH");
   assert.ok(decision.estimatedSaleValue! > decision.expectedHoldValue!);
 });
 
@@ -212,7 +215,7 @@ test("a sharp adverse move remains non-executable when distance and volatility m
   assert.equal(decision.mayExecuteExit, false);
 });
 
-test("actual target crossing can escalate immediately but requires complete executable evidence", () => {
+test("actual target crossing remains watch-only early even with complete executable evidence", () => {
   const noDepth = evaluateSmartExit(
     position,
     evidence({ marketExecutableQuantity: null }),
@@ -221,7 +224,7 @@ test("actual target crossing can escalate immediately but requires complete exec
     100,
   );
   assert.equal(noDepth.targetAlreadyCrossed, true);
-  assert.equal(noDepth.disposition, "PREPARE_EXIT");
+  assert.equal(noDepth.disposition, "WATCH");
   assert.equal(noDepth.mayExecuteExit, false);
 
   const executable = evaluateSmartExit(
@@ -231,12 +234,12 @@ test("actual target crossing can escalate immediately but requires complete exec
     { ...config, mode: "live-exit" },
     100,
   );
-  assert.equal(executable.disposition, "EXIT_SIGNAL");
-  assert.equal(executable.crossingRiskConfirmed, true);
-  assert.equal(executable.mayExecuteExit, true);
+  assert.equal(executable.disposition, "WATCH");
+  assert.equal(executable.crossingRiskConfirmed, false);
+  assert.equal(executable.mayExecuteExit, false);
 });
 
-test("target crossing during collector warm-up is explicitly unavailable until all crossing evidence recovers", () => {
+test("target crossing during collector warm-up is unavailable then returns to early monitoring", () => {
   const warming = evaluateSmartExit(
     position,
     evidence({
@@ -271,8 +274,8 @@ test("target crossing during collector warm-up is explicitly unavailable until a
     { ...config, mode: "live-exit" },
     101,
   );
-  assert.equal(recovered.disposition, "EXIT_SIGNAL");
-  assert.equal(recovered.mayExecuteExit, true);
+  assert.equal(recovered.disposition, "WATCH");
+  assert.equal(recovered.mayExecuteExit, false);
 });
 
 test("crossed target missing volatility keeps the crossing-specific unavailable reason", () => {
@@ -288,7 +291,7 @@ test("crossed target missing volatility keeps the crossing-specific unavailable 
   assert.match(decision.reason, /target crossed.*volatility/i);
 });
 
-test("actual target crossing does not wait for a 25-percent Kalshi repricing", () => {
+test("actual target crossing alone cannot bypass the time-scaled policy", () => {
   const decision = evaluateSmartExit(
     position,
     evidence({
@@ -301,8 +304,8 @@ test("actual target crossing does not wait for a 25-percent Kalshi repricing", (
   );
   assert.ok(decision.marketLossFraction! < 0.25);
   assert.equal(decision.targetAlreadyCrossed, true);
-  assert.equal(decision.disposition, "EXIT_SIGNAL");
-  assert.equal(decision.mayExecuteExit, true);
+  assert.equal(decision.disposition, "WATCH");
+  assert.equal(decision.mayExecuteExit, false);
 });
 
 test("deep-loss recovery protection uses the exact 80/90 percent and 3:30 boundaries", () => {
@@ -340,7 +343,7 @@ test("deep-loss recovery protection uses the exact 80/90 percent and 3:30 bounda
   );
 });
 
-test("90-percent executable capital loss always blocks a live exit signal", () => {
+test("90-percent capital loss assessment remains a terminal hold", () => {
   const decision = evaluateSmartExit(
     { ...position, entryStake: 1 },
     evidence({ underlyingPrice: 1, marketExecutablePrice: 0.1, marketExecutableQuantity: 1 }),
@@ -349,10 +352,14 @@ test("90-percent executable capital loss always blocks a live exit signal", () =
     100,
   );
   assert.equal(decision.capitalLossFraction, 0.9);
-  assert.equal(decision.deepLossHoldActive, true);
-  assert.equal(decision.deepLossHoldKind, "terminal");
-  assert.equal(decision.disposition, "HOLD");
-  assert.equal(decision.mayExecuteExit, false);
+  assert.deepEqual(assessSmartExitDeepLossHold({
+    capitalLossFraction: decision.capitalLossFraction,
+    remainingSeconds: 800,
+    recoveryReachable: false,
+    deepLossHoldThreshold: 0.8,
+    terminalLossHoldThreshold: 0.9,
+    recoveryMinSeconds: 210,
+  }), { hold: true, kind: "terminal" });
 });
 
 test("deep-loss protection ignores partial and stale executable evidence", () => {
@@ -365,7 +372,7 @@ test("deep-loss protection ignores partial and stale executable evidence", () =>
   );
   assert.equal(partial.capitalLossFraction, null);
   assert.equal(partial.deepLossHoldActive, false);
-  assert.equal(partial.disposition, "PREPARE_EXIT");
+  assert.equal(partial.disposition, "WATCH");
 
   const stale = evaluateSmartExit(
     { ...position, entryStake: 1 },
@@ -441,4 +448,243 @@ test("live execution keeps the decision-time edge and freshness limits immutable
   );
   assert.equal(decision.maximumExecutionEvidenceAgeSeconds, 2);
   assert.equal(decision.executionEvidenceExpiresAtSeconds, 102);
+});
+
+test("time bands use exact remaining-second boundaries", () => {
+  assert.equal(resolveSmartExitTimeBand(421).band, "monitor");
+  assert.equal(resolveSmartExitTimeBand(420).band, "monitor");
+  assert.equal(resolveSmartExitTimeBand(181).band, "monitor");
+  assert.equal(resolveSmartExitTimeBand(180).band, "escalation");
+  assert.equal(resolveSmartExitTimeBand(121).band, "escalation");
+  assert.equal(resolveSmartExitTimeBand(120).band, "urgent");
+  assert.equal(resolveSmartExitTimeBand(61).band, "urgent");
+  assert.equal(resolveSmartExitTimeBand(60).band, "critical");
+  assert.equal(resolveSmartExitTimeBand(0).band, "critical");
+});
+
+test("the same shallow crossing becomes actionable only as time runs out", () => {
+  const assess = (remainingSeconds: number) => assessSmartExitTimeScaledRisk({
+    side: "no",
+    underlyingPrice: 100.10,
+    strikePrice: 100,
+    remainingSeconds,
+    volatilityLogReturnPerSqrtSecond: 0.00001,
+    fatTailVolatilityMultiplier: 1,
+    directionalCount: 4,
+    continuationAdverse: true,
+    targetAlreadyCrossed: true,
+    projectedCrossingConfirmed: true,
+    marketDirectionConfirmed: true,
+  });
+  assert.equal(assess(181).timeBand, "monitor");
+  assert.equal(assess(181).actionable, false);
+  assert.equal(assess(180).timeBand, "escalation");
+  assert.equal(assess(180).actionable, false);
+  assert.equal(assess(120).timeBand, "urgent");
+  assert.equal(assess(120).actionable, true);
+  assert.equal(assess(60).timeBand, "critical");
+  assert.equal(assess(60).actionable, true);
+});
+
+test("a roughly 0.25-percent BTC displacement is the early extreme floor, not a dollar constant", () => {
+  const below = assessSmartExitTimeScaledRisk({
+    side: "no",
+    underlyingPrice: 100_249,
+    strikePrice: 100_000,
+    remainingSeconds: 300,
+    volatilityLogReturnPerSqrtSecond: 0.00001,
+    fatTailVolatilityMultiplier: 1,
+    directionalCount: 4,
+    continuationAdverse: true,
+    targetAlreadyCrossed: true,
+    projectedCrossingConfirmed: true,
+    marketDirectionConfirmed: true,
+  });
+  const beyond = assessSmartExitTimeScaledRisk({
+    ...{
+      side: "no" as const,
+      strikePrice: 100_000,
+      remainingSeconds: 300,
+      volatilityLogReturnPerSqrtSecond: 0.00001,
+      fatTailVolatilityMultiplier: 1,
+      directionalCount: 4,
+      continuationAdverse: true,
+      targetAlreadyCrossed: true,
+      projectedCrossingConfirmed: true,
+      marketDirectionConfirmed: true,
+    },
+    underlyingPrice: 100_301,
+  });
+  assert.equal(below.timeBand, "monitor");
+  assert.equal(below.actionable, false);
+  assert.equal(beyond.actionable, true);
+  assert.ok(below.requiredAdverseTargetDistanceFraction >= 0.0025);
+  assert.ok(beyond.adverseTargetDistanceFraction > below.adverseTargetDistanceFraction);
+});
+
+test("fresh held-side Kalshi direction requires consecutive adverse samples and resets on recovery", () => {
+  const first = assessSmartExitMarketDirection({
+    currentProbability: 0.62,
+    currentObservedAtSeconds: 101,
+    previousProbability: 0.70,
+    previousObservedAtSeconds: 100,
+    previousSampleCount: 0,
+    maximumGapSeconds: 3,
+    requiredSampleCount: 2,
+    marketLossFraction: 0.25,
+    minimumMarketLossFraction: 0.20,
+  });
+  assert.equal(first.direction, "adverse");
+  assert.equal(first.sampleCount, 1);
+  assert.equal(first.confirmed, false);
+  const second = assessSmartExitMarketDirection({
+    currentProbability: 0.55,
+    currentObservedAtSeconds: 102,
+    previousProbability: 0.62,
+    previousObservedAtSeconds: 101,
+    previousSampleCount: first.sampleCount,
+    maximumGapSeconds: 3,
+    requiredSampleCount: 2,
+    marketLossFraction: 0.30,
+    minimumMarketLossFraction: 0.20,
+  });
+  assert.equal(second.confirmed, true);
+  assert.ok(second.adverseSlopePerSecond! > 0);
+  const recovery = assessSmartExitMarketDirection({
+    currentProbability: 0.60,
+    currentObservedAtSeconds: 103,
+    previousProbability: 0.55,
+    previousObservedAtSeconds: 102,
+    previousSampleCount: second.sampleCount,
+    maximumGapSeconds: 3,
+    requiredSampleCount: 2,
+    marketLossFraction: 0.25,
+    minimumMarketLossFraction: 0.20,
+  });
+  assert.equal(recovery.direction, "recovering");
+  assert.equal(recovery.sampleCount, 0);
+  assert.equal(recovery.confirmed, false);
+});
+
+test("stale, flat, and disagreeing Kalshi evidence cannot authorize an exit", () => {
+  const stale = assessSmartExitMarketDirection({
+    currentProbability: 0.40,
+    currentObservedAtSeconds: 110,
+    previousProbability: 0.70,
+    previousObservedAtSeconds: 100,
+    previousSampleCount: 10,
+    maximumGapSeconds: 3,
+    requiredSampleCount: 1,
+    marketLossFraction: 0.5,
+    minimumMarketLossFraction: 0.05,
+  });
+  assert.equal(stale.direction, "unknown");
+  assert.equal(stale.confirmed, false);
+  const flat = assessSmartExitMarketDirection({
+    currentProbability: 0.7005,
+    currentObservedAtSeconds: 101,
+    previousProbability: 0.70,
+    previousObservedAtSeconds: 100,
+    previousSampleCount: 10,
+    maximumGapSeconds: 3,
+    requiredSampleCount: 1,
+    marketLossFraction: 0.5,
+    minimumMarketLossFraction: 0.05,
+  });
+  assert.equal(flat.direction, "flat");
+  assert.equal(flat.confirmed, false);
+  const risk = assessSmartExitTimeScaledRisk({
+    side: "yes",
+    underlyingPrice: 99,
+    strikePrice: 100,
+    remainingSeconds: 30,
+    volatilityLogReturnPerSqrtSecond: 0.001,
+    fatTailVolatilityMultiplier: 1,
+    directionalCount: 4,
+    continuationAdverse: true,
+    targetAlreadyCrossed: true,
+    projectedCrossingConfirmed: true,
+    marketDirectionConfirmed: false,
+  });
+  assert.equal(risk.actionable, false);
+});
+
+test("final-minute projected crossing is actionable before the target only with both confirmations", () => {
+  const base = {
+    side: "yes" as const,
+    underlyingPrice: 100.05,
+    strikePrice: 100,
+    remainingSeconds: 59,
+    volatilityLogReturnPerSqrtSecond: 0.001,
+    fatTailVolatilityMultiplier: 1,
+    directionalCount: 2,
+    continuationAdverse: true,
+    targetAlreadyCrossed: false,
+    projectedCrossingConfirmed: true,
+    marketDirectionConfirmed: true,
+  };
+  assert.equal(assessSmartExitTimeScaledRisk(base).actionable, true);
+  assert.equal(assessSmartExitTimeScaledRisk({
+    ...base,
+    marketDirectionConfirmed: false,
+  }).actionable, false);
+  assert.equal(assessSmartExitTimeScaledRisk({
+    ...base,
+    continuationAdverse: false,
+  }).actionable, false);
+});
+
+test("ZEC-style shallow crossing with 131 seconds left cannot jump directly to exit", () => {
+  const zecPosition: SmartExitPosition = {
+    ...position,
+    positionId: "zec-regression",
+    symbol: "ZEC",
+    side: "no",
+    strikePrice: 817.7313,
+    expirySeconds: 900,
+    entryStake: 1.74,
+    marketAtEntry: { winProbability: 0.87, observedAtSeconds: 0 },
+  };
+  const state = {
+    ...INITIAL_SMART_EXIT_STATE,
+    adverseSampleCount: 3,
+    marketAdverseSampleCount: 1,
+    previousUnderlyingPrice: 817.80,
+    previousUnderlyingAtSeconds: 768,
+    previousAdverseVelocity: 0.05,
+    previousMarketWinProbability: 0.58,
+    previousMarketObservedAtSeconds: 768,
+  };
+  const decision = evaluateSmartExit(
+    zecPosition,
+    evidence({
+      observedAtSeconds: 769,
+      spotReceivedAtSeconds: 769,
+      tapeReceivedAtSeconds: 769,
+      bookReceivedAtSeconds: 769,
+      spotObservedAtSeconds: 769,
+      tapeObservedAtSeconds: 769,
+      bookObservedAtSeconds: 769,
+      underlyingPrice: 817.88,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: 0.001,
+      momentumWindowSeconds: 15,
+      tradeFlowImbalance: 0.8,
+      bookImbalance: 0.8,
+      marketWinProbability: 0.52,
+      marketQuoteObservedAtSeconds: 769,
+      marketBookObservedAtSeconds: 769,
+      marketExecutablePrice: 0.52,
+      marketExecutableQuantity: 2,
+    }),
+    state,
+    { ...config, mode: "live-exit", sensitivity: "less_aggressive" },
+    769,
+  );
+  assert.equal(decision.timeBand, "escalation");
+  assert.equal(decision.targetAlreadyCrossed, true);
+  assert.equal(decision.marketDirectionConfirmed, true);
+  assert.equal(decision.disposition, "PREPARE_EXIT");
+  assert.equal(decision.mayExecuteExit, false);
+  assert.ok(decision.adverseTargetDistanceFraction < decision.requiredAdverseTargetDistanceFraction);
 });

@@ -679,10 +679,14 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
   const nowSeconds = nowMs / 1_000;
   const key = identityKey(position.owner.kind, position.positionId);
   const effectiveConfig = effectiveConfigForPosition(position);
+  const previousState = {
+    ...INITIAL_SMART_EXIT_STATE,
+    ...(states.get(key) ?? {}),
+  };
   const decision = evaluateSmartExit(
     position,
     evidence,
-    states.get(key) ?? INITIAL_SMART_EXIT_STATE,
+    previousState,
     effectiveConfig,
     nowSeconds,
   );
@@ -732,6 +736,15 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     tradeFlowImbalance: evidence.tradeFlowImbalance,
     bookImbalance: evidence.bookImbalance,
     continuationScore: decision.continuationScore,
+    timeBand: decision.timeBand,
+    adverseTargetDistanceFraction: decision.adverseTargetDistanceFraction,
+    requiredAdverseTargetDistanceFraction: decision.requiredAdverseTargetDistanceFraction,
+    previousMarketWinProbability: previousState.previousMarketWinProbability,
+    marketProbabilityDelta: decision.marketProbabilityDelta,
+    marketAdverseSlopePerSecond: decision.marketAdverseSlopePerSecond,
+    marketDirection: decision.marketDirection,
+    marketDirectionConfirmed: decision.marketDirectionConfirmed,
+    marketDirectionSampleCount: decision.marketDirectionSampleCount,
     riskStage: decision.riskStage,
     marketLossFraction: decision.marketLossFraction,
     capitalLossFraction: decision.capitalLossFraction,

@@ -173,15 +173,20 @@ export interface SmartExitAppliedVersion {
 
 export interface SmartExitState {
   readonly adverseSampleCount: number;
+  readonly marketAdverseSampleCount: number;
   readonly holdUntilSeconds: number;
   readonly previousModelProbability: number | null;
   readonly previousObservedAtSeconds: number | null;
+  readonly previousMarketWinProbability: number | null;
+  readonly previousMarketObservedAtSeconds: number | null;
   readonly previousUnderlyingPrice: number | null;
   readonly previousUnderlyingAtSeconds: number | null;
   readonly previousAdverseVelocity: number | null;
 }
 
 export type SmartExitDisposition = "OFF" | "HOLD" | "WATCH" | "PREPARE_EXIT" | "EXIT_SIGNAL" | "UNAVAILABLE";
+export type SmartExitTimeBand = "monitor" | "escalation" | "urgent" | "critical";
+export type SmartExitMarketDirection = "adverse" | "recovering" | "flat" | "unknown";
 
 export interface SmartExitDecision {
   readonly disposition: SmartExitDisposition;
@@ -193,6 +198,14 @@ export interface SmartExitDecision {
   readonly threshold: number | null;
   readonly continuationScore: number | null;
   readonly riskStage: SmartExitRiskStage;
+  readonly timeBand: SmartExitTimeBand;
+  readonly adverseTargetDistanceFraction: number;
+  readonly requiredAdverseTargetDistanceFraction: number;
+  readonly marketDirection: SmartExitMarketDirection;
+  readonly marketProbabilityDelta: number | null;
+  readonly marketAdverseSlopePerSecond: number | null;
+  readonly marketDirectionConfirmed: boolean;
+  readonly marketDirectionSampleCount: number;
   readonly marketLossFraction: number | null;
   /** Loss on a fresh full-position executable sale versus actual remaining entry stake. */
   readonly capitalLossFraction: number | null;
@@ -255,6 +268,15 @@ export interface SmartExitEvaluationRecord {
   readonly tradeFlowImbalance: number | null;
   readonly bookImbalance: number | null;
   readonly continuationScore: number | null;
+  readonly timeBand: SmartExitTimeBand;
+  readonly adverseTargetDistanceFraction: number;
+  readonly requiredAdverseTargetDistanceFraction: number;
+  readonly previousMarketWinProbability: number | null;
+  readonly marketProbabilityDelta: number | null;
+  readonly marketAdverseSlopePerSecond: number | null;
+  readonly marketDirection: SmartExitMarketDirection;
+  readonly marketDirectionConfirmed: boolean;
+  readonly marketDirectionSampleCount: number;
   readonly recommendation: "off" | "hold" | "watch" | "prepare_exit" | "exit" | "unavailable";
   readonly riskStage: SmartExitRiskStage;
   readonly marketLossFraction: number | null;

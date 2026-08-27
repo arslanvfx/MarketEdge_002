@@ -139,14 +139,16 @@ test("durable one-second replay requires sustained realistic crossing before sel
       underlyingPrice: 150,
       volatilityLogReturnPerSqrtSecond: 0.00001,
       projectedCrossingSeconds: 10,
+      marketWinProbability: 0.75,
+      marketQuoteAgeMs: 0,
     }),
-    durableEvaluation(30),
-    durableEvaluation(31),
-    durableEvaluation(32),
-    durableEvaluation(33),
+    durableEvaluation(40, { marketWinProbability: 0.70, marketQuoteAgeMs: 0 }),
+    durableEvaluation(41, { marketWinProbability: 0.60, marketQuoteAgeMs: 0 }),
+    durableEvaluation(42, { marketWinProbability: 0.50, marketQuoteAgeMs: 0 }),
+    durableEvaluation(43, { marketWinProbability: 0.40, marketQuoteAgeMs: 0 }),
   ]);
-  assert.equal(replay[0]!.candidateExit?.timestampSeconds, 33);
-  assert.match(replay[0]!.candidateExit?.reason ?? "", /sustained projected target crossing/);
+  assert.equal(replay[0]!.candidateExit?.timestampSeconds, 43);
+  assert.match(replay[0]!.candidateExit?.reason ?? "", /Kalshi confirmation/);
 });
 
 test("durable replay uses the same sensitivity debounce boundaries as live policy", () => {
@@ -155,19 +157,57 @@ test("durable replay uses the same sensitivity debounce boundaries as live polic
     entryTimestampSeconds: 10, expiryTimestampSeconds: 100,
     entryContractCost: 0.8, quantity: 1, holdToExpiryPnl: -0.8,
   };
-  const samples = [30, 31, 32, 33, 34].map((at) => durableEvaluation(at));
+  const samples = [40, 41, 42, 43, 44].map((at, index) => durableEvaluation(at, {
+    marketWinProbability: 0.75 - index * 0.08,
+    marketQuoteAgeMs: 0,
+  }));
   assert.equal(buildCrossingRiskReplayLifecycles(
     [settlement], samples, { sensitivity: "more_aggressive" },
-  )[0]!.candidateExit?.timestampSeconds, 32);
+  )[0]!.candidateExit?.timestampSeconds, 42);
   assert.equal(buildCrossingRiskReplayLifecycles(
     [settlement], samples, { sensitivity: "default" },
-  )[0]!.candidateExit?.timestampSeconds, 33);
+  )[0]!.candidateExit?.timestampSeconds, 43);
   assert.equal(buildCrossingRiskReplayLifecycles(
     [settlement], samples, { sensitivity: "less_aggressive" },
-  )[0]!.candidateExit?.timestampSeconds, 34);
+  )[0]!.candidateExit?.timestampSeconds, 44);
 });
 
-test("durable replay treats a fully executable actual crossing as immediate", () => {
+test("durable replay honors each evaluation's immutable 2s/5s evidence-age limit for YES and NO", () => {
+  const settlement = (side: "yes" | "no") => ({
+    owner: "regular" as const,
+    positionId: side,
+    symbol: "BTC",
+    regime: "trend",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 100,
+    entryContractCost: 0.8,
+    quantity: 1,
+    holdToExpiryPnl: -0.8,
+  });
+  const samples = (side: "yes" | "no", maximumAge: number) =>
+    [40, 41, 42, 43].map((at, index) => durableEvaluation(at, {
+      positionId: side,
+      side,
+      underlyingPrice: side === "yes" ? 100.5 - index * 0.1 : 99.5 + index * 0.1,
+      adverseVelocityPerSecond: 0.1,
+      marketWinProbability: 0.75 - index * 0.08,
+      marketQuoteAgeMs: 4_000,
+      maximumExecutionEvidenceAgeSeconds: maximumAge,
+    }));
+  for (const side of ["yes", "no"] as const) {
+    assert.equal(
+      buildCrossingRiskReplayLifecycles([settlement(side)], samples(side, 2))[0]!.candidateExit,
+      null,
+    );
+    assert.equal(
+      buildCrossingRiskReplayLifecycles([settlement(side)], samples(side, 5))[0]!
+        .candidateExit?.timestampSeconds,
+      43,
+    );
+  }
+});
+
+test("durable replay does not treat one actual-crossing snapshot as immediate", () => {
   const replay = buildCrossingRiskReplayLifecycles([{
     owner: "regular",
     positionId: "p",
@@ -186,11 +226,10 @@ test("durable replay treats a fully executable actual crossing as immediate", ()
       continuationScore: null,
     }),
   ]);
-  assert.equal(replay[0]!.candidateExit?.timestampSeconds, 20);
-  assert.match(replay[0]!.candidateExit?.reason ?? "", /actual target crossing/);
+  assert.equal(replay[0]!.candidateExit, null);
 });
 
-test("ZEC cold-cross replay waits for complete evidence and compares all sensitivity timings deterministically", () => {
+test("ZEC cold-cross replay does not exit a shallow crossing with 131 seconds left", () => {
   const settlement = {
     owner: "regular" as const,
     positionId: "zec-2026-08-26",
@@ -214,22 +253,25 @@ test("ZEC cold-cross replay waits for complete evidence and compares all sensiti
     bookImbalance: null,
     secondsRemaining: settlement.expiryTimestampSeconds - (settlement.entryTimestampSeconds + 10),
   });
-  const warmed = [46, 47, 48, 49].map((offset) => durableEvaluation(
+  const warmed = [38, 39, 40, 41].map((offset, index) => durableEvaluation(
     settlement.entryTimestampSeconds + offset,
     {
       positionId: settlement.positionId,
       symbol: "ZEC",
       side: "no",
       strikePrice: 817.7313,
-      underlyingPrice: 817.5 - (offset - 46) * 0.1,
+      underlyingPrice: 817.80 + index * 0.02,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      marketWinProbability: 0.70 - index * 0.06,
+      marketQuoteAgeMs: 0,
       secondsRemaining: settlement.expiryTimestampSeconds - (settlement.entryTimestampSeconds + offset),
     },
   ));
   const samples = [coldCross, ...warmed];
   const timing = (sensitivity: "more_aggressive" | "default" | "less_aggressive") =>
     buildCrossingRiskReplayLifecycles([settlement], samples, { sensitivity })[0]!.candidateExit?.timestampSeconds;
-  assert.equal(timing("more_aggressive"), settlement.entryTimestampSeconds + 48);
-  assert.equal(timing("default"), settlement.entryTimestampSeconds + 49);
+  assert.equal(timing("more_aggressive"), undefined);
+  assert.equal(timing("default"), undefined);
   assert.equal(timing("less_aggressive"), undefined);
 });
 
@@ -286,13 +328,15 @@ test("durable replay applies the same terminal and recoverable deep-loss holds a
   ]);
   assert.equal(recoverable[0]!.candidateExit, null);
 
-  const tooLate = buildCrossingRiskReplayLifecycles([settlement], [
-    durableEvaluation(291, {
-      secondsRemaining: 209,
-      underlyingPrice: 99,
+  const tooLate = buildCrossingRiskReplayLifecycles([settlement],
+    [287, 288, 289, 290, 291].map((at, index) => durableEvaluation(at, {
+      secondsRemaining: 500 - at,
+      underlyingPrice: 99 - index * 0.01,
+      volatilityLogReturnPerSqrtSecond: 0.00001,
+      marketWinProbability: 0.70 - index * 0.08,
+      marketQuoteAgeMs: 0,
       estimatedSaleValue: 0.12,
-    }),
-  ]);
+    })));
   assert.equal(tooLate[0]!.candidateExit?.timestampSeconds, 291);
 });
 
