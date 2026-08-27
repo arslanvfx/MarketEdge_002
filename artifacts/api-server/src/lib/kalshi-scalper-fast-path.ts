@@ -125,6 +125,57 @@ export function createCoalescedAsyncRunner(
 export type ScalpSampleQueuePriority = "authoritative" | "background";
 
 /**
+ * A completed, authenticated preparation is deliberately a value (not a
+ * promise).  The execution lane may only consume it synchronously: waiting for
+ * a refresh after a candidate was observed turns a valid final-window quote
+ * into avoidable latency and, more importantly, makes its safety boundary
+ * ambiguous.
+ */
+export interface ArmedScalpPreparation {
+  ticker: string;
+  closeTime: string;
+  observedAtMs: number;
+  sampleAtMs: number;
+  yesAsk: number;
+  noAsk: number;
+}
+
+export type ArmedScalpPreparationDecision =
+  | { armed: true; quoteAgeMs: number; sampleAgeMs: number; secondsRemaining: number }
+  | { armed: false; reason: "missing" | "identity_changed" | "quote_stale" | "sample_stale" | "outside_window" };
+
+/** Pure fail-closed gate shared by candidate detection and pre-submit checks. */
+export function readArmedScalpPreparation(input: {
+  preparation: ArmedScalpPreparation | null | undefined;
+  ticker: string;
+  closeTime: string;
+  nowMs: number;
+  maxAgeMs: number;
+  finalWindowSeconds: number;
+  windowKey: string | null;
+}): ArmedScalpPreparationDecision {
+  const preparation = input.preparation;
+  if (!preparation) return { armed: false, reason: "missing" };
+  if (preparation.ticker !== input.ticker || preparation.closeTime !== input.closeTime) {
+    return { armed: false, reason: "identity_changed" };
+  }
+  const quoteAgeMs = input.nowMs - preparation.observedAtMs;
+  const sampleAgeMs = input.nowMs - preparation.sampleAtMs;
+  if (!Number.isFinite(quoteAgeMs) || quoteAgeMs < 0 || quoteAgeMs > input.maxAgeMs) {
+    return { armed: false, reason: "quote_stale" };
+  }
+  if (!Number.isFinite(sampleAgeMs) || sampleAgeMs < 0 || sampleAgeMs > input.maxAgeMs) {
+    return { armed: false, reason: "sample_stale" };
+  }
+  const secondsRemaining = (Date.parse(input.closeTime) - input.nowMs) / 1_000;
+  if (!Number.isFinite(secondsRemaining) || !input.windowKey
+    || secondsRemaining < 0 || secondsRemaining > input.finalWindowSeconds) {
+    return { armed: false, reason: "outside_window" };
+  }
+  return { armed: true, quoteAgeMs, sampleAgeMs, secondsRemaining };
+}
+
+/**
  * Select the next sample class while keeping one execution lane unavailable to
  * background work. Authoritative work may use every lane.
  */

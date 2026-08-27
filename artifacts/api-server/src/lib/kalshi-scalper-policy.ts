@@ -348,7 +348,7 @@ export function shouldRetryConfirmedZeroFillSameLifecycle(
 }
 /** Begin non-submitting warm-up three minutes before the entry window opens. */
 export const SCALP_PREFLIGHT_LEAD_SECONDS = 180;
-export const SCALP_PREFLIGHT_REFRESH_MS = 5_000;
+export const SCALP_PREFLIGHT_REFRESH_MS = 1_000;
 export const SCALP_PREFLIGHT_EARLY_REFRESH_MS = 15_000;
 export const SCALP_PREFLIGHT_FAST_ZONE_SECONDS = 30;
 export const SCALP_MAX_CONCURRENT_CANDIDATES = 3;
@@ -1935,9 +1935,11 @@ export function compareRiskSnapshot(
   if (!eqNum(
     Math.max(
       MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
-      currentParams.targetProximityThresholdPct ?? currentConfig.targetProximityThresholdPct,
+      currentParams.targetProximityThresholdPct
+        ?? currentConfig.targetProximityThresholdPct
+        ?? MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
     ),
-    snapshot.targetProximityThresholdPct,
+    snapshot.targetProximityThresholdPct ?? MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
   )) changed.push("targetProximityThresholdPct");
 
   return {

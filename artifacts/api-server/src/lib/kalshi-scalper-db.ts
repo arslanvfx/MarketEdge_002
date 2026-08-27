@@ -712,6 +712,11 @@ export async function claimReservationAndCap(
   closeTime?: string,
   finalWindowSeconds?: number,
   allowImmediateConfirmedZeroFillRetry = false,
+  /**
+   * Live fast-path only: activation and intent become durable together. This
+   * avoids a second transaction between the cap lock and broker boundary.
+   */
+  intent?: ScalpOrder,
 ): Promise<ClaimAndCapResult> {
   // Runtime callers compiled against the legacy nullable contract may still
   // pass null during a rolling deployment. Normalize at the atomic boundary so
@@ -1055,6 +1060,21 @@ export async function claimReservationAndCap(
        WHERE id = $2`,
       [requestedBudget, reservationId],
     );
+    if (intent) {
+      if (
+        intent.mode !== mode
+        || intent.symbol.toUpperCase() !== symbol.toUpperCase()
+        || intent.windowKey !== windowKey
+        || intent.ticker !== ticker
+        || intent.status !== "submitting"
+      ) {
+        throw new Error("Atomic Scalper activation intent does not match reservation");
+      }
+      // No conflict suppression: an absent durable intent is never allowed to
+      // masquerade as a successful activation. Any insert failure rolls back
+      // the reservation budget update and cap claim in this transaction.
+      await _insertScalpOrder(client, intent, true);
+    }
     await client.query("COMMIT");
     return {
       claimed: true,
@@ -2600,8 +2620,12 @@ type ScalpDbConnectCallback = Exclude<
 >;
 type ScalpDbClient = NonNullable<Parameters<ScalpDbConnectCallback>[1]>;
 
-async function _insertScalpOrder(client: ScalpDbClient, order: ScalpOrder): Promise<void> {
-  await client.query(
+async function _insertScalpOrder(
+  client: ScalpDbClient,
+  order: ScalpOrder,
+  requireInsert = false,
+): Promise<void> {
+  const result = await client.query(
       `INSERT INTO kalshi_scalp_orders
           (id, mode, symbol, window_key, ticker, side, entry_yes_price,
            contract_count, budget_spent, client_order_id, order_id, filled_count,
@@ -2625,7 +2649,10 @@ async function _insertScalpOrder(client: ScalpDbClient, order: ScalpOrder): Prom
         order.layeredRegularPositionId ?? null, order.layeredRegularSide ?? null,
         order.createdAt, order.settledAt ?? null,
       ],
-  );
+    );
+  if (requireInsert && result.rowCount !== 1) {
+    throw new Error("Atomic Scalper activation intent already exists");
+  }
 }
 
 /** Persist a "submitting" intent record BEFORE the live placeOrder call. */

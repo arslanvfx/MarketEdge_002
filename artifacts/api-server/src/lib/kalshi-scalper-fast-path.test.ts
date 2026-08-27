@@ -9,6 +9,7 @@ import {
   prioritizeScalpCandidates,
   selectNextScalpSamplePriority,
   summarizeScalpAttemptLatencies,
+  readArmedScalpPreparation,
 } from "./kalshi-scalper-fast-path.ts";
 import type { ScalpAttemptLatency } from "./kalshi-scalper-types.ts";
 import {
@@ -215,6 +216,42 @@ describe("selectNextScalpSamplePriority", () => {
       authoritativeQueued: 2,
       backgroundQueued: 2,
     }), "authoritative");
+  });
+});
+
+describe("readArmedScalpPreparation", () => {
+  const preparation = {
+    ticker: "KXBTC-26AUG231215-B95000",
+    closeTime: "2026-08-23T12:15:00.000Z",
+    observedAtMs: Date.parse("2026-08-23T12:14:30.000Z"),
+    sampleAtMs: Date.parse("2026-08-23T12:14:30.000Z"),
+    yesAsk: 0.96,
+    noAsk: 0.04,
+  };
+  const input = (override = {}) => ({
+    preparation,
+    ticker: preparation.ticker,
+    closeTime: preparation.closeTime,
+    nowMs: Date.parse("2026-08-23T12:14:31.000Z"),
+    maxAgeMs: 5_000,
+    finalWindowSeconds: 60,
+    windowKey: "2026-08-23T12:14",
+    ...override,
+  });
+
+  it("consumes an already armed quote without starting refresh work", () => {
+    assert.deepEqual(readArmedScalpPreparation(input()), {
+      armed: true, quoteAgeMs: 1_000, sampleAgeMs: 1_000, secondsRemaining: 29,
+    });
+  });
+
+  it("fails closed for stale evidence or changed identity", () => {
+    assert.deepEqual(readArmedScalpPreparation(input({ nowMs: Date.parse("2026-08-23T12:14:36.000Z") })), {
+      armed: false, reason: "quote_stale",
+    });
+    assert.deepEqual(readArmedScalpPreparation(input({ ticker: "changed" })), {
+      armed: false, reason: "identity_changed",
+    });
   });
 });
 

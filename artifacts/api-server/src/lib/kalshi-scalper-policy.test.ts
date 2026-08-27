@@ -3231,13 +3231,57 @@ describe("execution wiring (static source assertions)", () => {
     assert.ok(!/placeScalpOrderStrict\(/.test(preflight), "preflight must not submit an order");
   });
 
-  it("stops the entire preflight lane before balance reads once entry eligibility begins", () => {
+  it("keeps armed preparation active through eligibility but gates funding by deadline", () => {
     const start = idx("function _maybeStartPreflight");
     const end = idx("// Main scan tick");
     const preflightScheduler = svc.slice(start, end);
-    const stop = preflightScheduler.indexOf("if (startsInSeconds <= 5) return");
     const launch = preflightScheduler.indexOf("void _runPreflight(");
-    assert.ok(stop >= 0 && launch > stop);
+    assert.ok(launch >= 0);
+    assert.doesNotMatch(preflightScheduler, /if \(startsInSeconds <= 5\) return/);
+    const preflightStart = idx("async function _runPreflight(");
+    const preflightEnd = svc.indexOf("function _maybeStartPreflight", preflightStart);
+    const preflight = svc.slice(preflightStart, preflightEnd);
+    assert.match(preflight, /mode === "live"\s*&&\s*fundingDeadlineMs != null\s*&&\s*Date\.now\(\) < fundingDeadlineMs/);
+    assert.match(preflight, /remainingFundingMs <= 0/);
+  });
+
+  it("atomically activates armed live ownership and intent at the final DB boundary", () => {
+    const evaluateStart = idx("async function _evaluateCandidate");
+    const executeStart = idx("async function _executeScalpAttempt");
+    const evaluate = svc.slice(evaluateStart, executeStart);
+    assert.match(
+      evaluate,
+      /mode === "live" && candidate\.armedPreparation[\s\S]*?_executeScalpAttempt\(\s*null/,
+    );
+
+    const execute = svc.slice(executeStart);
+    const liveBoundary = execute.indexOf("One DB await under the existing cap/ownership locks");
+    const atomicClaim = execute.indexOf("runtime.claimReservationAndCap(", liveBoundary);
+    const intentArgument = execute.indexOf("false, orderRecord", atomicClaim);
+    const separateIntent = execute.indexOf("runtime.insertScalpOrderIntent(orderRecord)", atomicClaim);
+    assert.ok(liveBoundary >= 0 && atomicClaim > liveBoundary);
+    assert.ok(intentArgument > atomicClaim && separateIntent > intentArgument);
+
+    const here = dirname(fileURLToPath(import.meta.url));
+    const db = readFileSync(join(here, "kalshi-scalper-db.ts"), "utf8");
+    const claimStart = db.indexOf("export async function claimReservationAndCap");
+    const orderPersistence = db.indexOf("// Order persistence");
+    const claim = db.slice(claimStart, orderPersistence);
+    const strictInsert = claim.indexOf("_insertScalpOrder(client, intent, true)");
+    const commit = claim.indexOf('client.query("COMMIT")', strictInsert);
+    assert.ok(strictInsert >= 0 && commit > strictInsert);
+    assert.match(db, /if \(requireInsert && result\.rowCount !== 1\)/);
+  });
+
+  it("uses armed state instead of candidate-time network refresh for normal-to-Contrarian handoff", () => {
+    const executeStart = idx("async function _executeScalpAttempt");
+    const execute = svc.slice(executeStart);
+    const handoff = execute.indexOf("void triggerContrarianFromNormalGuard");
+    const refresh = execute.indexOf("refreshAndRevalidate: async", handoff);
+    const armedBranch = execute.indexOf("candidate.armedPreparation", refresh);
+    const networkFallback = execute.indexOf(": await Promise.all([", armedBranch);
+    assert.ok(handoff >= 0 && refresh > handoff);
+    assert.ok(armedBranch > refresh && networkFallback > armedBranch);
   });
 
   it("uses a 250ms scan with bounded concurrent candidate evaluation", () => {
@@ -3600,7 +3644,11 @@ describe("execution wiring (static source assertions)", () => {
   it("confirmed zero fills schedule a bounded retry but confirmed fills terminate", () => {
     assert.match(
       svc,
-      /_rememberReservationOutcome\([\s\S]*?"zero_fill"[\s\S]*?priorSubmittedOrders \+ 1/,
+      /_rememberReservationOutcome\([\s\S]*?"zero_fill"[\s\S]*?submittedOrdersBase \+ 1/,
+    );
+    assert.match(
+      svc,
+      /mode === "live"\s*&& !candidate\.armedPreparation\s*&& shouldRetryConfirmedZeroFillSameLifecycle/,
     );
     assert.match(svc, /_terminalAttemptKeys\.add\(attemptKey\)/);
   });

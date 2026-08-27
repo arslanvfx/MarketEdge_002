@@ -492,6 +492,10 @@ export interface ScalpAttemptLatency {
   identityRefreshMs: number | null;
   routedBalanceMs: number | null;
   quoteRefreshMs: number | null;
+  /** Age of the authenticated quote when its armed state was consumed. */
+  preparedQuoteAgeMs?: number | null;
+  /** Age of the authoritative underlying sample paired with that quote. */
+  preparedSampleAgeMs?: number | null;
   parallelRefreshMs: number | null;
   /** Guard evaluation after mandatory parallel refreshes are available. */
   guardReadinessMs: number | null;

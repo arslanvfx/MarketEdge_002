@@ -104,6 +104,7 @@ import {
   createCoalescedAsyncRunner,
   findSlowestScalpLatencyStage,
   prioritizeScalpCandidates,
+  readArmedScalpPreparation,
   selectNextScalpSamplePriority,
   summarizeScalpAttemptLatencies,
 } from "./kalshi-scalper-fast-path.ts";
@@ -233,6 +234,22 @@ const _terminalAttemptKeys = new Set<string>();
 const _nextAttemptAt = new Map<string, number>();
 const _preflightIdentityReady = new Set<string>();
 const _preflightSampleReady = new Set<string>();
+// This is intentionally populated before eligibility and consumed as a value,
+// never awaited by candidate handling.  A failed/stale preparation is a reject
+// and re-arm signal, not permission to start a last-second spot refresh.
+// A 91–96¢ book can move materially within seconds. Match the final-window
+// preflight cadence and fail closed rather than extending a quote's lifetime.
+const SCALP_ARMED_PREPARATION_MAX_AGE_MS = 1_000;
+const _armedPreparations = new Map<string, {
+  ticker: string;
+  closeTime: string;
+  observedAtMs: number;
+  sampleAtMs: number;
+  yesAsk: number;
+  noAsk: number;
+  orderbook: NonNullable<Awaited<ReturnType<typeof fetchOrderbookPrices>>>;
+  exchangeIndex: number;
+}>();
 const _preflightRoutedBalanceReady = new Map<string, {
   exchangeIndex: number;
   availableBalance: number;
@@ -573,6 +590,8 @@ interface MutableScalpAttemptLatency {
   identityRefreshMs: number | null;
   routedBalanceMs: number | null;
   quoteRefreshMs: number | null;
+  preparedQuoteAgeMs: number | null;
+  preparedSampleAgeMs: number | null;
   parallelRefreshMs: number | null;
   guardReadinessMs: number | null;
   finalRequoteMs: number | null;
@@ -608,6 +627,8 @@ function _beginAttemptLatency(
     identityRefreshMs: null,
     routedBalanceMs: null,
     quoteRefreshMs: null,
+    preparedQuoteAgeMs: null,
+    preparedSampleAgeMs: null,
     parallelRefreshMs: null,
     guardReadinessMs: null,
     finalRequoteMs: null,
@@ -663,6 +684,8 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
     identityRefreshMs: timing.identityRefreshMs,
     routedBalanceMs: timing.routedBalanceMs,
     quoteRefreshMs: timing.quoteRefreshMs,
+    preparedQuoteAgeMs: timing.preparedQuoteAgeMs,
+    preparedSampleAgeMs: timing.preparedSampleAgeMs,
     parallelRefreshMs: timing.parallelRefreshMs,
     guardReadinessMs: timing.guardReadinessMs,
     finalRequoteMs: timing.finalRequoteMs,
@@ -691,6 +714,7 @@ function _finishAttemptLatency(timing: MutableScalpAttemptLatency): void {
 function _resetPreflightState(): void {
   _preflightIdentityReady.clear();
   _preflightSampleReady.clear();
+  _armedPreparations.clear();
   _preflightRoutedBalanceReady.clear();
   _preflightFundingPermits.clear();
   _preflightRegularPositions.clear();
@@ -1493,6 +1517,9 @@ async function _runPreflight(
       "authoritative",
     );
     try {
+      // The authenticated book is prepared on the same continuous preflight
+      // cadence as identity and the authoritative guard sample.  Do not use
+      // public cached asks as a substitute at entry time.
       await fetchKalshiTarget(target.symbol, new Date(target.closeTime), true);
       const refreshed = getKalshiCachedData(target.symbol);
       if (
@@ -1500,6 +1527,13 @@ async function _runPreflight(
         refreshed.closeTime &&
         Math.abs(Date.parse(refreshed.closeTime) - Date.parse(target.closeTime)) <= 30_000
       ) {
+        // Resolve the ticker only after the authenticated identity refresh.
+        // This is preflight work (never candidate-time work), so correctness
+        // takes priority over parallelizing a potentially previous-market book.
+        const [orderbook, sampleReady] = await Promise.all([
+          fetchOrderbookPrices(refreshed.ticker),
+          samplePromise,
+        ]);
         _preflightIdentityReady.add(readinessKey);
         if (
           Number.isInteger(refreshed.exchangeIndex)
@@ -1507,8 +1541,23 @@ async function _runPreflight(
         ) {
           validatedRoutes.set(target.symbol, refreshed.exchangeIndex!);
         }
-        const sampleReady = await samplePromise;
+        const quote = orderbook
+          ? validateOrderbookQuote(orderbook, refreshed.ticker, refreshed.closeTime)
+          : null;
+        const sample = _authoritativeGuardSampleSnapshot(target.symbol, sampleReady)?.latest;
         if (sampleReady) _preflightSampleReady.add(readinessKey);
+        if (quote && sample && Number.isInteger(refreshed.exchangeIndex) && refreshed.exchangeIndex! >= 0) {
+          _armedPreparations.set(readinessKey, {
+            ticker: refreshed.ticker,
+            closeTime: refreshed.closeTime,
+            observedAtMs: Date.now(),
+            sampleAtMs: sample.at,
+            yesAsk: quote.yesAsk,
+            noAsk: quote.noAsk,
+            orderbook: orderbook!,
+            exchangeIndex: refreshed.exchangeIndex!,
+          });
+        }
       }
     } catch (err) {
       logger.debug(
@@ -1676,6 +1725,8 @@ async function _runPreflight(
       reason = "circuit_breaker_active";
     } else if (!_preflightIdentityReady.has(readinessKey)) {
       reason = "market_identity_not_ready";
+    } else if (!_armedPreparations.has(readinessKey)) {
+      reason = "authenticated_quote_or_sample_not_ready";
     } else if (
       mode === "live"
       && routeFundingPlan?.blockedSymbols.has(target.symbol)
@@ -1764,10 +1815,9 @@ function _maybeStartPreflight(windowKey: string, nowMs: number): void {
     startsInSeconds,
     totalSymbols: plan.targets.length,
   };
-  // Funding and balance verification are preparation only. Once eligibility
-  // begins, this lane is completely dormant and cannot contend with order
-  // execution or introduce a new balance read.
-  if (startsInSeconds <= 5) return;
+  // Keep the identity/book/sample preparation lane alive through eligibility.
+  // Candidate handling only reads its completed state, so slow refreshes never
+  // occupy a candidate lane or turn into a last-second spot fetch.
   const preflightRefreshMs = scalpPreflightRefreshMs(startsInSeconds);
   if (_preflightInFlight || nowMs - _lastPreflightStartedAt < preflightRefreshMs) {
     return;
@@ -2028,6 +2078,7 @@ interface Candidate {
   cachedNoAsk: number | null;
   side: "yes" | "no";
   winningAsk: number;
+  armedPreparation?: NonNullable<typeof _armedPreparations extends Map<string, infer T> ? T : never>;
   retryReady?: boolean;
 }
 
@@ -2056,11 +2107,22 @@ function _findCandidates(wk: string): Candidate[] {
     // Quick timing check before expensive orderbook fetch
     if (!isInFinalWindow(cached.closeTime, now, params.finalWindowSeconds, wk)) continue;
 
-    // Use cached quotes for initial candidate detection
-    const yesAsk = cached.yesAsk ?? null;
-    // noAsk from cache: noAsk = 1 - yesBid
-    const yesBid = cached.yesBid ?? null;
-    const noAsk = yesBid != null ? 1 - yesBid : null;
+    const armedPreparation = _armedPreparations.get(`${wk}:${sym}`);
+    const armed = readArmedScalpPreparation({
+      preparation: armedPreparation,
+      ticker: cached.ticker,
+      closeTime: cached.closeTime,
+      nowMs: now,
+      maxAgeMs: SCALP_ARMED_PREPARATION_MAX_AGE_MS,
+      finalWindowSeconds: params.finalWindowSeconds,
+      windowKey: wk,
+    });
+    // A candidate is only admitted from the authenticated, exact-identity
+    // pre-armed book.  Stale/missing preparation is deliberately not refreshed
+    // here: the next continuous preflight pass re-arms it.
+    if (!armed.armed || !armedPreparation) continue;
+    const yesAsk = armedPreparation.yesAsk;
+    const noAsk = armedPreparation.noAsk;
 
     const match = selectScalpSide(yesAsk, noAsk, params.bandMin, params.bandMax);
     if (!match) continue;
@@ -2074,6 +2136,7 @@ function _findCandidates(wk: string): Candidate[] {
       cachedNoAsk: noAsk,
       side: match.side,
       winningAsk: match.winningAsk,
+      armedPreparation,
       retryReady: _nextAttemptAt.has(key),
     });
   }
@@ -2363,6 +2426,11 @@ async function _evaluateCandidate(
     candidate.detectedAtMs,
     closeTime,
   );
+  if (candidate.armedPreparation) {
+    const nowMs = Date.now();
+    latency.preparedQuoteAgeMs = Math.max(0, nowMs - candidate.armedPreparation.observedAtMs);
+    latency.preparedSampleAgeMs = Math.max(0, nowMs - candidate.armedPreparation.sampleAtMs);
+  }
   try {
     const params = resolveEffectiveParams(_config, symbol, ticker);
     // Pin the immutable execution-risk snapshot at claim time. Every sizing,
@@ -2402,10 +2470,38 @@ async function _evaluateCandidate(
       snapshot,
       LIVE_SCALP_ATTEMPT_RUNTIME,
     );
+    // Armed live candidates defer durable ownership until every dynamic guard
+    // and size is known. `_executeScalpAttempt` centrally no-ops pre-activation
+    // status writes, then atomically activates cap/reservation plus intent.
+    if (mode === "live" && candidate.armedPreparation) {
+      try {
+        await _executeScalpAttempt(
+          null, candidate, windowKey, mode, snapshot, 0, key,
+          LIVE_SCALP_ATTEMPT_RUNTIME, latency, readinessPromise,
+        );
+      } catch (err) {
+        // The deferred path has no durable state before activation and may have
+        // both a reservation and intent after it. A generic exception therefore
+        // cannot safely release here. Keep any possible ownership fail-closed;
+        // startup/stale-intent reconciliation can prove a pre-submit abort.
+        _lastError = String(err);
+        _terminalAttemptKeys.add(key);
+        logger.error(
+          { err, symbol, windowKey, mode },
+          "[kalshi-scalper] armed attempt failed — possible atomic ownership retained",
+        );
+      }
+      return;
+    }
 
     let claim: Awaited<ReturnType<typeof claimReservationAndCap>>;
     const claimStartedAtMs = Date.now();
     try {
+      // Deliberate limitation: cap activation cannot be combined with intent
+      // insertion without writing live intents for every merely prepared
+      // symbol, before its dynamic guards/size are known. This narrow durable
+      // claim reserves only a selected authenticated candidate; intent remains
+      // mandatory and is written before the broker call below.
       // Pass closeTime + finalWindowSeconds so claimReservationAndCap can enforce
       // the effective per-market final-window boundary atomically at claim time.
       claim = await claimReservationAndCap(
@@ -2636,6 +2732,32 @@ function _startScalpReadiness(
 ): Promise<PreparedScalpReadiness> {
   const { symbol, ticker, closeTime } = candidate;
   const startedAtMs = runtime.nowMs();
+  // Live candidates were admitted only from this prepared authenticated state.
+  // Returning it directly ensures a slow refresh launched by a later preflight
+  // pass cannot delay an already armed candidate. Test runtimes retain the
+  // legacy fetch path by not carrying an armed preparation.
+  if (runtime === LIVE_SCALP_ATTEMPT_RUNTIME && candidate.armedPreparation) {
+    const armed = candidate.armedPreparation;
+    const preparedIdentity = getKalshiCachedData(symbol);
+    return Promise.resolve({
+      identityResult: {
+        ok: true,
+        target: preparedIdentity?.value ?? 0,
+        identity: {
+          ...(preparedIdentity ?? {}),
+          value: preparedIdentity?.value ?? null,
+          ticker: armed.ticker,
+          closeTime: armed.closeTime,
+          exchangeIndex: armed.exchangeIndex,
+        },
+        error: null,
+        latencyMs: 0,
+      },
+      orderbookResult: { ok: true, orderbook: armed.orderbook, latencyMs: 0 },
+      freshSampleResult: true,
+      parallelRefreshMs: runtime.nowMs() - startedAtMs,
+    });
+  }
   const identityStartedAtMs = runtime.nowMs();
   const quoteStartedAtMs = runtime.nowMs();
   const coin = CRYPTO_COINS.find((item) => item.symbol.toUpperCase() === symbol);
@@ -2695,7 +2817,7 @@ function _startScalpReadiness(
 }
 
 async function _executeScalpAttempt(
-  reservationId: string,
+  reservationId: string | null,
   candidate: Candidate,
   windowKey: string,
   mode: ScalpMode,
@@ -2712,6 +2834,18 @@ async function _executeScalpAttempt(
   let quoteRefreshMs: number | null = null;
   let parallelRefreshMs: number | null = null;
   let guardReadinessStartedAtMs: number | null = null;
+  let ownsReservation = reservationId != null;
+  let submittedOrdersBase = priorSubmittedOrders;
+  // Central ownership wrapper: every existing pre-activation guard skip keeps
+  // its evidence path but cannot manufacture/mutate a reservation that has not
+  // been atomically activated yet.
+  const updateReservationStatus = runtime.updateReservationStatus;
+  runtime = {
+    ...runtime,
+    updateReservationStatus: (...args) => ownsReservation
+      ? updateReservationStatus(...args)
+      : Promise.resolve(),
+  };
 
   // NOTE: cap checks are NOT repeated here. They were performed atomically
   // inside claimReservationAndCap under the per-mode advisory lock, which
@@ -3072,7 +3206,7 @@ async function _executeScalpAttempt(
     : checkTargetProximityGuard(
         latestFinalPriceSample.price,
         targetPriceNum,
-        snapshot.targetProximityThresholdPct,
+        snapshot.targetProximityThresholdPct ?? MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
       );
   const evaluatePinnedProximityAt = (nowMs: number): {
     allowed: boolean;
@@ -3111,7 +3245,7 @@ async function _executeScalpAttempt(
     const result = checkTargetProximityGuard(
       latestSample.price,
       targetPriceNum,
-      snapshot.targetProximityThresholdPct,
+      snapshot.targetProximityThresholdPct ?? MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
     );
     return {
       allowed: result.evaluable && !result.blocked,
@@ -3178,7 +3312,7 @@ async function _executeScalpAttempt(
     const proximityFinal = finalProximityResult ?? checkTargetProximityGuard(
       null,
       targetPriceNum,
-      snapshot.targetProximityThresholdPct,
+      snapshot.targetProximityThresholdPct ?? MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
     );
     if (!proximityFinal.evaluable || proximityFinal.blocked) {
       logger.info(
@@ -3397,19 +3531,47 @@ async function _executeScalpAttempt(
         decision: freefallDecision,
         refreshAndRevalidate: async () => {
           const refreshStartedAt = runtime.nowMs();
-          const [identity, orderbook, freshSampleSucceeded] = await Promise.all([
-            runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
-              (target) => ({ ok: true as const, target }),
-              (error) => ({ ok: false as const, target: null, error }),
-            ),
-            runtime.fetchOrderbookPrices(ticker).then(
-              (value) => ({ ok: true as const, value }),
-              (error) => ({ ok: false as const, value: null, error }),
-            ),
-            coin
-              ? runtime.collectPriceSample(coin.symbol, coin.product)
-              : Promise.resolve(false),
-          ]);
+          const [identity, orderbook, freshSampleSucceeded] =
+            candidate.armedPreparation
+              ? (() => {
+                  const prepared = _armedPreparations.get(`${windowKey}:${symbol}`);
+                  const preparedDecision = readArmedScalpPreparation({
+                    preparation: prepared,
+                    ticker,
+                    closeTime,
+                    nowMs: runtime.nowMs(),
+                    maxAgeMs: SCALP_ARMED_PREPARATION_MAX_AGE_MS,
+                    finalWindowSeconds: snapshot.finalWindowSeconds,
+                    windowKey: runtime.currentWindowKey(),
+                  });
+                  const preparedIdentity = runtime.getKalshiCachedData(symbol);
+                  const ready =
+                    preparedDecision.armed
+                    && prepared != null
+                    && preparedIdentity?.value != null;
+                  return [
+                    ready
+                      ? { ok: true as const, target: preparedIdentity.value }
+                      : { ok: false as const, target: null, error: "prepared_state_unavailable" },
+                    ready
+                      ? { ok: true as const, value: prepared.orderbook }
+                      : { ok: false as const, value: null, error: "prepared_state_unavailable" },
+                    ready,
+                  ] as const;
+                })()
+              : await Promise.all([
+                  runtime.fetchKalshiTarget(symbol, new Date(closeTime), true).then(
+                    (target) => ({ ok: true as const, target }),
+                    (error) => ({ ok: false as const, target: null, error }),
+                  ),
+                  runtime.fetchOrderbookPrices(ticker).then(
+                    (value) => ({ ok: true as const, value }),
+                    (error) => ({ ok: false as const, value: null, error }),
+                  ),
+                  coin
+                    ? runtime.collectPriceSample(coin.symbol, coin.product)
+                    : Promise.resolve(false),
+                ]);
           const cached = runtime.getKalshiCachedData(symbol);
           const baseEvidence = {
             refreshMs: runtime.nowMs() - refreshStartedAt,
@@ -3604,7 +3766,13 @@ async function _executeScalpAttempt(
       && priceGuardSampleRequested
       && coin != null;
     const [quoteResult, retrySampleResult] = await Promise.all([
-      runtime.fetchOrderbookPrices(ticker).then(
+      // The candidate's authenticated book is already continuously armed.
+      // Do not issue a second broker-facing requote in the final window; a
+      // stale/invalid armed value fails closed below and preflight re-arms it.
+      (candidate.armedPreparation
+        ? Promise.resolve(candidate.armedPreparation.orderbook)
+        : runtime.fetchOrderbookPrices(ticker)
+      ).then(
         (orderbook) => ({ ok: true as const, orderbook }),
         (error) => ({ ok: false as const, error, orderbook: null }),
       ),
@@ -3627,7 +3795,7 @@ async function _executeScalpAttempt(
         : checkTargetProximityGuard(
             latestFinalPriceSample.price,
             targetPriceNum,
-            snapshot.targetProximityThresholdPct,
+            snapshot.targetProximityThresholdPct ?? MIN_SAFE_SCALP_TARGET_PROXIMITY_PCT,
           );
     }
     finalRequalification = finalRequoteResult.ok && finalRequoteResult.orderbook
@@ -3961,7 +4129,7 @@ async function _executeScalpAttempt(
       : null,
     distancePct: finalProximityResult?.distancePct ?? null,
     minimumPct: snapshot.targetProximityGuardEnabled
-      ? snapshot.targetProximityThresholdPct
+      ? snapshot.targetProximityThresholdPct ?? null
       : null,
     targetPrice: Number.isFinite(targetPriceNum) ? targetPriceNum : null,
     underlyingPrice: latestFinalPriceSample?.price ?? null,
@@ -4279,7 +4447,29 @@ async function _executeScalpAttempt(
     // insertScalpOrderIntent is awaited, so config could change DURING it.
     const intentWriteStartedAtMs = runtime.nowMs();
     try {
-      await runtime.insertScalpOrderIntent(orderRecord);
+      if (!ownsReservation) {
+        // One DB await under the existing cap/ownership locks: either both the
+        // budget reservation and durable intent commit, or neither does.
+        const activationStartedAtMs = runtime.nowMs();
+        const activation = await runtime.claimReservationAndCap(
+          crypto.randomUUID(), mode, symbol, windowKey, ticker, reservedBudget,
+          snapshot.dailyCapDollars, snapshot.openCapDollars, closeTime,
+          snapshot.finalWindowSeconds, false, orderRecord,
+        ).finally(() => {
+          if (latency) latency.capClaimMs = runtime.nowMs() - activationStartedAtMs;
+        });
+        if (!activation.claimed || !activation.allowed || !activation.reservationId) {
+          if (activation.reason === "outside_window_at_claim") _terminalAttemptKeys.add(attemptKey);
+          else if (activation.retryAfterMs != null) _nextAttemptAt.set(attemptKey, runtime.nowMs() + activation.retryAfterMs);
+          else _terminalAttemptKeys.add(attemptKey);
+          return;
+        }
+        ownsReservation = true;
+        submittedOrdersBase = activation.submittedOrders;
+        runtime.recordFunnelEvent?.(mode, windowKey, symbol, "claim_acquired");
+      } else {
+        await runtime.insertScalpOrderIntent(orderRecord);
+      }
       runtime.recordFunnelEvent?.(mode, windowKey, symbol, "intent_persisted");
     } finally {
       if (latency) latency.intentWriteMs = runtime.nowMs() - intentWriteStartedAtMs;
@@ -4306,6 +4496,48 @@ async function _executeScalpAttempt(
       || snapshot.adverseExcursionGuardEnabled
         ? evaluatePinnedFreefallAt(finalFreefallLiveAtMs)
         : null;
+    // This is the last quote/identity/sample boundary. It is synchronous by
+    // design: an unavailable or stale prepared value aborts rather than causing
+    // a candidate-time network requote. It also catches a refreshed book that
+    // moved out of band or flipped sides while the durable intent was written.
+    const newestPrepared = candidate.armedPreparation
+      ? _armedPreparations.get(`${windowKey}:${symbol}`)
+      : null;
+    const newestPreparedDecision = candidate.armedPreparation
+      ? readArmedScalpPreparation({
+          preparation: newestPrepared,
+          ticker,
+          closeTime,
+          nowMs: finalFreefallLiveAtMs,
+          maxAgeMs: SCALP_ARMED_PREPARATION_MAX_AGE_MS,
+          finalWindowSeconds: snapshot.finalWindowSeconds,
+          windowKey: runtime.currentWindowKey(),
+        })
+      : null;
+    const newestPreparedMatch =
+      newestPreparedDecision?.armed && newestPrepared
+        ? selectScalpSide(
+            newestPrepared.yesAsk,
+            newestPrepared.noAsk,
+            snapshot.bandMin,
+            snapshot.bandMax,
+          )
+        : null;
+    const finalPreparedReason = newestPreparedDecision == null
+      ? null
+      : !newestPreparedDecision.armed
+        ? `prepared_${newestPreparedDecision.reason}`
+        : newestPrepared!.exchangeIndex !== exchangeIndex
+          ? "prepared_exchange_index_changed"
+          : !newestPreparedMatch
+            ? "prepared_quote_outside_band"
+            : newestPreparedMatch.side !== effectiveSide
+              ? "prepared_quote_side_flipped"
+              : null;
+    if (latency && newestPreparedDecision?.armed) {
+      latency.preparedQuoteAgeMs = newestPreparedDecision.quoteAgeMs;
+      latency.preparedSampleAgeMs = newestPreparedDecision.sampleAgeMs;
+    }
     if (finalFreefallLive?.guardResult) {
       orderRecord.entryGuardEvidence = withDecisiveGuardEvidence(
         orderRecord.entryGuardEvidence ?? entryGuardEvidence,
@@ -4314,6 +4546,7 @@ async function _executeScalpAttempt(
       );
     }
     const finalAbortReason = finalReasonLive
+      ?? finalPreparedReason
       ?? (finalLayerLive.status === "opposite_side" ? "opposite_regular_position" : null)
       ?? (!finalProximityLive.allowed
         ? finalProximityLive.reason ?? "target_proximity_blocked_final"
@@ -4630,21 +4863,22 @@ async function _executeScalpAttempt(
       attemptKey,
       "zero_fill",
       "zero_fill",
-      mode === "live" ? priorSubmittedOrders + 1 : priorSubmittedOrders,
+      mode === "live" ? submittedOrdersBase + 1 : submittedOrdersBase,
       runtime.nowMs(),
     );
     logger.info(
       {
         symbol,
         windowKey,
-        submission: priorSubmittedOrders + 1,
+        submission: submittedOrdersBase + 1,
         maxSubmissions: SCALP_MAX_SUBMISSIONS_PER_WINDOW,
       },
       "[kalshi-scalper] confirmed zero fill — bounded retry policy applied",
     );
-    const submittedOrders = priorSubmittedOrders + 1;
+    const submittedOrders = submittedOrdersBase + 1;
     if (
       mode === "live"
+      && !candidate.armedPreparation
       && shouldRetryConfirmedZeroFillSameLifecycle(
         classification,
         submittedOrders,
@@ -4985,7 +5219,7 @@ function _buildMarketStatuses(wk: string): ScalpMarketStatus[] {
       const nowForStatus = Date.now();
       const secondsRemaining = closeTime
         ? Math.max(0, (new Date(closeTime).getTime() - nowForStatus) / 1000)
-        : null;
+        : undefined;
       const inWindow = closeTime != null
         ? isInFinalWindow(closeTime, nowForStatus, params.finalWindowSeconds, wk)
         : false;
@@ -5935,8 +6169,8 @@ async function _runControlledLayeringScenario(
     standaloneIntentWrites: intentWrites,
     standaloneReservationUpdates,
     surfacedError,
-    layeredRegularPositionId: persistedPaperOrder?.layeredRegularPositionId ?? null,
-    layeredRegularSide: persistedPaperOrder?.layeredRegularSide ?? null,
+    layeredRegularPositionId: (persistedPaperOrder as ScalpOrder | null)?.layeredRegularPositionId ?? null,
+    layeredRegularSide: (persistedPaperOrder as ScalpOrder | null)?.layeredRegularSide ?? null,
   };
 }
 
@@ -6011,7 +6245,7 @@ Promise<ControlledFreefallServiceExerciseResult> {
   };
   const setLatestControlledPrice = (price: number): void => {
     const samples = _priceSamples.get(symbol) ?? currentSamples;
-    const next = samples.length > 0
+    const next: FreefallSample[] = samples.length > 0
       ? [...samples.slice(0, -1), { price, at: nowMs, source: "authoritative" }]
       : [{ price, at: nowMs, source: "authoritative" }];
     currentSamples = next;
