@@ -18,7 +18,7 @@ import { runBotCycle as runStockBotCycle, initDecisionLogFromDB } from "./lib/st
 import { alpacaConfigured } from "./lib/stock/alpaca";
 import { initAiSpend } from "./lib/ai-spend";
 import { scheduleAtTopOfEveryUtcHour } from "./lib/kalshi-quiet-hours-scheduler";
-import { reconcileReservedRegularIntents } from "./lib/kalshi-regular-order-intent";
+import { reconcileReservedRegularIntents, runRegularOrderIntentMigrations } from "./lib/kalshi-regular-order-intent";
 import { runRegularIntentReconciliationPass } from "./lib/kalshi-regular-order-reconcile";
 
 const rawPort = process.env["PORT"];
@@ -496,6 +496,11 @@ app.listen(port, (err) => {
       logger.warn({ err }, "Startup migrations failed (non-fatal)");
     })
     .then(async () => {
+      // The regular bot's live entry claim must never lazily migrate its intent
+      // table after a conviction quote is eligible.
+      await runRegularOrderIntentMigrations().catch((err) =>
+        logger.warn({ err }, "[kalshi-regular-intent] startup migration failed (live entries remain fail-closed)"),
+      );
       // Load persisted bot state before the loop starts so restarts are seamless:
       // 1. config + mode from bot_config table
       // 2. daily P&L reconstructed from today's kalshi_bot_bets rows

@@ -118,6 +118,18 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
       CREATE INDEX IF NOT EXISTS regular_intent_mode_window
         ON kalshi_regular_order_intents (mode, window_key)
     `);
+    // Matches the duplicate/symbol predicate in the atomic claim CTE.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS regular_intent_mode_symbol_status_window
+        ON kalshi_regular_order_intents (mode, symbol, status, window_key)
+    `);
+    // Matches the active-cost aggregate in that same CTE without indexing
+    // resolved history.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS regular_intent_active_cost
+        ON kalshi_regular_order_intents (mode, window_key, reserved_cost)
+        WHERE status IN ('reserved', 'unknown', 'filled')
+    `);
     await client.query(`
       CREATE TABLE IF NOT EXISTS kalshi_regular_exit_intents (
         client_order_id  TEXT PRIMARY KEY,
@@ -201,7 +213,11 @@ export async function claimRegularOrderIntent(
   if (requestedUnits == null || requestedUnits <= 0n) {
     throw new Error("requestedCount must be a positive FixedPointCount with at most two decimal places");
   }
-  await ensureMigrated();
+  // DDL belongs to startup/reconciliation, never to an eligible quote's
+  // critical path. Until startup establishes readiness, entry fails closed.
+  if (!_migrated) {
+    throw new Error("regular order intent migration is not ready; refusing live claim");
+  }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");

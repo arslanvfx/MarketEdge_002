@@ -36,7 +36,7 @@ import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-e
 import { CRYPTO_COINS, getTickerFreshEvidence } from "./crypto-data";
 import { logger } from "./logger";
 import {
-  getCachedKalshiBalance,
+  prewarmRegularAccountSnapshot,
   prewarmRegularOrderExchangeIndex,
 } from "./kalshi-trader";
 import {
@@ -297,10 +297,9 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
       // Routing is immutable for an exact ticker. Publish it while the target is
       // fresh so the final POST path does not need another market lookup.
       prewarmRegularOrderExchangeIndex(preparedTicker, entry.exchangeIndex, entry.at);
-      // Keep the aggregate balance hot during the wait. The trader coalesces
-      // simultaneous warmups and the placement guard still fails closed if no
-      // usable balance can be obtained.
-      void getCachedKalshiBalance().catch(() => {});
+       // Launch authenticated account preparation before zone eligibility. It is
+       // intentionally never awaited by the zone callback.
+       prewarmRegularAccountSnapshot();
 
       // ── Zone-entry detection ──────────────────────────────────────────────
       // If this coin's price has entered [lockPrice, lockPriceCap] on either

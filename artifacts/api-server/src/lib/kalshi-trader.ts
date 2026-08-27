@@ -248,6 +248,11 @@ export interface KalshiBalance {
   totalBalance: number;     // in dollars
   balanceBreakdown?: KalshiBalanceBreakdown[];
 }
+export interface RegularAccountSnapshot {
+  availableBalance: number;
+  availableBalanceByExchange: ReadonlyMap<number, number>;
+  fetchedAt: number;
+}
 
 export interface KalshiBalanceBreakdown {
   exchangeIndex: number;
@@ -778,6 +783,9 @@ export interface PlaceOrderParams {
   clientOrderId?: string;
   /** Synchronous caller authorization checked at the exact pre-POST boundary. */
   preSubmitGuard?: () => boolean;
+  /** Regular-bot hot path only: require an already prewarmed exact-ticker
+   * exchange route. This deliberately forbids a candidate-time market GET. */
+  requirePreparedRoute?: boolean;
 }
 
 export interface PlaceOrderResult {
@@ -1048,12 +1056,10 @@ export function computeMarketableLimitPrice(
 }
 
 /**
- * Resolve CreateOrderV2's authoritative shard immediately before submission.
- * This deliberately does not use any market cache: every actual POST attempt
- * must be preceded by its own exact-ticker lookup against the Trade API.
+ * Exact-ticker routing evidence published before an eligible regular quote.
  */
 const regularOrderRouteCache = new Map<string, { exchangeIndex: number; preparedAt: number }>();
-const REGULAR_ORDER_ROUTE_TTL_MS = 20 * 60_000;
+export const REGULAR_ORDER_ROUTE_TTL_MS = 2 * 60_000;
 
 /**
  * Publish routing evidence fetched with the exact market snapshot during the
@@ -1075,11 +1081,35 @@ export function prewarmRegularOrderExchangeIndex(
   regularOrderRouteCache.set(ticker, { exchangeIndex: exchangeIndex!, preparedAt });
 }
 
-export async function resolveRegularOrderExchangeIndex(ticker: string): Promise<number> {
+/** Synchronous, fail-closed route read for the regular entry critical path. */
+export function getPreparedRegularOrderExchangeIndex(ticker: string): number | null {
   const cached = regularOrderRouteCache.get(ticker);
-  if (cached && Date.now() - cached.preparedAt <= REGULAR_ORDER_ROUTE_TTL_MS) {
-    return cached.exchangeIndex;
+  if (!cached || Date.now() - cached.preparedAt > REGULAR_ORDER_ROUTE_TTL_MS) {
+    return null;
   }
+  return cached.exchangeIndex;
+}
+
+/** Exact worst-case cash reserved by an entry at its submitted YES-side limit. */
+export function computeRegularWorstCaseRouteCost(
+  side: "yes" | "no",
+  submittedYesLimit: number,
+  count: number,
+): number | null {
+  if (
+    !Number.isFinite(submittedYesLimit)
+    || submittedYesLimit < 0.01
+    || submittedYesLimit > 0.99
+    || regularCountHundredths(count) == null
+    || count <= 0
+  ) return null;
+  const perContract = side === "yes" ? submittedYesLimit : 1 - submittedYesLimit;
+  return perContract * count;
+}
+
+export async function resolveRegularOrderExchangeIndex(ticker: string): Promise<number> {
+  const cached = getPreparedRegularOrderExchangeIndex(ticker);
+  if (cached != null) return cached;
   const path = `/markets/${encodeURIComponent(ticker)}`;
   let raw: unknown;
   try {
@@ -1171,9 +1201,18 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     );
   }
   const price = priceFrac.toFixed(2); // FixedPointDollars string — cent resolution required by Kalshi
-  // Forced-fresh and deliberately outside the POST uncertainty catch: lookup
-  // failure proves no submission occurred and must not become unknown exposure.
-  const exchangeIndex = await resolveRegularOrderExchangeIndex(params.ticker);
+  // The regular bot's conviction path never performs a candidate-time
+  // GET /markets/{ticker}; its exact route was published by the poller while
+  // preparing the quote. Other callers retain the safe lookup behavior.
+  const preparedRoute = params.requirePreparedRoute
+    ? getPreparedRegularOrderExchangeIndex(params.ticker)
+    : null;
+  if (params.requirePreparedRoute && preparedRoute == null) {
+    throw new Error(`Kalshi regular order route is absent or stale for ${params.ticker}; refusing candidate-time lookup`);
+  }
+  // Lookup is deliberately outside POST uncertainty handling: a failure proves
+  // no submission occurred and must not become unknown exposure.
+  const exchangeIndex = preparedRoute ?? await resolveRegularOrderExchangeIndex(params.ticker);
 
   const body: Record<string, unknown> = {
     client_order_id: clientOrderId,
@@ -1483,7 +1522,85 @@ export function isKalshiConfigured(): boolean {
 
 const _balanceCache = new Map<string, { availableBalance: number; fetchedAt: number }>();
 const _balanceInflight = new Map<string, Promise<number>>();
+let _regularAccountSnapshot: RegularAccountSnapshot | null = null;
+let _regularAccountPrewarmInflight: Promise<void> | null = null;
+let _regularAccountSnapshotGeneration = 0;
 const BALANCE_CACHE_TTL_MS = 10_000;
+export const REGULAR_ACCOUNT_SNAPSHOT_TTL_MS = 10_000;
+// Poller calls prewarm every second. Begin a replacement read before expiry,
+// while retaining the still-fresh snapshot for the immediate quote path.
+const REGULAR_ACCOUNT_REFRESH_AHEAD_MS = 2_000;
+
+/** Keep the authenticated aggregate account snapshot hot before a regular
+ * conviction quote becomes eligible. Coalescing is provided by the balance
+ * cache; callers intentionally do not await this on the hot path. */
+export function prewarmRegularAccountSnapshot(): Promise<void> {
+  const snapshot = _regularAccountSnapshot;
+  if (
+    snapshot &&
+    Date.now() - snapshot.fetchedAt < REGULAR_ACCOUNT_SNAPSHOT_TTL_MS - REGULAR_ACCOUNT_REFRESH_AHEAD_MS
+  ) {
+    return Promise.resolve();
+  }
+  if (_regularAccountPrewarmInflight) return _regularAccountPrewarmInflight;
+  // Retain all shard balances from the one authenticated aggregate response;
+  // quote-time must never fetch either aggregate or route-specific balance.
+  const generation = _regularAccountSnapshotGeneration;
+  let request!: Promise<void>;
+  request = getBalance()
+    .then((balance) => {
+      // A post-fill invalidation wins over an older in-flight response.
+      if (generation !== _regularAccountSnapshotGeneration) return;
+      const fetchedAt = Date.now();
+      _balanceCache.set("aggregate", { availableBalance: balance.availableBalance, fetchedAt });
+      _regularAccountSnapshot = {
+        availableBalance: balance.availableBalance,
+        availableBalanceByExchange: new Map(
+          (balance.balanceBreakdown ?? []).map((entry) => [entry.exchangeIndex, entry.availableBalance]),
+        ),
+        fetchedAt,
+      };
+    })
+    .catch((err) => {
+      logger.debug({ err }, "[kalshi] regular account snapshot prewarm failed");
+    })
+    .finally(() => {
+      if (_regularAccountPrewarmInflight === request) {
+        _regularAccountPrewarmInflight = null;
+      }
+    });
+  _regularAccountPrewarmInflight = request;
+  return request;
+}
+
+/** Synchronous fail-closed read used after quote eligibility. */
+export function getFreshRegularAccountSnapshot(): number | null {
+  const snapshot = getFreshRegularAccountSnapshotForRoute();
+  return snapshot?.availableBalance ?? null;
+}
+
+/** Exact-route synchronous snapshot read. Missing shard evidence is unsafe. */
+export function getFreshRegularAccountSnapshotForRoute(exchangeIndex?: number): RegularAccountSnapshot | null {
+  const snapshot = _regularAccountSnapshot;
+  if (!snapshot || Date.now() - snapshot.fetchedAt > REGULAR_ACCOUNT_SNAPSHOT_TTL_MS) {
+    return null;
+  }
+  if (exchangeIndex != null && !snapshot.availableBalanceByExchange.has(exchangeIndex)) return null;
+  return snapshot;
+}
+
+/** Synchronous exact-route funding predicate for the pre-fetch hot path. */
+export function hasFreshRegularPreparedRouteFunding(ticker: string, requiredCost: number): boolean {
+  if (!Number.isFinite(requiredCost) || requiredCost <= 0) return false;
+  const exchangeIndex = getPreparedRegularOrderExchangeIndex(ticker);
+  const snapshot = exchangeIndex == null
+    ? null
+    : getFreshRegularAccountSnapshotForRoute(exchangeIndex);
+  const routeBalance = exchangeIndex == null
+    ? null
+    : snapshot?.availableBalanceByExchange.get(exchangeIndex) ?? null;
+  return routeBalance != null && routeBalance + 1e-9 >= requiredCost;
+}
 
 /** Return Kalshi available balance in dollars, cached for up to 10 seconds.
  *  On fetch failure, falls back to the stale cached value (if any) rather than
@@ -1498,11 +1615,22 @@ export async function getCachedKalshiBalance(exchangeIndex?: number): Promise<nu
   }
   const existing = _balanceInflight.get(cacheKey);
   if (existing) return existing;
+  const regularSnapshotGeneration = _regularAccountSnapshotGeneration;
   let request!: Promise<number>;
   request = (async () => {
     try {
       const bal = await getBalance(exchangeIndex);
-      _balanceCache.set(cacheKey, { availableBalance: bal.availableBalance, fetchedAt: Date.now() });
+      const fetchedAt = Date.now();
+      _balanceCache.set(cacheKey, { availableBalance: bal.availableBalance, fetchedAt });
+      if (exchangeIndex == null && regularSnapshotGeneration === _regularAccountSnapshotGeneration) {
+        _regularAccountSnapshot = {
+          availableBalance: bal.availableBalance,
+          availableBalanceByExchange: new Map(
+            (bal.balanceBreakdown ?? []).map((entry) => [entry.exchangeIndex, entry.availableBalance]),
+          ),
+          fetchedAt,
+        };
+      }
       return bal.availableBalance;
     } catch (err) {
       if (cached) {
@@ -1527,6 +1655,8 @@ export async function getCachedKalshiBalance(exchangeIndex?: number): Promise<nu
 export function invalidateBalanceCache(exchangeIndex?: number): void {
   if (exchangeIndex == null) {
     _balanceCache.clear();
+    _regularAccountSnapshotGeneration++;
+    _regularAccountSnapshot = null;
     return;
   }
   _balanceCache.delete(`exchange:${exchangeIndex}`);

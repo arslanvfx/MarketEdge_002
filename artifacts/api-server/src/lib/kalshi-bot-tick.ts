@@ -40,7 +40,7 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   placeEntryOrderWithSizeFallback,
-  getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
+  getCachedKalshiBalance, getFreshRegularAccountSnapshot, getFreshRegularAccountSnapshotForRoute, getPreparedRegularOrderExchangeIndex, hasFreshRegularPreparedRouteFunding, computeRegularWorstCaseRouteCost, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
   isUncertainOrderError,
 } from "./kalshi-trader";
@@ -59,7 +59,7 @@ import { decideRemainderAttempt } from "./kalshi-entry-remainder";
 import { recordTickAbort, clearTickAbort } from "./kalshi-bot-eval-overlay";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
-  getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchOrderbookPrices,
+  getCachedPrediction, getKalshiCachedData, fetchKalshiTarget,
   fetchTrendStabilityForBot, getPredictionAnalytics, getConfirmedTargetMs,
   getLatestCoinSignals,
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
@@ -68,7 +68,6 @@ import { triggerWindowPipeline } from "./kalshi-bot-pipeline";
 import {
   CONVICTION_LIVE_PRICE_TTL_MS,
   getConvictionLivePriceSnapshot,
-  waitForConvictionOrderbookWarmup,
 } from "./kalshi-conviction-poller";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
@@ -1643,10 +1642,17 @@ async function _runBotTick(
       return;
     }
 
-    // Account balance guard: abort if Kalshi available balance is below the floor.
+    // Account balance guard: conviction dispatch consumes only the snapshot
+    // prewarmed by the poller. Never put an authenticated balance GET between an
+    // eligible conviction quote and its atomic durable claim.
     const minBal = S.config.minAccountBalance ?? 5;
     try {
-      const liveBal = await getCachedKalshiBalance();
+      const liveBal = S.config.decisionMode === "conviction"
+        ? getFreshRegularAccountSnapshot()
+        : await getCachedKalshiBalance();
+      if (liveBal == null) {
+        throw new Error("fresh regular account snapshot unavailable");
+      }
       S.accountBalance = liveBal; // keep bot state fresh for the dashboard badge
       if (checkBalanceGuard(liveBal, minBal)) {
         logger.error(
@@ -1886,28 +1892,17 @@ async function _runBotTick(
     // authenticated API call when the cache is absent, stale (>1.5 s), or for a
     // mismatched ticker.  Caching null (timeout) is intentionally excluded: the
     // tick treats null as "retry later" and must not serve a stale error.
-    let _cachedOb = convictionObCache.get(sym);
-    let _obCacheFresh = _cachedOb != null
+    const _cachedOb = convictionObCache.get(sym);
+    const _obCacheFresh = _cachedOb != null
       && Date.now() - _cachedOb.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
       && _cachedOb.ticker === expectedTicker;
-    const joinedWarmup = !_obCacheFresh
-      ? await waitForConvictionOrderbookWarmup(sym, expectedTicker)
-      : false;
-    if (joinedWarmup) {
-      _cachedOb = convictionObCache.get(sym);
-      _obCacheFresh = _cachedOb != null
-        && Date.now() - _cachedOb.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
-        && _cachedOb.ticker === expectedTicker;
-    }
     const obPrices: { yesAsk: number | null; yesBid: number | null } | null =
       _obCacheFresh && _cachedOb
         ? { yesAsk: _cachedOb.yesAsk, yesBid: _cachedOb.yesBid }
-        : joinedWarmup
-          ? null
-          : await fetchOrderbookPrices(expectedTicker).catch(() => null);
+        : null;
     logger.debug(
-      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker, obCacheHit: _obCacheFresh, joinedWarmup },
-      "[kalshi-bot] conviction live-price gate: orderbook fetch for expected window ticker",
+      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker, obCacheHit: _obCacheFresh },
+      "[kalshi-bot] conviction live-price gate: prepared orderbook consumed",
     );
 
     // Orderbook fetch result handling:
@@ -2672,15 +2667,53 @@ async function _runBotTick(
   }
 
   if (entryMode === "live") {
-    regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), true, Date.now());
-    // Persist and submit the exact same YES-side limit. Older fallback paths
-    // stored NULL and let placeOrder derive the price internally, which made an
-    // uncertain order impossible to match strictly during reconciliation.
-    const durableEntryLimitPrice = orderLimitPrice ?? computeMarketableLimitPrice(
+    // Persist and submit precisely this cent-grid YES-side limit. Route cash is
+    // reserved against the true worst case, not the earlier quote estimate.
+    const durableEntryLimitRaw = orderLimitPrice ?? computeMarketableLimitPrice(
       direction === "yes" ? "bid" : "ask",
       yesPrice,
       S.config.minReturnMultiple,
     );
+    const durableEntryLimitPrice = direction === "yes"
+      ? Math.floor(durableEntryLimitRaw * 100) / 100
+      : Math.ceil(durableEntryLimitRaw * 100) / 100;
+    const worstCaseRouteCost = computeRegularWorstCaseRouteCost(
+      direction,
+      durableEntryLimitPrice,
+      contractCount,
+    );
+    // Both route and its funding evidence were prepared by the poller before
+    // zone eligibility. Do not issue a balance or market read here: absent
+    // exact-shard funding is unsafe and fails closed before the durable claim.
+    const preparedExchangeIndex = getPreparedRegularOrderExchangeIndex(expectedTicker);
+    const preparedAccount = preparedExchangeIndex == null
+      ? null
+      : getFreshRegularAccountSnapshotForRoute(preparedExchangeIndex);
+    const routeAvailableBalance = preparedExchangeIndex == null || !preparedAccount
+      ? null
+      : preparedAccount.availableBalanceByExchange.get(preparedExchangeIndex) ?? null;
+    if (
+      preparedExchangeIndex == null
+      || preparedAccount == null
+      || routeAvailableBalance == null
+      || worstCaseRouteCost == null
+      || routeAvailableBalance + 1e-9 < worstCaseRouteCost
+    ) {
+      const reason = preparedExchangeIndex == null
+        ? "prepared exact route unavailable"
+        : preparedAccount == null
+          ? "fresh aggregate/route account snapshot unavailable"
+          : "prepared route shard has insufficient available cash";
+      releaseConvictionEntryReservation(reason);
+      setTickAbortReason(sym, windowKey, `safety abort: ${reason}`);
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);
+      markPlacementTerminal("definite_error", reason);
+      return;
+    }
+    regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), true, Date.now());
+    // Persist and submit the exact same YES-side limit. Older fallback paths
+    // stored NULL and let placeOrder derive the price internally, which made an
+    // uncertain order impossible to match strictly during reconciliation.
     // ── DURABLE INTENT + ATOMIC RESERVATION (Task #667 req #3/#4) ────────────
     // Persist a durable order intent AND atomically claim a per-(mode,symbol,
     // window) reservation BEFORE the live POST so parallel symbol ticks cannot
@@ -2700,7 +2733,7 @@ async function _runBotTick(
         side: direction,
         requestedCount: contractCount,
         limitPrice: durableEntryLimitPrice,
-        requestedCost: contractCount * expectedFillCost,
+        requestedCost: worstCaseRouteCost,
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
         maxTotalExposure: S.config.maxTotalExposure,
       });
@@ -2798,6 +2831,17 @@ async function _runBotTick(
           // Falls back to midpoint mode (yesPrice + minReturnMultiple) only when
           // neither the poller nor the authenticated book supplied a price.
           limitPrice: durableEntryLimitPrice,
+          requirePreparedRoute: true,
+          // This executes immediately before fetch in the trader. A revoked
+          // authorization is a known no-submit outcome, so the existing
+          // definite-error catch resolves this durable intent as skipped.
+          preSubmitGuard: () => {
+            if (!S.config.enabled || S.paused || S.botMode !== "live" || entryMode !== "live") return false;
+            const currentQh = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
+            return currentQh.action !== "block"
+              && !currentQh.forcedPaper
+              && hasFreshRegularPreparedRouteFunding(expectedTicker, worstCaseRouteCost);
+          },
         },
         undefined,
         { disableHalfSizeRetry: true },

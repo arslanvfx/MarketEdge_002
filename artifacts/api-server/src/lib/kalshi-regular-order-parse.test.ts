@@ -9,6 +9,14 @@ import {
   isUncertainOrderError,
   placeOrder,
   placeEntryOrderWithSizeFallback,
+  prewarmRegularOrderExchangeIndex,
+  prewarmRegularAccountSnapshot,
+  getFreshRegularAccountSnapshot,
+  getFreshRegularAccountSnapshotForRoute,
+  hasFreshRegularPreparedRouteFunding,
+  computeRegularWorstCaseRouteCost,
+  invalidateBalanceCache,
+  REGULAR_ACCOUNT_SNAPSHOT_TTL_MS,
   type PlaceOrderParams,
 } from "./kalshi-trader.ts";
 
@@ -223,6 +231,239 @@ test("placeOrder routing: shard 0 and shard 2 are included in CreateOrderV2 bodi
     )();
     assert.equal(postCount, 1);
   }
+});
+
+test("regular prepared route: exact fresh route posts directly with its shard and no market GET", async () => {
+  const ticker = "PREPARED-ROUTE-DIRECT";
+  prewarmRegularOrderExchangeIndex(ticker, 7);
+  let marketGets = 0;
+  let posts = 0;
+  await withEnvAndFetch(
+    async (_input, init) => {
+      posts++;
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      assert.equal(body["exchange_index"], 7);
+      assert.equal(body["ticker"], ticker);
+      return jsonResponse({ order_id: "prepared-route-ok", fill_count: "0" });
+    },
+    async () => {
+      await placeOrder({ ...BASE, ticker, requirePreparedRoute: true });
+    },
+    () => {
+      marketGets++;
+      return jsonResponse({ market: { ticker, exchange_index: 99 } });
+    },
+  )();
+  assert.equal(marketGets, 0);
+  assert.equal(posts, 1);
+});
+
+test("regular prepared route: absent or stale evidence fails closed without GET or POST", async () => {
+  const staleTicker = "PREPARED-ROUTE-STALE";
+  prewarmRegularOrderExchangeIndex(staleTicker, 3, Date.now() - 3 * 60_000);
+  for (const ticker of ["PREPARED-ROUTE-ABSENT", staleTicker]) {
+    let gets = 0;
+    let posts = 0;
+    await withEnvAndFetch(
+      async () => {
+        posts++;
+        return jsonResponse({ order_id: "must-not-submit", fill_count: "0" });
+      },
+      async () => {
+        await assert.rejects(
+          placeOrder({ ...BASE, ticker, requirePreparedRoute: true }),
+          /route is absent or stale/,
+        );
+      },
+      () => {
+        gets++;
+        return jsonResponse({ market: { ticker, exchange_index: 0 } });
+      },
+    )();
+    assert.equal(gets, 0);
+    assert.equal(posts, 0);
+  }
+});
+
+test("regular account snapshot: fresh read is synchronous and expires fail-closed", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousNow = Date.now;
+  const startedAt = previousNow();
+  try {
+    globalThis.fetch = async () => jsonResponse({ balance: 1234, portfolio_value: 0 });
+    await prewarmRegularAccountSnapshot();
+    // No Promise/await boundary: the hot path consumes a prepared value directly.
+    assert.equal(getFreshRegularAccountSnapshot(), 12.34);
+    Date.now = () => startedAt + REGULAR_ACCOUNT_SNAPSHOT_TTL_MS + 60_000;
+    assert.equal(getFreshRegularAccountSnapshot(), null);
+  } finally {
+    Date.now = previousNow;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("regular account snapshot: aggregate prewarm retains exact-route shard cash", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    invalidateBalanceCache();
+    globalThis.fetch = async () => jsonResponse({
+      balance: 3000,
+      portfolio_value: 0,
+      // Aggregate balance is cents; Kalshi's breakdown fields are fixed-point
+      // dollar values (the production parser intentionally preserves that).
+      balance_breakdown: [{ exchange_index: 4, balance: "12.5000" }, { exchange_index: 7, balance: "17.5000" }],
+    });
+    await prewarmRegularAccountSnapshot();
+    const snapshot = getFreshRegularAccountSnapshotForRoute(7);
+    assert.equal(snapshot?.availableBalance, 30);
+    assert.equal(snapshot?.availableBalanceByExchange.get(7), 17.5);
+    assert.equal(getFreshRegularAccountSnapshotForRoute(99), null);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("regular route cost: uses submitted YES-side limit for both YES and NO", () => {
+  assert.equal(computeRegularWorstCaseRouteCost("yes", 0.91, 3), 2.73);
+  assert.equal(computeRegularWorstCaseRouteCost("no", 0.09, 3), 2.73);
+  assert.equal(computeRegularWorstCaseRouteCost("no", 0.12, 2.5), 2.2);
+  assert.equal(computeRegularWorstCaseRouteCost("yes", 1, 1), null);
+  assert.equal(computeRegularWorstCaseRouteCost("yes", 0.5, 1.001), null);
+});
+
+test("regular pre-submit funding predicate revokes after account invalidation", async () => {
+  const ticker = "PREPARED-ROUTE-FUNDING";
+  const previousFetch = globalThis.fetch;
+  try {
+    invalidateBalanceCache();
+    globalThis.fetch = async () => jsonResponse({
+      balance: 500,
+      portfolio_value: 0,
+      balance_breakdown: [{ exchange_index: 5, balance: "5.0000" }],
+    });
+    prewarmRegularOrderExchangeIndex(ticker, 5);
+    await prewarmRegularAccountSnapshot();
+    assert.equal(hasFreshRegularPreparedRouteFunding(ticker, 4.5), true);
+    invalidateBalanceCache();
+    assert.equal(hasFreshRegularPreparedRouteFunding(ticker, 4.5), false);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+
+  let posts = 0;
+  await withEnvAndFetch(
+    async () => {
+      posts++;
+      return jsonResponse({ order_id: "must-not-submit", fill_count: "0" });
+    },
+    async () => {
+      await assert.rejects(
+        placeOrder({
+          ...BASE,
+          ticker,
+          requirePreparedRoute: true,
+          preSubmitGuard: () => hasFreshRegularPreparedRouteFunding(ticker, 4.5),
+        }),
+        /revoked before broker POST/,
+      );
+    },
+  )();
+  assert.equal(posts, 0);
+});
+
+test("regular account prewarm: concurrent callers coalesce, refresh-ahead reuses fresh snapshot, invalidation fails closed", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousNow = Date.now;
+  let gets = 0;
+  try {
+    invalidateBalanceCache();
+    let now = previousNow();
+    Date.now = () => now;
+    globalThis.fetch = async () => {
+      gets++;
+      return jsonResponse({
+        balance: 2000,
+        portfolio_value: 0,
+        balance_breakdown: [{ exchange_index: 2, balance: "20.0000" }],
+      });
+    };
+    await Promise.all([
+      prewarmRegularAccountSnapshot(),
+      prewarmRegularAccountSnapshot(),
+      prewarmRegularAccountSnapshot(),
+    ]);
+    assert.equal(gets, 1, "all same-cycle symbol prewarms share one authenticated GET");
+    await prewarmRegularAccountSnapshot();
+    assert.equal(gets, 1, "refresh-ahead retains a usable snapshot without repeated GETs");
+    // Enter the refresh-ahead window, then emulate several symbols in the same
+    // poll cycle. They must share one replacement GET, before snapshot expiry.
+    now += 9_000;
+    await Promise.all([
+      prewarmRegularAccountSnapshot(),
+      prewarmRegularAccountSnapshot(),
+      prewarmRegularAccountSnapshot(),
+    ]);
+    assert.equal(gets, 2, "refresh-ahead starts exactly one shared replacement GET");
+    assert.equal(getFreshRegularAccountSnapshotForRoute(2)?.availableBalance, 20);
+    invalidateBalanceCache();
+    assert.equal(getFreshRegularAccountSnapshot(), null);
+    assert.equal(getFreshRegularAccountSnapshotForRoute(2), null);
+  } finally {
+    Date.now = previousNow;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("regular prepared route: revoked pre-submit guard makes zero broker POSTs", async () => {
+  const ticker = "PREPARED-ROUTE-REVOKED";
+  prewarmRegularOrderExchangeIndex(ticker, 1);
+  let posts = 0;
+  await withEnvAndFetch(
+    async () => {
+      posts++;
+      return jsonResponse({ order_id: "must-not-submit", fill_count: "0" });
+    },
+    async () => {
+      await assert.rejects(
+        placeOrder({ ...BASE, ticker, requirePreparedRoute: true, preSubmitGuard: () => false }),
+        /revoked before broker POST/,
+      );
+    },
+  )();
+  assert.equal(posts, 0);
+});
+
+test("regular intent migrations declare claim-predicate indexes", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("./kalshi-regular-order-intent.ts", import.meta.url), "utf8"),
+  );
+  assert.match(source, /regular_intent_mode_symbol_status_window/);
+  assert.match(source, /ON kalshi_regular_order_intents \(mode, symbol, status, window_key\)/);
+  assert.match(source, /regular_intent_active_cost/);
+  assert.match(source, /WHERE status IN \('reserved', 'unknown', 'filled'\)/);
+  const claim = source.slice(source.indexOf("export async function claimRegularOrderIntent"), source.indexOf("/**\n * Resolve an intent"));
+  assert.match(claim, /migration is not ready; refusing live claim/);
+  assert.doesNotMatch(claim, /await ensureMigrated\(\)/);
+});
+
+test("conviction hot path consumes only prepared orderbook and reaches durable claim without candidate I/O", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),
+  );
+  const gateStart = source.indexOf("// ─── CONVICTION LIVE-PRICE GATE");
+  const gateEnd = source.indexOf("// Orderbook fetch result handling:", gateStart);
+  const preparedGate = source.slice(gateStart, gateEnd);
+  assert.ok(gateStart >= 0 && gateEnd > gateStart);
+  assert.doesNotMatch(preparedGate, /await waitForConvictionOrderbookWarmup/);
+  assert.doesNotMatch(preparedGate, /await fetchOrderbookPrices/);
+  assert.match(preparedGate, /_obCacheFresh/);
+
+  const hotPathEnd = source.indexOf("const claim = await claimRegularOrderIntent", gateStart);
+  const hotPath = source.slice(gateStart, hotPathEnd);
+  assert.match(hotPath, /getPreparedRegularOrderExchangeIndex\(expectedTicker\)/);
+  assert.match(hotPath, /getFreshRegularAccountSnapshotForRoute/);
+  assert.doesNotMatch(hotPath, /await getCachedKalshiBalance/);
+  assert.doesNotMatch(hotPath, /await fetchOrderbookPrices/);
 });
 
 test("placeOrder routing: invalid market identity fails closed with zero POSTs", async () => {

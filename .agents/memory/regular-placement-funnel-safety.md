@@ -14,3 +14,9 @@ description: Safety rules for comparing paper opportunities with live regular-or
 **Why:** A stalled or delayed candidate must never grow memory without limit, and telemetry must never throw inside the trading path or overwrite an unknown-exposure outcome.
 
 **How to apply:** Bound active plus completed records together, evict safely, and make every late lifecycle update return without affecting order execution.
+
+**Rule:** A regular conviction candidate may consume only prewarmed, exact-ticker orderbook routing and exact-route account evidence. After eligibility, the only permitted await before the broker POST is the durable intent claim; DDL and market, orderbook, or balance reads must never occur there.
+
+**Why:** Candidate-time network preparation caused eligible live orders to miss short price windows. Rechecking funding only before the durable claim also allowed another fill to invalidate the evidence while the claim was waiting.
+
+**How to apply:** Compute one immutable worst-case cost from the final submitted limit and refreshed count, use it for route funding and intent reservation, and synchronously revalidate authorization plus that same prepared funding immediately before the POST. Missing or invalidated evidence fails closed without I/O.
