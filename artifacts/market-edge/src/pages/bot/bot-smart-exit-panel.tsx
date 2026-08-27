@@ -200,8 +200,8 @@ function ScalperSmartExitSection({
         </div>
       </div>
 
-      <div className="grid gap-0 lg:grid-cols-[1.2fr_0.8fr]">
-        <div className="border-b border-amber-200/10 lg:border-b-0 lg:border-r">
+      <div className="grid min-w-0 gap-0 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+        <div className="min-w-0 border-b border-amber-200/10 lg:border-b-0 lg:border-r">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200/10 px-4 py-3">
             <div>
               <div className="text-[9px] font-black uppercase tracking-[0.18em] text-amber-200/65">Current fast evaluations</div>
@@ -249,7 +249,7 @@ function ScalperSmartExitSection({
           </div>
         </div>
 
-        <div className="p-4">
+        <div className="min-w-0 p-4">
           <div className="text-[9px] font-black uppercase tracking-[0.18em] text-amber-200/65">Effectiveness ledger</div>
           <div className="mt-3 grid grid-cols-2 gap-2">
             {[
@@ -268,10 +268,10 @@ function ScalperSmartExitSection({
           <div className="mt-4 text-[9px] font-black uppercase tracking-[0.18em] text-amber-200/65">Same-snapshot replay</div>
           <div className="mt-2 space-y-1.5">
             {(replay?.reports ?? []).map((report) => (
-              <div key={report.sensitivity} className="flex items-center justify-between rounded-md border border-amber-200/10 bg-black/30 px-2.5 py-2 text-[9px]">
+              <div key={report.sensitivity} className="grid min-w-0 gap-1 rounded-md border border-amber-200/10 bg-black/30 px-2.5 py-2 text-[9px] sm:grid-cols-[minmax(100px,0.8fr)_minmax(0,1.5fr)_auto] sm:items-center">
                 <span className="font-bold uppercase text-amber-100/60">{report.sensitivity.replace("_", " ")}</span>
-                <span className="font-mono text-amber-50/45">{report.triggered} exits · {report.helped} helped · {report.harmed} harmed</span>
-                <span className={`font-mono font-black ${report.netValue >= 0 ? "text-emerald-300" : "text-red-300"}`}>{fmt$(report.netValue)}</span>
+                <span className="min-w-0 font-mono text-amber-50/45">{report.triggered} exits · {report.helped} helped · {report.harmed} harmed</span>
+                <span className={`font-mono font-black sm:text-right ${report.netValue >= 0 ? "text-emerald-300" : "text-red-300"}`}>{fmt$(report.netValue)}</span>
               </div>
             ))}
           </div>
