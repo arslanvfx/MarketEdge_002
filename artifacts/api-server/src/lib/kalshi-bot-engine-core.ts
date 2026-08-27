@@ -1392,7 +1392,7 @@ export interface BotConfig {
   betProfile: BetProfile;
   // Paper trading simulation parameters (only used in paper mode).
   // paperStartingBalance: the wallet amount before any bets are counted.
-  // paperWinReturnRate: profit as a fraction of betSize on a winning bet (0.5 = +50¢ per $1 bet).
+  // Legacy persisted field retained for config compatibility. Paper settlement now uses contract economics.
   // paperBalanceResetAt: ISO timestamp of the last manual wallet reset; bets before this are ignored.
   paperStartingBalance: number;  // (default 100)
   paperWinReturnRate: number;    // (default 0.5)

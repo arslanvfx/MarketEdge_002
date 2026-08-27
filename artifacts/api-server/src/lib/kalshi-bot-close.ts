@@ -32,6 +32,7 @@ import {
   resolveRegularExitIntent,
 } from "./kalshi-regular-order-intent";
 import { regularCountsEqual } from "./kalshi-regular-fixed-point";
+import { calculateKalshiSettlementPnl } from "./kalshi-contract-pnl";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
@@ -203,12 +204,7 @@ export async function closePosition(
   // For mid-window exits: pnl = (exitYesPrice - entryYesPrice) × contractCount
   //   YES bet profits when exitYesPrice > entryYesPrice
   //   NO  bet profits when exitYesPrice < entryYesPrice (they go inverse)
-  // For expiry: TEMP paper simulation uses fixed return rate (see PAPER_WIN_RETURN_RATE).
-  //   In live mode this path is replaced by evalClosedBets using real candle data.
-
-  // Paper win return rate: configurable via S.config.paperWinReturnRate.
-  // Default 0.50 = 50¢ profit per $1 bet. Change in Bot Configuration panel.
-  const PAPER_WIN_RETURN_RATE = S.config.paperWinReturnRate ?? 0.50;
+  // Expiry uses real binary-contract economics in both paper and live modes.
 
   let pnl = 0;
   if (fillPrice !== null) {
@@ -225,19 +221,12 @@ export async function closePosition(
     if (lastCoinPrice !== null) {
       const priceAboveStrike = lastCoinPrice >= strike;
       const won = pos.direction === "yes" ? priceAboveStrike : !priceAboveStrike;
-      if (pos.entryMode === "live") {
-        // Real contract P&L: each contract pays $1.00 (win) or $0.00 (loss)
-        // YES cost = entryYesPrice/contract → profit = (1 − entry) × n   or loss = −entry × n
-        // NO  cost = (1 − entry)/contract  → profit = entry × n           or loss = −(1 − entry) × n
-        const ep = pos.entryYesPrice;
-        const n  = pos.contractCount;
-        pnl = won
-          ? (pos.direction === "yes" ? (1 - ep) * n : ep * n)
-          : (pos.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-      } else {
-        // Paper simulation: fixed win rate
-        pnl = won ? pos.betAmount * PAPER_WIN_RETURN_RATE : -pos.betAmount;
-      }
+      pnl = calculateKalshiSettlementPnl({
+        direction: pos.direction,
+        entryYesPrice: pos.entryYesPrice,
+        contractCount: pos.contractCount,
+        won,
+      });
     } else {
       // No price data — book conservatively as full loss
       if (pos.entryMode === "live") {
@@ -377,13 +366,8 @@ export async function closePosition(
       cryptoPriceAtExit,
     });
 
-    // Shadow paper bet: close the mirrored paper record with the same outcome.
-    // pnl for paper uses the fixed simulation rate (not real contract math).
+    // Shadow paper bet closes with the same contract economics and outcome.
     if (pos.shadowPaperId) {
-      const PAPER_WIN_RATE = S.config.paperWinReturnRate ?? 0.50;
-      const paperPnl = isExpiry
-        ? (pnl >= 0 ? pos.betAmount * PAPER_WIN_RATE : -pos.betAmount)
-        : pnl; // mid-window price-delta PnL is equivalent for paper
       persistBetRecord({
         symbol: pos.symbol,
         windowKey: pos.windowKey,
@@ -396,7 +380,7 @@ export async function closePosition(
         kalshiTarget: pos.kalshiTarget,
         contractCount: pos.contractCount,
         betAmount: pos.betAmount,
-        pnl: paperPnl,
+        pnl,
         exitReason: reason,
         phase2Activated: pos.phase2Activated,
         phase2RecoveredAmount: phase2RecoveredAmount ?? undefined,

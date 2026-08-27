@@ -2805,23 +2805,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </span>
                     </label>
 
-                    {/* Win Return Rate */}
-                    <label className="flex flex-col gap-1.5">
-                      <span className="text-xs text-muted-foreground">
-                        Win Profit Rate ({((merged.paperWinReturnRate ?? 0.5) * 100).toFixed(0)}%)
-                      </span>
-                      <input type="range" min={0.05} max={1.0} step={0.05}
-                        className="mt-1"
-                        value={merged.paperWinReturnRate ?? 0.5}
-                        onChange={e => setConfigDraft(d => ({ ...d, paperWinReturnRate: parseFloat(e.target.value) }))} />
-                      <div className="flex justify-between text-[10px] text-muted-foreground/60">
-                        <span>5%</span><span>100%</span>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground/70">
-                        Profit returned as % of bet on a win (e.g. 50% → +$0.50 per $1 bet).
-                      </span>
-                    </label>
-
                     {/* Reset Wallet */}
                     <div className="flex flex-col gap-1.5">
                       <span className="text-xs text-muted-foreground">Reset Wallet</span>

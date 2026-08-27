@@ -2,6 +2,7 @@ import { db, kalshiBotBetsTable, botConfigTable, botAutoTuneLogTable, withRetry 
 import { isAiFeatureEnabled } from "./ai-spend";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { logger } from "./logger";
+import { calculateKalshiSettlementPnl } from "./kalshi-contract-pnl";
 import {
   checkMaxBetSizeGuard, checkDailyLossGuard, checkStreakPauseGuard,
   checkSlippageStrikeGuard, checkWindowMonitorReadyGuard, checkBalanceGuard,
@@ -209,16 +210,12 @@ export async function evalClosedBets(): Promise<void> {
               ? settled.result === "yes"
               : settled.result === "no";
             outcome = won ? "win" : "loss";
-            const ep = entryPrice;
-            const n  = count;
-            if (row.mode === "live") {
-              correctedPnl = won
-                ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-                : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-            } else {
-              const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
-              correctedPnl = won ? betAmt * 0.50 : -betAmt;
-            }
+            correctedPnl = calculateKalshiSettlementPnl({
+              direction: row.direction,
+              entryYesPrice: entryPrice,
+              contractCount: count,
+              won,
+            });
             logger.info(
               { sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: settled.result, direction: row.direction, outcome, pnl: correctedPnl },
               "[kalshi-bot] evalClosedBets: expired bet settled via Kalshi result (authoritative)",
@@ -245,15 +242,12 @@ export async function evalClosedBets(): Promise<void> {
             if (_seriesMatch) {
               const _seriesWon = row.direction === "yes" ? _seriesMatch.result === "yes" : _seriesMatch.result === "no";
               outcome = _seriesWon ? "win" : "loss";
-              const ep = entryPrice; const n = count;
-              if (row.mode === "live") {
-                correctedPnl = _seriesWon
-                  ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-                  : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-              } else {
-                const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
-                correctedPnl = _seriesWon ? betAmt * 0.50 : -betAmt;
-              }
+              correctedPnl = calculateKalshiSettlementPnl({
+                direction: row.direction,
+                entryYesPrice: entryPrice,
+                contractCount: count,
+                won: _seriesWon,
+              });
               logger.info(
                 { sym: row.symbol, windowKey: row.windowKey, ticker: row.ticker, kalshiResult: _seriesMatch.result, direction: row.direction, outcome, pnl: correctedPnl },
                 "[kalshi-bot] evalClosedBets: settled via series-level Kalshi lookup (step 1.5)",
@@ -415,17 +409,12 @@ export async function evalClosedBets(): Promise<void> {
           // Tag all bot entry timing snapshots for this window with the final outcome.
           tagBotEntryTimingOutcomes(row.symbol, row.windowKey!, priceAboveStrike).catch(() => {});
 
-          // Real contract P&L for live bets; paper simulation for paper bets.
-          const ep = entryPrice;
-          const n  = count;
-          if (row.mode === "live") {
-            correctedPnl = won
-              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-          } else {
-            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
-            correctedPnl = won ? betAmt * 0.50 : -betAmt;
-          }
+          correctedPnl = calculateKalshiSettlementPnl({
+            direction: row.direction,
+            entryYesPrice: entryPrice,
+            contractCount: count,
+            won,
+          });
 
           logger.info(
             { sym: row.symbol, windowKey: row.windowKey, closePrice, strike, direction: row.direction, outcome, pnl: correctedPnl },
@@ -655,28 +644,29 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
           : _reEvalResult === "no";
         const correctOutcome: "win" | "loss" = won ? "win" : "loss";
 
-        if (correctOutcome === row.outcome) continue; // already correct — no change needed
-
-        // Outcome is wrong — recompute P&L and correct the record
+        // Recompute P&L even when the outcome is already correct: legacy paper
+        // rows may still contain the old fixed-return simulation amount.
         const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
         const count = row.contractCount != null ? Number(row.contractCount) : 1;
         let correctedPnl: number | null = null;
 
         if (entryPrice != null) {
-          const ep = entryPrice;
-          const n  = count;
-          if (row.mode === "live") {
-            correctedPnl = won
-              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-          } else {
-            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
-            correctedPnl = won ? betAmt * 0.50 : -betAmt;
-          }
+          correctedPnl = calculateKalshiSettlementPnl({
+            direction: row.direction,
+            entryYesPrice: entryPrice,
+            contractCount: count,
+            won,
+          });
         }
 
         const oldPnl = row.pnl != null ? String(row.pnl) : "null";
         const newPnl = correctedPnl != null ? String(correctedPnl) : oldPnl;
+        if (
+          correctOutcome === row.outcome
+          && correctedPnl !== null
+          && row.pnl !== null
+          && Math.abs(Number(row.pnl) - correctedPnl) < 0.000001
+        ) continue;
 
         await db
           .update(kalshiBotBetsTable)
@@ -796,25 +786,26 @@ export async function fixCommodityOutcomes(opts: { since?: string; limit?: numbe
         const won = row.direction === "yes" ? match.result === "yes" : match.result === "no";
         const correctOutcome: "win" | "loss" = won ? "win" : "loss";
 
-        if (correctOutcome === row.outcome) continue; // already correct
-
         const entryPrice = row.entryPrice != null ? parseFloat(String(row.entryPrice)) : null;
         const count = row.contractCount != null ? Number(row.contractCount) : 1;
         let correctedPnl: number | null = null;
         if (entryPrice != null) {
-          const ep = entryPrice; const n = count;
-          if (row.mode === "live") {
-            correctedPnl = won
-              ? (row.direction === "yes" ? (1 - ep) * n : ep * n)
-              : (row.direction === "yes" ? -ep * n       : -(1 - ep) * n);
-          } else {
-            const betAmt = row.betAmount != null ? parseFloat(String(row.betAmount)) : ep * n;
-            correctedPnl = won ? betAmt * 0.50 : -betAmt;
-          }
+          correctedPnl = calculateKalshiSettlementPnl({
+            direction: row.direction,
+            entryYesPrice: entryPrice,
+            contractCount: count,
+            won,
+          });
         }
 
         const oldPnl = row.pnl != null ? String(row.pnl) : "null";
         const newPnl = correctedPnl != null ? String(correctedPnl) : oldPnl;
+        if (
+          correctOutcome === row.outcome
+          && correctedPnl !== null
+          && row.pnl !== null
+          && Math.abs(Number(row.pnl) - correctedPnl) < 0.000001
+        ) continue;
 
         await db
           .update(kalshiBotBetsTable)
