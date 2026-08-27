@@ -50,6 +50,8 @@ export async function requestSmartExitFromOwner(params: {
     position: SmartExitPosition,
     parameterVersion: string,
   ) => boolean;
+  revalidateRisk: () => Promise<boolean>;
+  isRiskStillValid: () => boolean;
 }): Promise<SmartExitOwnerCloseResult> {
   const { position, parameterVersion } = params;
   const constraint = params.executionConstraint;
@@ -97,6 +99,9 @@ export async function requestSmartExitFromOwner(params: {
   ) {
     return { outcome: "blocked", reason: "fresh exact regular market quote is stale" };
   }
+  if (!await params.revalidateRisk()) {
+    return { outcome: "blocked", reason: "fresh spot trajectory or target risk no longer authorizes exit" };
+  }
 
   const freshBook = await fetchOrderbookPrices(position.ticker);
   if (!freshBook) {
@@ -117,6 +122,7 @@ export async function requestSmartExitFromOwner(params: {
   try {
     const finalGuard = () => {
       if (!params.isVersionStillAuthorized(position, parameterVersion)) return false;
+      if (!params.isRiskStillValid()) return false;
       if (!regularIdentityMatches(openPositions.get(symbol), position)) return false;
       if (Date.now() / 1_000 > constraint.evidenceExpiresAtSeconds) return false;
       const latestMarket = getKalshiCachedData(symbol);

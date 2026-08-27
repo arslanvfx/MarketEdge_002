@@ -78,6 +78,12 @@ export const INITIAL_SMART_EXIT_STATE: SmartExitState = Object.freeze({
   previousUnderlyingPrice: null,
   previousUnderlyingAtSeconds: null,
   previousAdverseVelocity: null,
+  trajectorySamples: Object.freeze([]),
+  adverseLatchUntilSeconds: 0,
+  adverseExcursionFraction: 0,
+  adverseRecoverySampleCount: 0,
+  latchedAdverseVelocityPerSecond: null,
+  latchedAdverseAccelerationPerSecond2: null,
 });
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
@@ -91,6 +97,8 @@ export interface SmartExitTimeBandParameters {
   readonly underlyingConfirmationCount: number;
   readonly marketConfirmationCount: number;
   readonly minimumMarketLossFraction: number;
+  readonly minimumAdverseExcursionFraction: number;
+  readonly adverseLatchSeconds: number;
 }
 
 /**
@@ -99,18 +107,20 @@ export interface SmartExitTimeBandParameters {
  */
 export function resolveSmartExitTimeBand(remainingSeconds: number): SmartExitTimeBandParameters {
   const remaining = Math.max(0, remainingSeconds);
-  if (remaining > 180) {
+  if (remaining > 240) {
     return {
       band: "monitor", minimumDistanceFraction: 0.0025,
       volatilityReachMultiplier: 1.25, underlyingConfirmationCount: 4,
       marketConfirmationCount: 2, minimumMarketLossFraction: 0.35,
+      minimumAdverseExcursionFraction: 0.0035, adverseLatchSeconds: 4,
     };
   }
-  if (remaining > 120) {
+  if (remaining > 180) {
     return {
       band: "escalation", minimumDistanceFraction: 0.0015,
       volatilityReachMultiplier: 0.75, underlyingConfirmationCount: 3,
       marketConfirmationCount: 2, minimumMarketLossFraction: 0.20,
+      minimumAdverseExcursionFraction: 0.002, adverseLatchSeconds: 6,
     };
   }
   if (remaining > 60) {
@@ -118,12 +128,14 @@ export function resolveSmartExitTimeBand(remainingSeconds: number): SmartExitTim
       band: "urgent", minimumDistanceFraction: 0.00075,
       volatilityReachMultiplier: 0.35, underlyingConfirmationCount: 2,
       marketConfirmationCount: 2, minimumMarketLossFraction: 0.10,
+      minimumAdverseExcursionFraction: 0.00075, adverseLatchSeconds: 8,
     };
   }
   return {
     band: "critical", minimumDistanceFraction: 0,
     volatilityReachMultiplier: 0, underlyingConfirmationCount: 1,
     marketConfirmationCount: 1, minimumMarketLossFraction: 0.05,
+    minimumAdverseExcursionFraction: 0.0002, adverseLatchSeconds: 10,
   };
 }
 
@@ -160,6 +172,17 @@ export function assessSmartExitMarketDirection(input: {
     };
   }
   const elapsed = currentAt - previousAt!;
+  const epsilon = 0.001;
+  if (elapsed === 0 && Math.abs(current - previous!) <= epsilon) {
+    const sampleCount = Math.max(0, input.previousSampleCount ?? 0);
+    return {
+      direction: "flat",
+      probabilityDelta: current - previous!,
+      adverseSlopePerSecond: 0,
+      sampleCount,
+      confirmed: false,
+    };
+  }
   if (elapsed <= 0 || elapsed > input.maximumGapSeconds) {
     return {
       direction: "unknown", probabilityDelta: null, adverseSlopePerSecond: null,
@@ -168,22 +191,175 @@ export function assessSmartExitMarketDirection(input: {
   }
   const probabilityDelta = current - previous!;
   const adverseSlopePerSecond = -probabilityDelta / elapsed;
-  const epsilon = 0.001;
   const direction = probabilityDelta < -epsilon
     ? "adverse" as const
     : probabilityDelta > epsilon ? "recovering" as const : "flat" as const;
+  const previousSampleCount = Math.max(0, input.previousSampleCount ?? 0);
   const sampleCount = direction === "adverse"
-    ? Math.max(0, input.previousSampleCount ?? 0) + 1
-    : 0;
+    ? previousSampleCount + 1
+    : direction === "flat" ? Math.max(0, previousSampleCount - 1) : 0;
+  const decisiveCollapse = direction === "adverse"
+    && input.marketLossFraction !== null
+    && input.marketLossFraction >= Math.max(0.50, input.minimumMarketLossFraction * 2);
   return {
     direction,
     probabilityDelta,
     adverseSlopePerSecond,
     sampleCount,
     confirmed: direction === "adverse"
-      && sampleCount >= input.requiredSampleCount
+      && (sampleCount >= input.requiredSampleCount || decisiveCollapse)
       && input.marketLossFraction !== null
       && input.marketLossFraction >= input.minimumMarketLossFraction,
+  };
+}
+
+export interface SmartExitTrajectoryAssessment {
+  readonly samples: SmartExitState["trajectorySamples"];
+  readonly distinctSampleAdded: boolean;
+  readonly sampleElapsedSeconds: number | null;
+  readonly velocityPerSecond: number | null;
+  readonly adverseVelocityPerSecond: number | null;
+  readonly adverseAccelerationPerSecond2: number | null;
+  readonly adverseExcursionFraction: number;
+  readonly adverseLatchActive: boolean;
+  readonly adverseLatchUntilSeconds: number;
+  readonly recoveryProgress: number;
+}
+
+/**
+ * Advances a bounded event-time trajectory. Repeated prices/timestamps preserve
+ * a recent adverse move without manufacturing another directional sample.
+ */
+export function assessSmartExitTrajectory(input: {
+  readonly side: BinarySide;
+  readonly strikePrice: number;
+  readonly price: number;
+  readonly observedAtSeconds: number | null;
+  readonly nowSeconds: number;
+  readonly remainingSeconds: number;
+  readonly previousState: SmartExitState;
+  readonly maximumEventAgeSeconds: number;
+}): SmartExitTrajectoryAssessment {
+  const previous = input.previousState;
+  const parameters = resolveSmartExitTimeBand(input.remainingSeconds);
+  const valid = finite(input.observedAtSeconds)
+    && finite(input.price)
+    && input.price > 0
+    && input.strikePrice > 0
+    && input.observedAtSeconds <= input.nowSeconds
+    && input.nowSeconds - input.observedAtSeconds <= input.maximumEventAgeSeconds;
+  if (!valid) {
+    return {
+      samples: [],
+      distinctSampleAdded: false,
+      sampleElapsedSeconds: null,
+      velocityPerSecond: null,
+      adverseVelocityPerSecond: null,
+      adverseAccelerationPerSecond2: null,
+      adverseExcursionFraction: 0,
+      adverseLatchActive: false,
+      adverseLatchUntilSeconds: 0,
+      recoveryProgress: 0,
+    };
+  }
+
+  const observedAt = input.observedAtSeconds!;
+  let samples = [...(previous.trajectorySamples ?? [])]
+    .filter((sample) => finite(sample.observedAtSeconds)
+      && finite(sample.price) && sample.price > 0
+      && sample.observedAtSeconds >= observedAt - 12
+      && sample.observedAtSeconds <= observedAt)
+    .sort((a, b) => a.observedAtSeconds - b.observedAtSeconds)
+    .slice(-23);
+  if (
+    samples.length === 0
+    && finite(previous.previousUnderlyingAtSeconds)
+    && finite(previous.previousUnderlyingPrice)
+    && previous.previousUnderlyingPrice > 0
+    && previous.previousUnderlyingAtSeconds < observedAt
+    && observedAt - previous.previousUnderlyingAtSeconds
+      <= SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS
+  ) {
+    samples.push({
+      observedAtSeconds: previous.previousUnderlyingAtSeconds,
+      price: previous.previousUnderlyingPrice,
+    });
+  }
+  const priorLast = samples.at(-1);
+  const gap = priorLast == null ? null : observedAt - priorLast.observedAtSeconds;
+  if (gap !== null && gap > SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS) samples = [];
+  const last = samples.at(-1);
+  const sameEvent = last != null
+    && last.observedAtSeconds === observedAt
+    && Math.abs(last.price - input.price) <= Math.max(1e-12, input.price * 1e-12);
+  const samePrice = last != null
+    && Math.abs(last.price - input.price) <= Math.max(1e-12, input.price * 1e-12);
+  const distinctSampleAdded = !sameEvent && !samePrice
+    && (last == null || observedAt > last.observedAtSeconds);
+  if (distinctSampleAdded) {
+    samples.push({ observedAtSeconds: observedAt, price: input.price });
+    samples = samples.slice(-24);
+  } else if (samples.length === 0) {
+    samples.push({ observedAtSeconds: observedAt, price: input.price });
+  }
+
+  const current = samples.at(-1)!;
+  const previousDistinct = samples.at(-2);
+  const beforePrevious = samples.at(-3);
+  const sampleElapsedSeconds = previousDistinct == null
+    ? null : current.observedAtSeconds - previousDistinct.observedAtSeconds;
+  const velocityPerSecond = sampleElapsedSeconds != null && sampleElapsedSeconds > 0
+    ? (current.price - previousDistinct!.price) / sampleElapsedSeconds : null;
+  const adverseVelocity = velocityPerSecond == null
+    ? null : input.side === "yes" ? -velocityPerSecond : velocityPerSecond;
+  const priorElapsed = previousDistinct != null && beforePrevious != null
+    ? previousDistinct.observedAtSeconds - beforePrevious.observedAtSeconds : null;
+  const priorVelocity = priorElapsed != null && priorElapsed > 0
+    ? (previousDistinct!.price - beforePrevious!.price) / priorElapsed : null;
+  const priorAdverseVelocity = priorVelocity == null
+    ? null : input.side === "yes" ? -priorVelocity : priorVelocity;
+  const adverseAcceleration = adverseVelocity == null || priorAdverseVelocity == null
+      || sampleElapsedSeconds == null || sampleElapsedSeconds <= 0
+    ? null : (adverseVelocity - priorAdverseVelocity) / sampleElapsedSeconds;
+  const favorableExtreme = input.side === "yes"
+    ? Math.max(...samples.map((sample) => sample.price))
+    : Math.min(...samples.map((sample) => sample.price));
+  const adverseExcursionFraction = Math.max(0, input.side === "yes"
+    ? (favorableExtreme - current.price) / input.strikePrice
+    : (current.price - favorableExtreme) / input.strikePrice);
+  const adverseDistinctMove = distinctSampleAdded && adverseVelocity !== null && adverseVelocity > 0;
+  const recoveringDistinctMove = distinctSampleAdded && adverseVelocity !== null && adverseVelocity < 0;
+  let recoveryProgress = recoveringDistinctMove
+    ? Math.max(0, previous.adverseRecoverySampleCount ?? 0) + 1 : 0;
+  let latchUntil = adverseDistinctMove
+    ? input.nowSeconds + parameters.adverseLatchSeconds
+    : previous.adverseLatchUntilSeconds ?? 0;
+  const strongRecovery = recoveryProgress >= 2
+    || ((previous.adverseExcursionFraction ?? 0) > 0
+      && adverseExcursionFraction <= (previous.adverseExcursionFraction ?? 0) * 0.35);
+  if (strongRecovery || input.nowSeconds > latchUntil) {
+    latchUntil = 0;
+    recoveryProgress = 0;
+  }
+  const adverseLatchActive = latchUntil >= input.nowSeconds
+    && adverseExcursionFraction > 0;
+  return {
+    samples,
+    distinctSampleAdded,
+    sampleElapsedSeconds,
+    velocityPerSecond,
+    adverseVelocityPerSecond: adverseDistinctMove
+      ? adverseVelocity
+      : adverseLatchActive ? previous.latchedAdverseVelocityPerSecond ?? adverseVelocity : adverseVelocity,
+    adverseAccelerationPerSecond2: adverseDistinctMove
+      ? adverseAcceleration
+      : adverseLatchActive
+        ? previous.latchedAdverseAccelerationPerSecond2 ?? adverseAcceleration
+        : adverseAcceleration,
+    adverseExcursionFraction,
+    adverseLatchActive,
+    adverseLatchUntilSeconds: latchUntil,
+    recoveryProgress,
   };
 }
 
@@ -209,6 +385,7 @@ export function assessSmartExitTimeScaledRisk(input: {
   readonly targetAlreadyCrossed: boolean;
   readonly projectedCrossingConfirmed: boolean;
   readonly marketDirectionConfirmed: boolean;
+  readonly trajectoryConfirmed?: boolean;
 }): SmartExitTimeScaledRisk {
   const parameters = resolveSmartExitTimeBand(input.remainingSeconds);
   const signedDistance = input.side === "yes"
@@ -223,8 +400,10 @@ export function assessSmartExitTimeScaledRisk(input: {
     volatilityReach * parameters.volatilityReachMultiplier,
   );
   const recoveryReachable = adverseTargetDistanceFraction <= volatilityReach;
-  const underlyingConfirmed = input.directionalCount >= parameters.underlyingConfirmationCount
-    && input.continuationAdverse;
+  const underlyingConfirmed = (
+    input.directionalCount >= parameters.underlyingConfirmationCount
+    || input.trajectoryConfirmed === true
+  ) && input.continuationAdverse;
   const distanceConfirmed = adverseTargetDistanceFraction + 1e-12
     >= requiredAdverseTargetDistanceFraction;
   const actionable = input.marketDirectionConfirmed && (
@@ -261,6 +440,7 @@ export interface SmartExitCrossingRiskInput {
   readonly minCrossingReserveSeconds?: number;
   readonly maxCrossingReserveSeconds?: number;
   readonly maxSampleGapSeconds?: number;
+  readonly adverseLatchActive?: boolean;
 }
 
 export interface SmartExitCrossingRisk {
@@ -352,7 +532,7 @@ export function assessSmartExitCrossingRisk(input: SmartExitCrossingRiskInput): 
     && input.sampleElapsedSeconds <= maxGap;
   const directionalCount = sustainedAdverseSample
     ? input.previousDirectionalCount + 1
-    : 0;
+    : input.adverseLatchActive ? input.previousDirectionalCount : 0;
   const crossingReserveSeconds = Math.min(
     input.maxCrossingReserveSeconds ?? 30,
     Math.max(
@@ -480,6 +660,12 @@ function emptyMetrics(): DecisionMetrics {
     underlyingVelocityPerSecond: null,
     adverseVelocityPerSecond: null,
     adverseAccelerationPerSecond2: null,
+    trajectorySampleCount: 0,
+    trajectoryWindowSeconds: 0,
+    adverseExcursionFraction: 0,
+    adverseLatchActive: false,
+    adverseLatchExpiresAtSeconds: null,
+    recoveryProgress: 0,
     projectedCrossingSeconds: null,
     projectedCrossBeforeExpiry: null,
     crossingRiskConfirmed: false,
@@ -497,12 +683,17 @@ function emptyMetrics(): DecisionMetrics {
   };
 }
 
-function unavailable(reason: string, state: SmartExitState, degradedComponents: readonly string[] = []): SmartExitDecision {
+function unavailable(
+  reason: string,
+  state: SmartExitState,
+  degradedComponents: readonly string[] = [],
+  timeBand: SmartExitTimeBand = "monitor",
+): SmartExitDecision {
   return {
     disposition: "UNAVAILABLE", reason, mayExecuteExit: false,
     modelWinProbability: null, probabilityDropFromEntry: null, threshold: null,
     continuationScore: null, riskStage: "hold", nextState: state,
-    ...emptyMetrics(), degradedComponents,
+    ...emptyMetrics(), timeBand, degradedComponents,
   };
 }
 
@@ -535,13 +726,14 @@ export function missingSmartExitCrossingEvidence(
     "volatilityLogReturnPerSqrtSecond" | "momentumLogReturn" | "momentumWindowSeconds"
       | "tradeFlowImbalance" | "bookImbalance"
   >,
+  options: { readonly tradeFlowOptional?: boolean } = {},
 ): string[] {
   const missing: string[] = [];
   if (!finite(evidence.volatilityLogReturnPerSqrtSecond)) missing.push("volatility");
   if (!finite(evidence.momentumLogReturn)
       || !finite(evidence.momentumWindowSeconds)
       || evidence.momentumWindowSeconds <= 0) missing.push("momentum");
-  if (!finite(evidence.tradeFlowImbalance)) missing.push("trade_flow");
+  if (!options.tradeFlowOptional && !finite(evidence.tradeFlowImbalance)) missing.push("trade_flow");
   if (!finite(evidence.bookImbalance)) missing.push("book_imbalance");
   return missing;
 }
@@ -554,6 +746,8 @@ export function evaluateSmartExit(
   nowSeconds: number,
 ): SmartExitDecision {
   const sensitivity = resolveSmartExitSensitivity(config.sensitivity);
+  const remaining = Math.max(0, position.expirySeconds - nowSeconds);
+  const timeBandParameters = resolveSmartExitTimeBand(remaining);
   if (!config.enabled || config.mode === "off") {
     return {
       disposition: "OFF", reason: "smart exit is disabled", mayExecuteExit: false,
@@ -562,23 +756,39 @@ export function evaluateSmartExit(
     };
   }
   const problem = evidenceProblem(position, evidence, config, nowSeconds);
-  if (problem) return unavailable(problem, state);
+  if (problem) return unavailable(problem, state, [], timeBandParameters.band);
+  const tapeDirectionFresh =
+    isFresh(evidence.tapeReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)
+    && isFresh(evidence.tapeObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
+  const bookDirectionFresh =
+    isFresh(evidence.bookReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)
+    && isFresh(evidence.bookObservedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds);
+  const directionalEvidence: SmartExitEvidence = {
+    ...evidence,
+    tradeFlowImbalance: tapeDirectionFresh ? evidence.tradeFlowImbalance : null,
+    bookImbalance: bookDirectionFresh ? evidence.bookImbalance : null,
+  };
   const targetAlreadyCrossed = position.side === "yes"
     ? evidence.underlyingPrice! <= position.strikePrice
     : evidence.underlyingPrice! >= position.strikePrice;
   const missingAtCrossing = targetAlreadyCrossed
-    ? missingSmartExitCrossingEvidence(evidence)
+    ? missingSmartExitCrossingEvidence(directionalEvidence, {
+        tradeFlowOptional: timeBandParameters.band === "critical",
+      })
     : [];
   if (missingAtCrossing.length > 0) {
     return unavailable(
       `target crossed while mandatory crossing evidence is unavailable: ${missingAtCrossing.join(", ")}`,
       state,
       missingAtCrossing,
+      timeBandParameters.band,
     );
   }
   const probability = modelWinProbability(position, evidence, config, nowSeconds);
-  const continuation = adverseContinuationScore(position.side, evidence, config);
-  if (probability === null) return unavailable("model inputs are unavailable", state);
+  const continuation = adverseContinuationScore(position.side, directionalEvidence, config);
+  if (probability === null) {
+    return unavailable("model inputs are unavailable", state, [], timeBandParameters.band);
+  }
 
   const modelEntryProbability = position.modelAtEntry.winProbability;
   const hasModelEntryBaseline = modelEntryProbability != null
@@ -587,19 +797,20 @@ export function evaluateSmartExit(
     && modelEntryProbability <= 1;
   const drop = hasModelEntryBaseline ? probability - modelEntryProbability : null;
   const threshold = probabilityDropThreshold(position.expirySeconds - nowSeconds, config);
-  const elapsed = state.previousUnderlyingAtSeconds == null
-    ? null
-    : evidence.spotObservedAtSeconds == null
-      ? null
-      : evidence.spotObservedAtSeconds - state.previousUnderlyingAtSeconds;
-  const velocity = elapsed != null && elapsed > 0 && state.previousUnderlyingPrice != null
-    ? (evidence.underlyingPrice! - state.previousUnderlyingPrice) / elapsed
-    : null;
-  const adverseVelocity = velocity == null ? null : position.side === "yes" ? -velocity : velocity;
-  const adverseAcceleration = adverseVelocity == null || state.previousAdverseVelocity == null || elapsed == null || elapsed <= 0
-    ? null
-    : (adverseVelocity - state.previousAdverseVelocity) / elapsed;
-  const remaining = Math.max(0, position.expirySeconds - nowSeconds);
+  const trajectory = assessSmartExitTrajectory({
+    side: position.side,
+    strikePrice: position.strikePrice,
+    price: evidence.underlyingPrice!,
+    observedAtSeconds: evidence.spotObservedAtSeconds,
+    nowSeconds,
+    remainingSeconds: remaining,
+    previousState: state,
+    maximumEventAgeSeconds: config.maxEvidenceAgeSeconds,
+  });
+  const elapsed = trajectory.sampleElapsedSeconds;
+  const velocity = trajectory.velocityPerSecond;
+  const adverseVelocity = trajectory.adverseVelocityPerSecond;
+  const adverseAcceleration = trajectory.adverseAccelerationPerSecond2;
   const crossingRisk = assessSmartExitCrossingRisk({
     side: position.side,
     underlyingPrice: evidence.underlyingPrice!,
@@ -616,6 +827,7 @@ export function evaluateSmartExit(
     sampleElapsedSeconds: elapsed,
     debounceCount: sensitivity.parameters.debounceCount,
     crossingReserveFraction: resolveSmartExitSensitivity(config.sensitivity).parameters.crossingReserveFraction,
+    adverseLatchActive: trajectory.adverseLatchActive,
   });
   const {
     targetAlreadyCrossed: alreadyAcrossTarget,
@@ -630,7 +842,6 @@ export function evaluateSmartExit(
   const marketLossFraction = finite(evidence.marketWinProbability) && entryMarket > 0
     ? clamp((entryMarket - evidence.marketWinProbability) / entryMarket, 0, 1)
     : null;
-  const timeBandParameters = resolveSmartExitTimeBand(remaining);
   const marketDirection = assessSmartExitMarketDirection({
     currentProbability: evidence.marketWinProbability,
     currentObservedAtSeconds: evidence.marketQuoteObservedAtSeconds,
@@ -676,12 +887,12 @@ export function evaluateSmartExit(
     ? clamp((position.entryStake - estimatedSaleValue) / position.entryStake, 0, 1)
     : null;
   const degradedComponents: string[] = [];
-  if (!isFresh(evidence.tapeReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)) degradedComponents.push("coinbase_tape");
-  if (!isFresh(evidence.bookReceivedAtSeconds, nowSeconds, config.maxEvidenceAgeSeconds)) degradedComponents.push("coinbase_book");
+  if (!tapeDirectionFresh) degradedComponents.push("coinbase_tape");
+  if (!bookDirectionFresh) degradedComponents.push("coinbase_book");
   if (!quoteFresh) degradedComponents.push("kalshi_quote");
   if (!marketBookFresh) degradedComponents.push("kalshi_book");
-  if (!finite(evidence.tradeFlowImbalance)) degradedComponents.push("trade_flow");
-  if (!finite(evidence.bookImbalance)) degradedComponents.push("book_imbalance");
+  if (!finite(directionalEvidence.tradeFlowImbalance)) degradedComponents.push("trade_flow");
+  if (!finite(directionalEvidence.bookImbalance)) degradedComponents.push("book_imbalance");
   if (!hasModelEntryBaseline) degradedComponents.push("model_entry_baseline");
   const common = {
     modelWinProbability: probability,
@@ -696,6 +907,15 @@ export function evaluateSmartExit(
     underlyingVelocityPerSecond: velocity,
     adverseVelocityPerSecond: adverseVelocity,
     adverseAccelerationPerSecond2: adverseAcceleration,
+    trajectorySampleCount: trajectory.samples.length,
+    trajectoryWindowSeconds: trajectory.samples.length > 1
+      ? trajectory.samples.at(-1)!.observedAtSeconds - trajectory.samples[0]!.observedAtSeconds
+      : 0,
+    adverseExcursionFraction: trajectory.adverseExcursionFraction,
+    adverseLatchActive: trajectory.adverseLatchActive,
+    adverseLatchExpiresAtSeconds: trajectory.adverseLatchActive
+      ? trajectory.adverseLatchUntilSeconds : null,
+    recoveryProgress: trajectory.recoveryProgress,
     projectedCrossingSeconds,
     projectedCrossBeforeExpiry,
     crossingRiskConfirmed: false,
@@ -734,6 +954,14 @@ export function evaluateSmartExit(
     previousUnderlyingPrice: evidence.underlyingPrice,
     previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
     previousAdverseVelocity: adverseVelocity,
+    trajectorySamples: trajectory.samples,
+    adverseLatchUntilSeconds: trajectory.adverseLatchUntilSeconds,
+    adverseExcursionFraction: trajectory.adverseExcursionFraction,
+    adverseRecoverySampleCount: trajectory.recoveryProgress,
+    latchedAdverseVelocityPerSecond: trajectory.adverseLatchActive
+      ? adverseVelocity : null,
+    latchedAdverseAccelerationPerSecond2: trajectory.adverseLatchActive
+      ? adverseAcceleration : null,
   };
   const timeScaledRisk = assessSmartExitTimeScaledRisk({
     side: position.side,
@@ -747,6 +975,9 @@ export function evaluateSmartExit(
     targetAlreadyCrossed: alreadyAcrossTarget,
     projectedCrossingConfirmed: crossingRiskConfirmed,
     marketDirectionConfirmed: marketDirection.confirmed,
+    trajectoryConfirmed: trajectory.adverseLatchActive
+      && trajectory.adverseExcursionFraction + 1e-12
+        >= timeBandParameters.minimumAdverseExcursionFraction,
   });
   const shared = {
     ...common,

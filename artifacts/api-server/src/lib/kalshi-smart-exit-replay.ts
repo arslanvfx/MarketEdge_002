@@ -5,9 +5,11 @@
  */
 import type { SmartExitEvaluationRecord, SmartExitSensitivity } from "./kalshi-smart-exit-types.ts";
 import {
+  INITIAL_SMART_EXIT_STATE,
   assessSmartExitMarketDirection,
   assessSmartExitCrossingRisk,
   assessSmartExitDeepLossHold,
+  assessSmartExitTrajectory,
   assessSmartExitTimeScaledRisk,
   missingSmartExitCrossingEvidence,
   SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
@@ -360,18 +362,38 @@ export function buildCrossingRiskReplayLifecycles(
     let previousSampleAt: number | null = null;
     let previousMarketProbability: number | null = null;
     let previousMarketObservedAt: number | null = null;
+    let trajectoryState = { ...INITIAL_SMART_EXIT_STATE };
     let candidateExit: SmartExitCandidateExit | null = null;
     for (const sample of samples) {
       const sampleAt = evaluationTimeSeconds(sample);
-      const sampleElapsedSeconds = previousSampleAt === null
-        ? null
-        : sampleAt - previousSampleAt;
+      const timeBand = resolveSmartExitTimeBand(sample.secondsRemaining);
+      const spotObservedAt = sample.spotEventAgeMs != null
+        ? sampleAt - sample.spotEventAgeMs / 1_000
+        : sample.spotAgeMs != null
+          ? sampleAt - sample.spotAgeMs / 1_000
+          : sampleAt;
+      const trajectory = sample.underlyingPrice != null
+        ? assessSmartExitTrajectory({
+            side: sample.side,
+            strikePrice: sample.strikePrice,
+            price: sample.underlyingPrice,
+            observedAtSeconds: spotObservedAt,
+            nowSeconds: sampleAt,
+            remainingSeconds: sample.secondsRemaining,
+            previousState: trajectoryState,
+            maximumEventAgeSeconds: settings.maxEvidenceAgeSeconds,
+          })
+        : null;
+      const sampleElapsedSeconds = trajectory?.sampleElapsedSeconds
+        ?? (previousSampleAt === null ? null : sampleAt - previousSampleAt);
       const crossingEvidenceReady = missingSmartExitCrossingEvidence({
         volatilityLogReturnPerSqrtSecond: sample.volatilityLogReturnPerSqrtSecond,
         momentumLogReturn: sample.momentumLogReturn,
         momentumWindowSeconds: sample.momentumWindowSeconds,
         tradeFlowImbalance: sample.tradeFlowImbalance,
         bookImbalance: sample.bookImbalance,
+      }, {
+        tradeFlowOptional: timeBand.band === "critical",
       }).length === 0;
       const actualTargetCrossed = sample.underlyingPrice !== null
         && (sample.side === "yes"
@@ -392,8 +414,10 @@ export function buildCrossingRiskReplayLifecycles(
             minVolatilityLogReturnPerSqrtSecond:
               settings.minVolatilityLogReturnPerSqrtSecond,
             fatTailVolatilityMultiplier: settings.fatTailVolatilityMultiplier,
-            adverseVelocityPerSecond: sample.adverseVelocityPerSecond,
-            adverseAccelerationPerSecond2: sample.adverseAccelerationPerSecond2,
+            adverseVelocityPerSecond:
+              trajectory?.adverseVelocityPerSecond ?? sample.adverseVelocityPerSecond,
+            adverseAccelerationPerSecond2:
+              trajectory?.adverseAccelerationPerSecond2 ?? sample.adverseAccelerationPerSecond2,
             continuationScore: sample.continuationScore,
             confirmationLevel: settings.confirmationLevel,
             previousDirectionalCount: directionalCount,
@@ -403,11 +427,11 @@ export function buildCrossingRiskReplayLifecycles(
             minCrossingReserveSeconds: settings.minCrossingReserveSeconds,
             maxCrossingReserveSeconds: settings.maxCrossingReserveSeconds,
             maxSampleGapSeconds: settings.maxSampleGapSeconds,
+            adverseLatchActive: trajectory?.adverseLatchActive ?? sample.adverseLatchActive,
           })
         : null;
       directionalCount = crossing?.directionalCount ?? 0;
       previousSampleAt = sampleAt;
-      const timeBand = resolveSmartExitTimeBand(sample.secondsRemaining);
       const maximumEvidenceAgeSeconds = Number.isFinite(sample.maximumExecutionEvidenceAgeSeconds)
         && sample.maximumExecutionEvidenceAgeSeconds > 0
         ? sample.maximumExecutionEvidenceAgeSeconds
@@ -449,8 +473,32 @@ export function buildCrossingRiskReplayLifecycles(
             targetAlreadyCrossed: crossing.targetAlreadyCrossed,
             projectedCrossingConfirmed: crossing.crossingRiskConfirmed,
             marketDirectionConfirmed: marketDirection.confirmed,
+            trajectoryConfirmed: (trajectory?.adverseLatchActive ?? sample.adverseLatchActive)
+              && (trajectory?.adverseExcursionFraction
+                ?? sample.adverseExcursionFraction ?? 0) + 1e-12
+                >= timeBand.minimumAdverseExcursionFraction,
           })
         : null;
+      if (trajectory) {
+        trajectoryState = {
+          ...trajectoryState,
+          adverseSampleCount: directionalCount,
+          marketAdverseSampleCount: marketDirection.sampleCount,
+          previousMarketWinProbability: previousMarketProbability,
+          previousMarketObservedAtSeconds: previousMarketObservedAt,
+          previousUnderlyingPrice: sample.underlyingPrice,
+          previousUnderlyingAtSeconds: spotObservedAt,
+          previousAdverseVelocity: trajectory.adverseVelocityPerSecond,
+          trajectorySamples: trajectory.samples,
+          adverseLatchUntilSeconds: trajectory.adverseLatchUntilSeconds,
+          adverseExcursionFraction: trajectory.adverseExcursionFraction,
+          adverseRecoverySampleCount: trajectory.recoveryProgress,
+          latchedAdverseVelocityPerSecond: trajectory.adverseLatchActive
+            ? trajectory.adverseVelocityPerSecond : null,
+          latchedAdverseAccelerationPerSecond2: trajectory.adverseLatchActive
+            ? trajectory.adverseAccelerationPerSecond2 : null,
+        };
+      }
       const fullyExecutable = sample.executionEvidenceReady
         && sample.estimatedSaleValue !== null
         && sample.remainingQuantity > 0

@@ -91,18 +91,27 @@ interface SmartExitLifecycleAccounting {
   readonly netValue: number;
 }
 
-const SCHEDULER_MS = 1_000;
+const HOT_SCHEDULER_MS = 500;
+const SLOW_SCHEDULER_MS = 1_000;
+const EVALUATION_PERSISTENCE_MS = 1_000;
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
 const collector = new KalshiSmartExitEvidenceCollector();
+const hotCollector = new KalshiSmartExitEvidenceCollector();
 type BookSnapshot = OrderbookPrices & { receivedAtSeconds: number };
 
 let config: SmartExitConfig = { ...DEFAULT_SMART_EXIT_CONFIG };
 let interval: ReturnType<typeof setInterval> | null = null;
+let hotInterval: ReturnType<typeof setInterval> | null = null;
 let cycleInFlight = false;
+let hotCycleInFlight = false;
 let lastCycleAt: string | null = null;
+let lastHotCycleAt: string | null = null;
 let lastError: string | null = null;
 let lastCycleDurationMs: number | null = null;
+let lastHotCycleDurationMs: number | null = null;
 let schedulerOverruns = 0;
+let hotSchedulerOverruns = 0;
+let maximumUsableSampleGapMs: number | null = null;
 let prewarmCursor = 0;
 let lifecycleReconcileInterval: ReturnType<typeof setInterval> | null = null;
 const states = new Map<string, SmartExitState>();
@@ -110,8 +119,29 @@ const modelEntryBaselines = new Map<string, number | null>();
 const latestEvaluations = new Map<string, SmartExitEvaluationRecord>();
 const latestValidEvaluations = new Map<string, SmartExitEvaluationRecord>();
 const lastEvidencePersistenceMs = new Map<string, number>();
+const lastEvaluationPersistenceMs = new Map<string, number>();
 const bookSnapshots = new Map<string, BookSnapshot>();
 const bookRefreshes = new Map<string, Promise<void>>();
+const hotSpotCollections = new Map<string, Promise<SmartExitEvidence>>();
+const evaluationPending = new Map<string, {
+  position: SmartExitPosition;
+  evidence: SmartExitEvidence;
+}>();
+const evaluationRunning = new Set<string>();
+const lastScheduledSpotEventSeconds = new Map<string, number>();
+const lastUsableSpotReceiptMs = new Map<string, number>();
+type PersistenceItem = {
+  position: SmartExitPosition;
+  evidence: SmartExitEvidence;
+  state: SmartExitState;
+  record: SmartExitEvaluationRecord;
+  notBeforeMs: number;
+  completionResolvers: Array<() => void>;
+};
+const persistenceQueue = new Map<string, PersistenceItem>();
+let persistenceWorkerRunning = false;
+let persistenceWakeTimer: ReturnType<typeof setTimeout> | null = null;
+let persistenceWakeAtMs: number | null = null;
 const PREWARMABLE_COINS = CRYPTO_COINS.filter((coin) => coin.category !== "commodity");
 
 function identityKey(owner: SmartExitOwnerKind, positionId: string): string {
@@ -145,8 +175,10 @@ function exactMarket(
   return current;
 }
 
-function requestBookRefresh(ticker: string): void {
-  if (!ticker || bookRefreshes.has(ticker)) return;
+async function refreshBook(ticker: string): Promise<void> {
+  if (!ticker) return;
+  const existing = bookRefreshes.get(ticker);
+  if (existing) return existing;
   const refresh = fetchOrderbookPrices(ticker)
     .then((book) => {
       if (book) bookSnapshots.set(ticker, { ...book, receivedAtSeconds: Date.now() / 1_000 });
@@ -154,6 +186,73 @@ function requestBookRefresh(ticker: string): void {
     .catch((error) => logger.warn({ error, ticker }, "[kalshi-smart-exit] Kalshi book refresh failed"))
     .finally(() => bookRefreshes.delete(ticker));
   bookRefreshes.set(ticker, refresh);
+  return refresh;
+}
+
+function requestBookRefresh(ticker: string): void {
+  void refreshBook(ticker);
+}
+
+function mergeHotSpotWithSlowEvidence(
+  symbol: string,
+  hot: SmartExitEvidence,
+): SmartExitEvidence {
+  const slow = collector.latest(symbol);
+  if (!slow) return hot;
+  const nowSeconds = hot.observedAtSeconds;
+  const slowSpotFresh = slow.spotReceivedAtSeconds != null
+    && slow.spotObservedAtSeconds != null
+    && nowSeconds - slow.spotReceivedAtSeconds >= 0
+    && nowSeconds - slow.spotReceivedAtSeconds <= config.maxEvidenceAgeSeconds
+    && nowSeconds - slow.spotObservedAtSeconds >= 0
+    && nowSeconds - slow.spotObservedAtSeconds <= config.maxEvidenceAgeSeconds;
+  const slowTapeFresh = slow.tapeReceivedAtSeconds != null
+    && slow.tapeObservedAtSeconds != null
+    && nowSeconds - slow.tapeReceivedAtSeconds >= 0
+    && nowSeconds - slow.tapeReceivedAtSeconds <= config.maxEvidenceAgeSeconds
+    && nowSeconds - slow.tapeObservedAtSeconds >= 0
+    && nowSeconds - slow.tapeObservedAtSeconds <= config.maxEvidenceAgeSeconds;
+  const slowBookFresh = slow.bookReceivedAtSeconds != null
+    && slow.bookObservedAtSeconds != null
+    && nowSeconds - slow.bookReceivedAtSeconds >= 0
+    && nowSeconds - slow.bookReceivedAtSeconds <= config.maxEvidenceAgeSeconds
+    && nowSeconds - slow.bookObservedAtSeconds >= 0
+    && nowSeconds - slow.bookObservedAtSeconds <= config.maxEvidenceAgeSeconds;
+  const useHotMomentum = hot.momentumLogReturn != null && hot.momentumWindowSeconds != null;
+  return {
+    ...slow,
+    underlyingPrice: hot.underlyingPrice,
+    spotReceivedAtSeconds: hot.spotReceivedAtSeconds,
+    spotObservedAtSeconds: hot.spotObservedAtSeconds,
+    observedAtSeconds: hot.observedAtSeconds,
+    volatilityLogReturnPerSqrtSecond:
+      hot.volatilityLogReturnPerSqrtSecond
+        ?? (slowSpotFresh ? slow.volatilityLogReturnPerSqrtSecond : null),
+    momentumLogReturn: useHotMomentum
+      ? hot.momentumLogReturn
+      : slowSpotFresh ? slow.momentumLogReturn : null,
+    momentumWindowSeconds: useHotMomentum
+      ? hot.momentumWindowSeconds
+      : slowSpotFresh ? slow.momentumWindowSeconds : null,
+    tapeReceivedAtSeconds: slowTapeFresh ? slow.tapeReceivedAtSeconds : null,
+    tapeObservedAtSeconds: slowTapeFresh ? slow.tapeObservedAtSeconds : null,
+    tradeFlowImbalance: slowTapeFresh ? slow.tradeFlowImbalance : null,
+    bookReceivedAtSeconds: slowBookFresh ? slow.bookReceivedAtSeconds : null,
+    bookObservedAtSeconds: slowBookFresh ? slow.bookObservedAtSeconds : null,
+    bookImbalance: slowBookFresh ? slow.bookImbalance : null,
+  };
+}
+
+function collectHotSpot(
+  symbol: string,
+  product: string,
+): Promise<SmartExitEvidence> {
+  const existing = hotSpotCollections.get(symbol);
+  if (existing) return existing;
+  const request = hotCollector.collectSpot(symbol, product, null)
+    .finally(() => hotSpotCollections.delete(symbol));
+  hotSpotCollections.set(symbol, request);
+  return request;
 }
 
 function executableFromDepth(
@@ -299,6 +398,14 @@ export function captureSmartExitRegularEntry(position: OpenPosition): void {
       modelAtEntryProbability: baseline,
       state: INITIAL_SMART_EXIT_STATE,
     });
+    const monitoredEvidence = withMarketEvidence(evidence, {
+      side: position.direction,
+      remainingQuantity: position.contractCount,
+      ticker: position.ticker,
+      symbol,
+      windowKey: position.windowKey,
+    });
+    scheduleEvaluation(regularSnapshot(position, monitoredEvidence), monitoredEvidence);
   })().catch((error) =>
     logger.warn({ error, symbol: position.symbol }, "[kalshi-smart-exit] entry capture failed (non-fatal)"),
   );
@@ -447,6 +554,85 @@ async function executeAuthorizedExit(
     });
     return { ...evaluation, executionStatus: "blocked" };
   }
+  const definition = PRODUCT_BY_SYMBOL.get(position.symbol.toUpperCase());
+  let finalRiskToken: {
+    spotObservedAtSeconds: number;
+    underlyingPrice: number;
+    validatedAtMs: number;
+  } | null = null;
+  const revalidateRisk = async (): Promise<boolean> => {
+    if (!definition || definition.category === "commodity") return false;
+    const hot = await collectHotSpot(position.symbol.toUpperCase(), definition.product);
+    await refreshBook(position.ticker);
+    const finalEvidence = withMarketEvidence(
+      mergeHotSpotWithSlowEvidence(position.symbol.toUpperCase(), hot),
+      position,
+    );
+    if (
+      finalEvidence.underlyingPrice == null
+      || finalEvidence.spotObservedAtSeconds == null
+      || finalEvidence.spotReceivedAtSeconds == null
+    ) return false;
+    const nowSeconds = Date.now() / 1_000;
+    const finalDecision = evaluateSmartExit(
+      position,
+      finalEvidence,
+      {
+        ...INITIAL_SMART_EXIT_STATE,
+        ...(states.get(identityKey(position.owner.kind, position.positionId)) ?? {}),
+      },
+      effectiveConfigForPosition(position),
+      nowSeconds,
+    );
+    const valid = finalDecision.disposition === "EXIT_SIGNAL"
+      && finalDecision.executionEvidenceReady
+      && (config.mode === "paper-exit" || finalDecision.mayExecuteExit);
+    if (!valid) return false;
+    finalRiskToken = {
+      spotObservedAtSeconds: finalEvidence.spotObservedAtSeconds,
+      underlyingPrice: finalEvidence.underlyingPrice,
+      validatedAtMs: Date.now(),
+    };
+    return true;
+  };
+  const isRiskStillValid = (): boolean => {
+    if (!finalRiskToken || Date.now() - finalRiskToken.validatedAtMs > HOT_SCHEDULER_MS * 2) return false;
+    const latest = hotCollector.latest(position.symbol.toUpperCase());
+    if (
+      !latest
+      || latest.underlyingPrice == null
+      || latest.spotObservedAtSeconds == null
+      || latest.spotReceivedAtSeconds == null
+      || Date.now() / 1_000 - latest.spotReceivedAtSeconds
+        > Math.min(1, evaluation.maximumExecutionEvidenceAgeSeconds ?? 1)
+    ) return false;
+    const currentEvidence = withMarketEvidence(
+      mergeHotSpotWithSlowEvidence(position.symbol.toUpperCase(), latest),
+      position,
+    );
+    const currentDecision = evaluateSmartExit(
+      position,
+      currentEvidence,
+      {
+        ...INITIAL_SMART_EXIT_STATE,
+        ...(states.get(identityKey(position.owner.kind, position.positionId)) ?? {}),
+      },
+      effectiveConfigForPosition(position),
+      Date.now() / 1_000,
+    );
+    return currentDecision.disposition === "EXIT_SIGNAL"
+      && currentDecision.executionEvidenceReady
+      && (config.mode === "paper-exit" || currentDecision.mayExecuteExit);
+  };
+  if (!await revalidateRisk()) {
+    const lifecycle = await getSmartExitLifecycle(position.owner.kind, position.positionId);
+    if (lifecycle) await upsertSmartExitLifecycle({
+      ...lifecycle,
+      executionStatus: "blocked",
+      reason: "fresh spot trajectory or target risk no longer authorizes exit",
+    });
+    return { ...evaluation, executionStatus: "blocked" };
+  }
   const requestId = randomUUID();
   const claim = await claimSmartExitRequest({
     id: requestId,
@@ -506,6 +692,8 @@ async function executeAuthorizedExit(
       evidenceExpiresAtSeconds: evaluation.executionEvidenceExpiresAtSeconds,
     },
     isVersionStillAuthorized: positionVersionAuthorized,
+    revalidateRisk,
+    isRiskStillValid,
   });
   if (result.outcome === "filled") {
     await resolveSmartExitRequest({ id: requestId, status: "filled", reason: result.reason });
@@ -674,8 +862,151 @@ function recoveryStudy(
   };
 }
 
-async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvidence): Promise<void> {
+async function persistEvaluationItem(item: PersistenceItem): Promise<void> {
+  const { position, evidence, state, record } = item;
+  await upsertSmartExitPositionState({
+    owner: position.owner.kind,
+    positionId: position.positionId,
+    symbol: position.symbol,
+    modelAtEntryProbability: position.modelAtEntry.winProbability,
+    state,
+  });
+  const evidencePersistenceKey = `${position.owner.kind}:${position.symbol}`;
   const nowMs = Date.now();
+  if (nowMs - (lastEvidencePersistenceMs.get(evidencePersistenceKey) ?? 0) >= 5_000) {
+    await insertSmartExitEvidence({
+      owner: position.owner.kind,
+      symbol: position.symbol,
+      evidence,
+    });
+    lastEvidencePersistenceMs.set(evidencePersistenceKey, nowMs);
+  }
+  await insertSmartExitEvaluation(record);
+  if (record.recoveryStudy) {
+    await insertSmartExitRecoveryStudy({
+      id: record.id,
+      owner: record.owner,
+      positionId: record.positionId,
+      symbol: record.symbol,
+      payload: record.recoveryStudy,
+      observedAt: record.timestamp,
+    });
+  }
+  lastEvaluationPersistenceMs.set(
+    identityKey(position.owner.kind, position.positionId),
+    Date.parse(record.timestamp),
+  );
+}
+
+function wakePersistenceWorker(delayMs = 0): void {
+  if (persistenceWorkerRunning) return;
+  const wakeAtMs = Date.now() + Math.max(0, delayMs);
+  if (persistenceWakeTimer && persistenceWakeAtMs != null && persistenceWakeAtMs <= wakeAtMs) return;
+  if (persistenceWakeTimer) clearTimeout(persistenceWakeTimer);
+  persistenceWakeAtMs = wakeAtMs;
+  persistenceWakeTimer = setTimeout(() => {
+    persistenceWakeTimer = null;
+    persistenceWakeAtMs = null;
+    void drainPersistenceQueue();
+  }, Math.max(0, delayMs));
+  persistenceWakeTimer.unref?.();
+}
+
+async function drainPersistenceQueue(): Promise<void> {
+  if (persistenceWorkerRunning) return;
+  persistenceWorkerRunning = true;
+  let nextDelayMs: number | null = null;
+  try {
+    while (persistenceQueue.size > 0) {
+      const nowMs = Date.now();
+      const ready = [...persistenceQueue.entries()]
+        .filter(([, item]) => item.notBeforeMs <= nowMs)
+        .sort((a, b) => a[1].notBeforeMs - b[1].notBeforeMs)[0];
+      if (!ready) {
+        const nextAt = Math.min(...[...persistenceQueue.values()].map((item) => item.notBeforeMs));
+        nextDelayMs = Math.max(0, nextAt - nowMs);
+        break;
+      }
+      const [key, item] = ready;
+      persistenceQueue.delete(key);
+      try {
+        await persistEvaluationItem(item);
+      } catch (error) {
+        logger.warn({ error, key }, "[kalshi-smart-exit] persistence write failed (non-fatal)");
+      } finally {
+        for (const resolve of item.completionResolvers) resolve();
+      }
+    }
+  } finally {
+    persistenceWorkerRunning = false;
+    if (persistenceQueue.size > 0) wakePersistenceWorker(nextDelayMs ?? 0);
+  }
+}
+
+function enqueueEvaluationPersistence(
+  position: SmartExitPosition,
+  evidence: SmartExitEvidence,
+  state: SmartExitState,
+  record: SmartExitEvaluationRecord,
+): Promise<void> | null {
+  const key = identityKey(position.owner.kind, position.positionId);
+  const force = record.recommendation === "exit";
+  const lastPersisted = lastEvaluationPersistenceMs.get(key) ?? 0;
+  const notBeforeMs = force
+    ? Date.now()
+    : Math.max(Date.now(), lastPersisted + EVALUATION_PERSISTENCE_MS);
+  let completion: Promise<void> | null = null;
+  const completionResolvers = persistenceQueue.get(key)?.completionResolvers ?? [];
+  if (force) {
+    completion = new Promise<void>((resolve) => completionResolvers.push(resolve));
+  }
+  persistenceQueue.set(key, {
+    position,
+    evidence,
+    state,
+    record,
+    notBeforeMs,
+    completionResolvers,
+  });
+  wakePersistenceWorker(Math.max(0, notBeforeMs - Date.now()));
+  return completion;
+}
+
+function scheduleEvaluation(position: SmartExitPosition, evidence: SmartExitEvidence): void {
+  const key = identityKey(position.owner.kind, position.positionId);
+  const eventAt = evidence.spotObservedAtSeconds;
+  if (eventAt != null && Number.isFinite(eventAt)) {
+    const lastScheduled = lastScheduledSpotEventSeconds.get(key);
+    if (lastScheduled != null && eventAt < lastScheduled) return;
+    const pendingEventAt = evaluationPending.get(key)?.evidence.spotObservedAtSeconds;
+    if (pendingEventAt != null && eventAt < pendingEventAt) return;
+    lastScheduledSpotEventSeconds.set(key, eventAt);
+  }
+  evaluationPending.set(key, { position, evidence });
+  if (evaluationRunning.has(key)) return;
+  evaluationRunning.add(key);
+  void (async () => {
+    try {
+      while (evaluationPending.has(key)) {
+        const pending = evaluationPending.get(key)!;
+        evaluationPending.delete(key);
+        await evaluateOne(pending.position, pending.evidence);
+      }
+    } catch (error) {
+      logger.warn({ error, key }, "[kalshi-smart-exit] keyed evaluation failed (non-fatal)");
+    } finally {
+      evaluationRunning.delete(key);
+      if (evaluationPending.has(key)) scheduleEvaluation(
+        evaluationPending.get(key)!.position,
+        evaluationPending.get(key)!.evidence,
+      );
+    }
+  })();
+}
+
+async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvidence): Promise<void> {
+  const evaluationStartedAtMs = Date.now();
+  const nowMs = evaluationStartedAtMs;
   const nowSeconds = nowMs / 1_000;
   const key = identityKey(position.owner.kind, position.positionId);
   const effectiveConfig = effectiveConfigForPosition(position);
@@ -691,13 +1022,6 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     nowSeconds,
   );
   states.set(key, decision.nextState);
-  await upsertSmartExitPositionState({
-    owner: position.owner.kind,
-    positionId: position.positionId,
-    symbol: position.symbol,
-    modelAtEntryProbability: position.modelAtEntry.winProbability,
-    state: decision.nextState,
-  });
   const market = exactMarket(position.symbol, position.ticker, position.windowKey);
   const marketWinProbability = marketProbabilityForSide(position.side, market?.yesPrice);
   const health = componentHealth(evidence, nowMs);
@@ -754,6 +1078,15 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     underlyingVelocityPerSecond: decision.underlyingVelocityPerSecond,
     adverseVelocityPerSecond: decision.adverseVelocityPerSecond,
     adverseAccelerationPerSecond2: decision.adverseAccelerationPerSecond2,
+    trajectorySampleCount: decision.trajectorySampleCount,
+    trajectoryWindowSeconds: decision.trajectoryWindowSeconds,
+    adverseExcursionFraction: decision.adverseExcursionFraction,
+    adverseLatchActive: decision.adverseLatchActive,
+    adverseLatchExpiresAtSeconds: decision.adverseLatchExpiresAtSeconds,
+    recoveryProgress: decision.recoveryProgress,
+    spotEventAgeMs: evidence.spotObservedAtSeconds == null
+      ? null : nowMs - evidence.spotObservedAtSeconds * 1_000,
+    decisionLatencyMs: Date.now() - evaluationStartedAtMs,
     projectedCrossingSeconds: decision.projectedCrossingSeconds,
     projectedCrossBeforeExpiry: decision.projectedCrossBeforeExpiry,
     crossingRiskConfirmed: decision.crossingRiskConfirmed,
@@ -812,16 +1145,10 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
   }
   latestEvaluations.set(key, record);
   if (record.recommendation !== "unavailable") latestValidEvaluations.set(key, record);
-  await insertSmartExitEvaluation(record);
-  if (record.recoveryStudy) {
-    await insertSmartExitRecoveryStudy({
-      id: record.id,
-      owner: record.owner,
-      positionId: record.positionId,
-      symbol: record.symbol,
-      payload: record.recoveryStudy,
-      observedAt: record.timestamp,
-    });
+  if (record.recommendation === "exit") {
+    await enqueueEvaluationPersistence(position, evidence, decision.nextState, record);
+  } else {
+    enqueueEvaluationPersistence(position, evidence, decision.nextState, record);
   }
 }
 
@@ -861,6 +1188,9 @@ async function runCycle(): Promise<void> {
     for (const key of latestEvaluations.keys()) if (!activeKeys.has(key)) latestEvaluations.delete(key);
     for (const key of latestValidEvaluations.keys()) if (!activeKeys.has(key)) latestValidEvaluations.delete(key);
     for (const key of states.keys()) if (!activeKeys.has(key)) states.delete(key);
+    for (const key of lastScheduledSpotEventSeconds.keys()) {
+      if (!activeKeys.has(key)) lastScheduledSpotEventSeconds.delete(key);
+    }
 
     for (const entry of entries) {
       const raw = entry.value;
@@ -900,16 +1230,10 @@ async function runCycle(): Promise<void> {
         windowKey,
       };
       const evidence = withMarketEvidence(baseEvidence, partialPosition);
-      const evidencePersistenceKey = `${entry.owner}:${entry.symbol}`;
-      const nowMs = Date.now();
-      if (nowMs - (lastEvidencePersistenceMs.get(evidencePersistenceKey) ?? 0) >= 5_000) {
-        await insertSmartExitEvidence({ owner: entry.owner, symbol: entry.symbol, evidence });
-        lastEvidencePersistenceMs.set(evidencePersistenceKey, nowMs);
-      }
       const snapshot = entry.owner === "regular"
         ? regularSnapshot(raw as OpenPosition, evidence)
         : scalperSnapshot(raw as Record<string, unknown>, evidence);
-      await evaluateOne(snapshot, evidence);
+      scheduleEvaluation(snapshot, evidence);
     }));
     lastCycleAt = new Date().toISOString();
     lastError = null;
@@ -922,16 +1246,84 @@ async function runCycle(): Promise<void> {
   }
 }
 
+async function runHotCycle(): Promise<void> {
+  if (hotCycleInFlight) {
+    hotSchedulerOverruns += 1;
+    return;
+  }
+  const cycleStartedAt = Date.now();
+  hotCycleInFlight = true;
+  try {
+    if (!config.enabled || config.mode === "off") {
+      lastHotCycleAt = new Date().toISOString();
+      return;
+    }
+    const regular = [...openPositions.values()].filter((position) =>
+      smartExitModeIncludesPosition(config.mode, position.entryMode));
+    const evidenceBySymbol = new Map<string, Promise<SmartExitEvidence>>();
+    for (const position of regular) {
+      const symbol = position.symbol.toUpperCase();
+      const definition = PRODUCT_BY_SYMBOL.get(symbol);
+      if (!definition || definition.category === "commodity") continue;
+      requestBookRefresh(position.ticker);
+      if (!evidenceBySymbol.has(symbol)) {
+        evidenceBySymbol.set(
+          symbol,
+          collectHotSpot(symbol, definition.product),
+        );
+      }
+    }
+    await Promise.all(regular.map(async (position) => {
+      const symbol = position.symbol.toUpperCase();
+      const hotEvidence = await evidenceBySymbol.get(symbol);
+      if (!hotEvidence) return;
+      const baseEvidence = mergeHotSpotWithSlowEvidence(symbol, hotEvidence);
+      if (baseEvidence.spotReceivedAtSeconds != null) {
+        const receiptMs = baseEvidence.spotReceivedAtSeconds * 1_000;
+        const previousReceiptMs = lastUsableSpotReceiptMs.get(symbol);
+        if (previousReceiptMs != null && receiptMs >= previousReceiptMs) {
+          const gap = receiptMs - previousReceiptMs;
+          maximumUsableSampleGapMs = Math.max(maximumUsableSampleGapMs ?? 0, gap);
+        }
+        lastUsableSpotReceiptMs.set(symbol, receiptMs);
+      }
+      const evidence = withMarketEvidence(baseEvidence, {
+        side: position.direction,
+        remainingQuantity: position.contractCount,
+        ticker: position.ticker,
+        symbol,
+        windowKey: position.windowKey,
+      });
+      scheduleEvaluation(regularSnapshot(position, evidence), evidence);
+    }));
+    lastHotCycleAt = new Date().toISOString();
+  } catch (error) {
+    lastError = String((error as Error)?.message ?? error).slice(0, 240);
+    logger.warn({ error }, "[kalshi-smart-exit] hot risk cycle failed (non-fatal)");
+  } finally {
+    lastHotCycleDurationMs = Date.now() - cycleStartedAt;
+    hotCycleInFlight = false;
+  }
+}
+
 function stopScheduler(): void {
   if (interval) clearInterval(interval);
+  if (hotInterval) clearInterval(hotInterval);
   interval = null;
+  hotInterval = null;
 }
 
 function startScheduler(): void {
-  if (interval) return;
-  interval = setInterval(() => void runCycle(), SCHEDULER_MS);
-  interval.unref?.();
-  void runCycle();
+  if (!interval) {
+    interval = setInterval(() => void runCycle(), SLOW_SCHEDULER_MS);
+    interval.unref?.();
+    void runCycle();
+  }
+  if (!hotInterval) {
+    hotInterval = setInterval(() => void runHotCycle(), HOT_SCHEDULER_MS);
+    hotInterval.unref?.();
+    void runHotCycle();
+  }
 }
 
 export async function initSmartExit(): Promise<void> {
@@ -1089,8 +1481,8 @@ export function getSmartExitHealth(): SmartExitHealth {
       ? "ready"
       : readinessValues.some((item) => item.ready) ? "degraded" : "unavailable";
   return {
-    running: interval != null,
-    schedulerActive: interval != null,
+    running: interval != null && hotInterval != null,
+    schedulerActive: interval != null && hotInterval != null,
     mode: config.mode,
     dataReadiness,
     activeEvaluations: latestEvaluations.size,
@@ -1098,7 +1490,13 @@ export function getSmartExitHealth(): SmartExitHealth {
     lastError,
     lastCycleDurationMs,
     schedulerOverruns,
-    targetCadenceMs: SCHEDULER_MS,
+    targetCadenceMs: HOT_SCHEDULER_MS,
+    slowTargetCadenceMs: SLOW_SCHEDULER_MS,
+    lastHotCycleAt,
+    lastHotCycleDurationMs,
+    hotSchedulerOverruns,
+    maximumUsableSampleGapMs,
+    pendingPersistenceWrites: persistenceQueue.size,
     evidenceBySymbol,
   };
 }

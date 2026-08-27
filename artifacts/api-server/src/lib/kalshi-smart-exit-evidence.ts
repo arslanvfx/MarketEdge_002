@@ -169,7 +169,14 @@ export class KalshiSmartExitEvidenceCollector {
     const tickerIsMonotonic = ticker?.at != null
       && (previous?.spotObservedAtSeconds == null || ticker.at >= previous.spotObservedAtSeconds);
     if (ticker && tickerIsMonotonic) {
-      state.prices.push({ at: ticker.at!, price: ticker.price });
+      const latestPrice = state.prices.at(-1);
+      if (
+        latestPrice == null
+        || ticker.at! > latestPrice.at
+        || Math.abs(ticker.price - latestPrice.price) > Math.max(1e-12, ticker.price * 1e-12)
+      ) {
+        state.prices.push({ at: ticker.at!, price: ticker.price });
+      }
       this.prunePrices(state, observedAtSeconds);
     }
     const tapeObservedAtSeconds = this.addTrades(state, tradesRaw, observedAtSeconds);
@@ -198,6 +205,71 @@ export class KalshiSmartExitEvidenceCollector {
         ? this.momentumWindowSeconds : null,
       tradeFlowImbalance: tapeObservedAtSeconds != null ? this.tradeFlow(state.trades) : null,
       bookImbalance: this.bookImbalance(bookRaw),
+    };
+    state.latest = evidence;
+    return evidence;
+  }
+
+  /**
+   * Lightweight hot-lane sample. It fetches only the ticker and overlays the
+   * last slow tape/L2 snapshot; failed spot transport is explicit, never cached
+   * as if it were fresh.
+   */
+  async collectSpot(
+    symbol: string,
+    product: string,
+    marketWinProbability: number | null,
+  ): Promise<SmartExitEvidence> {
+    const observedAtSeconds = this.now() / 1_000;
+    const currentMarketProbability = marketProbability(marketWinProbability);
+    if (isPythProduct(product)) {
+      const evidence = emptyEvidence("unsupported", observedAtSeconds, currentMarketProbability);
+      this.state(symbol).latest = evidence;
+      return evidence;
+    }
+    const state = this.state(symbol);
+    const previous = state.latest;
+    const encoded = encodeURIComponent(product);
+    const tickerResult = await this.json(`${COINBASE_REST}/products/${encoded}/ticker`);
+    const ticker = this.ticker(tickerResult.body);
+    const tickerIsMonotonic = ticker?.at != null
+      && (previous?.spotObservedAtSeconds == null || ticker.at >= previous.spotObservedAtSeconds);
+    if (!ticker || !tickerIsMonotonic) {
+      const failed = {
+        ...(previous ?? emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability)),
+        observedAtSeconds,
+        spotReceivedAtSeconds: null,
+        spotObservedAtSeconds: null,
+        underlyingPrice: null,
+        marketWinProbability: currentMarketProbability,
+      };
+      state.latest = failed;
+      return failed;
+    }
+    const latestPrice = state.prices.at(-1);
+    if (
+      latestPrice == null
+      || ticker.at! > latestPrice.at
+      || Math.abs(ticker.price - latestPrice.price) > Math.max(1e-12, ticker.price * 1e-12)
+    ) {
+      state.prices.push({ at: ticker.at!, price: ticker.price });
+    }
+    this.prunePrices(state, observedAtSeconds);
+    const volatility = this.volatility(state.prices);
+    const momentum = this.momentum(state.prices, observedAtSeconds);
+    const evidence: SmartExitEvidence = {
+      ...(previous ?? emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability)),
+      source: "coinbase-rest",
+      observedAtSeconds,
+      spotReceivedAtSeconds: tickerResult.receivedAtSeconds,
+      spotObservedAtSeconds: ticker.at,
+      underlyingPrice: ticker.price,
+      volatilityLogReturnPerSqrtSecond:
+        volatility ?? previous?.volatilityLogReturnPerSqrtSecond ?? null,
+      momentumLogReturn: momentum ?? previous?.momentumLogReturn ?? null,
+      momentumWindowSeconds: momentum !== null
+        ? this.momentumWindowSeconds : previous?.momentumWindowSeconds ?? null,
+      marketWinProbability: currentMarketProbability,
     };
     state.latest = evidence;
     return evidence;

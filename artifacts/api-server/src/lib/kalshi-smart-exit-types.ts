@@ -182,6 +182,19 @@ export interface SmartExitState {
   readonly previousUnderlyingPrice: number | null;
   readonly previousUnderlyingAtSeconds: number | null;
   readonly previousAdverseVelocity: number | null;
+  /** Bounded distinct event-time prices used by both live policy and replay. */
+  readonly trajectorySamples: readonly SmartExitTrajectorySample[];
+  /** Duplicate transport samples may preserve, but never extend, this latch. */
+  readonly adverseLatchUntilSeconds: number;
+  readonly adverseExcursionFraction: number;
+  readonly adverseRecoverySampleCount: number;
+  readonly latchedAdverseVelocityPerSecond: number | null;
+  readonly latchedAdverseAccelerationPerSecond2: number | null;
+}
+
+export interface SmartExitTrajectorySample {
+  readonly observedAtSeconds: number;
+  readonly price: number;
 }
 
 export type SmartExitDisposition = "OFF" | "HOLD" | "WATCH" | "PREPARE_EXIT" | "EXIT_SIGNAL" | "UNAVAILABLE";
@@ -215,6 +228,12 @@ export interface SmartExitDecision {
   readonly underlyingVelocityPerSecond: number | null;
   readonly adverseVelocityPerSecond: number | null;
   readonly adverseAccelerationPerSecond2: number | null;
+  readonly trajectorySampleCount: number;
+  readonly trajectoryWindowSeconds: number;
+  readonly adverseExcursionFraction: number;
+  readonly adverseLatchActive: boolean;
+  readonly adverseLatchExpiresAtSeconds: number | null;
+  readonly recoveryProgress: number;
   readonly projectedCrossingSeconds: number | null;
   readonly projectedCrossBeforeExpiry: boolean | null;
   /** True only when the shared target-crossing gate is satisfied. */
@@ -287,6 +306,14 @@ export interface SmartExitEvaluationRecord {
   readonly underlyingVelocityPerSecond: number | null;
   readonly adverseVelocityPerSecond: number | null;
   readonly adverseAccelerationPerSecond2: number | null;
+  readonly trajectorySampleCount: number;
+  readonly trajectoryWindowSeconds: number;
+  readonly adverseExcursionFraction: number;
+  readonly adverseLatchActive: boolean;
+  readonly adverseLatchExpiresAtSeconds: number | null;
+  readonly recoveryProgress: number;
+  readonly spotEventAgeMs: number | null;
+  readonly decisionLatencyMs: number;
   readonly projectedCrossingSeconds: number | null;
   readonly projectedCrossBeforeExpiry: boolean | null;
   readonly crossingRiskConfirmed: boolean;
@@ -338,6 +365,12 @@ export interface SmartExitHealth {
   readonly lastCycleDurationMs: number | null;
   readonly schedulerOverruns: number;
   readonly targetCadenceMs: number;
+  readonly slowTargetCadenceMs: number;
+  readonly lastHotCycleAt: string | null;
+  readonly lastHotCycleDurationMs: number | null;
+  readonly hotSchedulerOverruns: number;
+  readonly maximumUsableSampleGapMs: number | null;
+  readonly pendingPersistenceWrites: number;
   readonly evidenceBySymbol: Readonly<Record<string, {
     readonly source: SmartExitEvidence["source"];
     readonly ready: boolean;

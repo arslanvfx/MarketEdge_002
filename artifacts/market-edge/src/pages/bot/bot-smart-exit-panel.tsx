@@ -516,6 +516,13 @@ export function BotSmartExitPanel({ authPost }: Props) {
                </span>
                <span className="text-slate-700 px-0.5">|</span>
                <span>EVALS: <span className="text-slate-300">{regularEvaluations.length}</span></span>
+               <span className="text-slate-700 px-0.5">|</span>
+               <span>
+                 HOT: <span className="text-slate-300">{status?.health?.targetCadenceMs ?? 500}ms</span>
+                 {status?.health?.lastHotCycleDurationMs != null
+                   ? <span className="text-slate-500"> / {status.health.lastHotCycleDurationMs}ms</span>
+                   : null}
+               </span>
             </div>
           </div>
         </div>
@@ -672,6 +679,15 @@ export function BotSmartExitPanel({ authPost }: Props) {
                            </div>
                          )}
                         <div className="flex justify-between items-center w-full">
+                            <span className="text-slate-500">Band</span>
+                            <span className={`uppercase ${
+                              ev.timeBand === "critical" ? "text-red-400"
+                                : ev.timeBand === "urgent" ? "text-amber-300"
+                                  : ev.timeBand === "escalation" ? "text-blue-300"
+                                    : "text-slate-300"
+                            }`}>{ev.timeBand ?? "—"}</span>
+                         </div>
+                         <div className="flex justify-between items-center w-full">
                            <span className="text-slate-500">Rem</span>
                            {ev.secondsRemaining != null ? (
                              <span className="text-slate-300">{ev.secondsRemaining}s</span>
@@ -732,6 +748,28 @@ export function BotSmartExitPanel({ authPost }: Props) {
                             {ev.currentUnavailableReason || "Healthy"}
                           </div>
                         </div>
+                          <div
+                            className="text-[9px] font-mono text-slate-500"
+                            title={ev.adverseLatchExpiresAtSeconds != null
+                              ? `Adverse latch expires ${new Date(ev.adverseLatchExpiresAtSeconds * 1000).toISOString()}`
+                              : "No adverse trajectory latch"}
+                          >
+                            {ev.adverseLatchActive ? (
+                              <span className="text-amber-300">
+                                LATCH {(100 * (ev.adverseExcursionFraction ?? 0)).toFixed(3)}%
+                                {" · "}{ev.trajectorySampleCount ?? 0} samples
+                              </span>
+                            ) : (
+                              <span>
+                                Trajectory {ev.trajectorySampleCount ?? 0} samples
+                                {ev.recoveryProgress ? ` · recovery ${ev.recoveryProgress}/2` : ""}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[9px] font-mono text-slate-600">
+                            Spot evt {ev.spotEventAgeMs == null ? "—" : `${Math.max(0, ev.spotEventAgeMs).toFixed(0)}ms`}
+                            {" · "}decision {ev.decisionLatencyMs == null ? "—" : `${ev.decisionLatencyMs}ms`}
+                          </div>
                         <div className="flex items-center justify-between w-full pr-2">
                            <HealthDot label="SPT" health={ev.liveComponentHealth?.spot} />
                            <HealthDot label="TPE" health={ev.liveComponentHealth?.tape} />

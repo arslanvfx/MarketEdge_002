@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   DEFAULT_SMART_EXIT_CONFIG, INITIAL_SMART_EXIT_STATE, adverseContinuationScore,
   assessSmartExitMarketDirection,
+  assessSmartExitTrajectory,
   assessSmartExitTimeScaledRisk,
   assessSmartExitDeepLossHold,
   evaluateSmartExit, modelWinProbability, probabilityDropThreshold,
@@ -453,10 +454,10 @@ test("live execution keeps the decision-time edge and freshness limits immutable
 test("time bands use exact remaining-second boundaries", () => {
   assert.equal(resolveSmartExitTimeBand(421).band, "monitor");
   assert.equal(resolveSmartExitTimeBand(420).band, "monitor");
-  assert.equal(resolveSmartExitTimeBand(181).band, "monitor");
-  assert.equal(resolveSmartExitTimeBand(180).band, "escalation");
-  assert.equal(resolveSmartExitTimeBand(121).band, "escalation");
-  assert.equal(resolveSmartExitTimeBand(120).band, "urgent");
+  assert.equal(resolveSmartExitTimeBand(241).band, "monitor");
+  assert.equal(resolveSmartExitTimeBand(240).band, "escalation");
+  assert.equal(resolveSmartExitTimeBand(181).band, "escalation");
+  assert.equal(resolveSmartExitTimeBand(180).band, "urgent");
   assert.equal(resolveSmartExitTimeBand(61).band, "urgent");
   assert.equal(resolveSmartExitTimeBand(60).band, "critical");
   assert.equal(resolveSmartExitTimeBand(0).band, "critical");
@@ -476,12 +477,12 @@ test("the same shallow crossing becomes actionable only as time runs out", () =>
     projectedCrossingConfirmed: true,
     marketDirectionConfirmed: true,
   });
-  assert.equal(assess(181).timeBand, "monitor");
-  assert.equal(assess(181).actionable, false);
-  assert.equal(assess(180).timeBand, "escalation");
-  assert.equal(assess(180).actionable, false);
-  assert.equal(assess(120).timeBand, "urgent");
-  assert.equal(assess(120).actionable, true);
+  assert.equal(assess(241).timeBand, "monitor");
+  assert.equal(assess(241).actionable, false);
+  assert.equal(assess(240).timeBand, "escalation");
+  assert.equal(assess(240).actionable, false);
+  assert.equal(assess(180).timeBand, "urgent");
+  assert.equal(assess(180).actionable, true);
   assert.equal(assess(60).timeBand, "critical");
   assert.equal(assess(60).actionable, true);
 });
@@ -566,6 +567,177 @@ test("fresh held-side Kalshi direction requires consecutive adverse samples and 
   assert.equal(recovery.confirmed, false);
 });
 
+test("duplicate event-time samples preserve a bounded adverse latch without inventing direction", () => {
+  const first = assessSmartExitTrajectory({
+    side: "yes",
+    strikePrice: 100,
+    price: 99.92,
+    observedAtSeconds: 100,
+    nowSeconds: 100,
+    remainingSeconds: 50,
+    maximumEventAgeSeconds: 3,
+    previousState: {
+      ...INITIAL_SMART_EXIT_STATE,
+      previousUnderlyingPrice: 100.02,
+      previousUnderlyingAtSeconds: 99.5,
+    },
+  });
+  assert.equal(first.distinctSampleAdded, true);
+  assert.equal(first.adverseLatchActive, true);
+  assert.ok(first.adverseVelocityPerSecond! > 0);
+  const duplicate = assessSmartExitTrajectory({
+    side: "yes",
+    strikePrice: 100,
+    price: 99.92,
+    observedAtSeconds: 100,
+    nowSeconds: 100.5,
+    remainingSeconds: 49.5,
+    maximumEventAgeSeconds: 3,
+    previousState: {
+      ...INITIAL_SMART_EXIT_STATE,
+      trajectorySamples: first.samples,
+      adverseLatchUntilSeconds: first.adverseLatchUntilSeconds,
+      adverseExcursionFraction: first.adverseExcursionFraction,
+      latchedAdverseVelocityPerSecond: first.adverseVelocityPerSecond,
+      latchedAdverseAccelerationPerSecond2: first.adverseAccelerationPerSecond2,
+    },
+  });
+  assert.equal(duplicate.distinctSampleAdded, false);
+  assert.equal(duplicate.adverseLatchActive, true);
+  assert.equal(duplicate.samples.length, first.samples.length);
+  assert.equal(duplicate.adverseVelocityPerSecond, first.adverseVelocityPerSecond);
+});
+
+test("two genuine recovery events clear the latch and stale evidence clears immediately", () => {
+  const baseState = {
+    ...INITIAL_SMART_EXIT_STATE,
+    trajectorySamples: [
+      { observedAtSeconds: 100, price: 100.1 },
+      { observedAtSeconds: 101, price: 99.9 },
+    ],
+    adverseLatchUntilSeconds: 110,
+    adverseExcursionFraction: 0.002,
+    latchedAdverseVelocityPerSecond: 0.2,
+  };
+  const recoveryOne = assessSmartExitTrajectory({
+    side: "yes", strikePrice: 100, price: 99.95,
+    observedAtSeconds: 102, nowSeconds: 102, remainingSeconds: 50,
+    maximumEventAgeSeconds: 3, previousState: baseState,
+  });
+  assert.equal(recoveryOne.recoveryProgress, 1);
+  const recoveryTwo = assessSmartExitTrajectory({
+    side: "yes", strikePrice: 100, price: 100.0,
+    observedAtSeconds: 103, nowSeconds: 103, remainingSeconds: 49,
+    maximumEventAgeSeconds: 3,
+    previousState: {
+      ...baseState,
+      trajectorySamples: recoveryOne.samples,
+      adverseRecoverySampleCount: recoveryOne.recoveryProgress,
+      adverseLatchUntilSeconds: recoveryOne.adverseLatchUntilSeconds,
+      adverseExcursionFraction: recoveryOne.adverseExcursionFraction,
+    },
+  });
+  assert.equal(recoveryTwo.adverseLatchActive, false);
+  const stale = assessSmartExitTrajectory({
+    side: "yes", strikePrice: 100, price: 99.9,
+    observedAtSeconds: 100, nowSeconds: 104, remainingSeconds: 48,
+    maximumEventAgeSeconds: 3, previousState: baseState,
+  });
+  assert.equal(stale.adverseLatchActive, false);
+  assert.deepEqual(stale.samples, []);
+});
+
+test("abrupt final-minute adverse excursions are symmetric for held YES and NO", () => {
+  const assess = (side: "yes" | "no", previousPrice: number, price: number) =>
+    assessSmartExitTrajectory({
+      side, strikePrice: 100, price,
+      observedAtSeconds: 100, nowSeconds: 100, remainingSeconds: 60,
+      maximumEventAgeSeconds: 3,
+      previousState: {
+        ...INITIAL_SMART_EXIT_STATE,
+        previousUnderlyingPrice: previousPrice,
+        previousUnderlyingAtSeconds: 99.5,
+      },
+    });
+  const yes = assess("yes", 100.05, 99.95);
+  const no = assess("no", 99.95, 100.05);
+  assert.equal(yes.adverseLatchActive, true);
+  assert.equal(no.adverseLatchActive, true);
+  assert.ok(Math.abs(yes.adverseExcursionFraction - no.adverseExcursionFraction) < 1e-12);
+});
+
+test("critical crossing can proceed without tape flow but still requires liquidity and economics", () => {
+  const state = {
+    ...INITIAL_SMART_EXIT_STATE,
+    previousUnderlyingPrice: 100.05,
+    previousUnderlyingAtSeconds: 869,
+    previousMarketWinProbability: 0.7,
+    previousMarketObservedAtSeconds: 869,
+  };
+  const decision = evaluateSmartExit(
+    { ...position, expirySeconds: 900 },
+    evidence({
+      observedAtSeconds: 870,
+      spotReceivedAtSeconds: 870,
+      tapeReceivedAtSeconds: null,
+      bookReceivedAtSeconds: 870,
+      spotObservedAtSeconds: 870,
+      tapeObservedAtSeconds: null,
+      bookObservedAtSeconds: 870,
+      underlyingPrice: 99.9,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.1,
+      marketQuoteObservedAtSeconds: 870,
+      marketBookObservedAtSeconds: 870,
+      marketExecutablePrice: 0.2,
+      marketExecutableQuantity: null,
+    }),
+    state,
+    { ...config, mode: "live-exit" },
+    870,
+  );
+  assert.equal(decision.timeBand, "critical");
+  assert.notEqual(decision.disposition, "UNAVAILABLE");
+  assert.equal(decision.executionEvidenceReady, false);
+  assert.notEqual(decision.disposition, "EXIT_SIGNAL");
+});
+
+test("fresh tape transport with stale trade events cannot authorize a non-critical exit", () => {
+  const decision = evaluateSmartExit(
+    { ...position, expirySeconds: 900 },
+    evidence({
+      observedAtSeconds: 700,
+      spotReceivedAtSeconds: 700,
+      tapeReceivedAtSeconds: 700,
+      bookReceivedAtSeconds: 700,
+      spotObservedAtSeconds: 700,
+      tapeObservedAtSeconds: 690,
+      bookObservedAtSeconds: 700,
+      underlyingPrice: 99.8,
+      tradeFlowImbalance: -0.9,
+      bookImbalance: -0.8,
+      marketWinProbability: 0.1,
+      marketQuoteObservedAtSeconds: 700,
+      marketBookObservedAtSeconds: 700,
+      marketExecutablePrice: 0.2,
+      marketExecutableQuantity: 10,
+    }),
+    {
+      ...INITIAL_SMART_EXIT_STATE,
+      previousUnderlyingPrice: 100.05,
+      previousUnderlyingAtSeconds: 699,
+      previousMarketWinProbability: 0.7,
+      previousMarketObservedAtSeconds: 699,
+    },
+    { ...config, mode: "live-exit" },
+    700,
+  );
+  assert.equal(decision.timeBand, "escalation");
+  assert.equal(decision.disposition, "UNAVAILABLE");
+  assert.match(decision.reason, /trade_flow/);
+  assert.equal(decision.mayExecuteExit, false);
+});
+
 test("stale, flat, and disagreeing Kalshi evidence cannot authorize an exit", () => {
   const stale = assessSmartExitMarketDirection({
     currentProbability: 0.40,
@@ -593,6 +765,20 @@ test("stale, flat, and disagreeing Kalshi evidence cannot authorize an exit", ()
   });
   assert.equal(flat.direction, "flat");
   assert.equal(flat.confirmed, false);
+  const duplicate = assessSmartExitMarketDirection({
+    currentProbability: 0.20,
+    currentObservedAtSeconds: 101,
+    previousProbability: 0.20,
+    previousObservedAtSeconds: 101,
+    previousSampleCount: 10,
+    maximumGapSeconds: 3,
+    requiredSampleCount: 1,
+    marketLossFraction: 0.75,
+    minimumMarketLossFraction: 0.05,
+  });
+  assert.equal(duplicate.direction, "flat");
+  assert.equal(duplicate.sampleCount, 10);
+  assert.equal(duplicate.confirmed, false);
   const risk = assessSmartExitTimeScaledRisk({
     side: "yes",
     underlyingPrice: 99,
@@ -607,6 +793,45 @@ test("stale, flat, and disagreeing Kalshi evidence cannot authorize an exit", ()
     marketDirectionConfirmed: false,
   });
   assert.equal(risk.actionable, false);
+});
+
+test("an unchanged Kalshi event cannot reauthorize a critical live exit", () => {
+  const decision = evaluateSmartExit(
+    { ...position, expirySeconds: 900 },
+    evidence({
+      observedAtSeconds: 870,
+      spotReceivedAtSeconds: 870,
+      tapeReceivedAtSeconds: null,
+      bookReceivedAtSeconds: 870,
+      spotObservedAtSeconds: 870,
+      tapeObservedAtSeconds: null,
+      bookObservedAtSeconds: 870,
+      underlyingPrice: 99.9,
+      tradeFlowImbalance: null,
+      marketWinProbability: 0.1,
+      marketQuoteObservedAtSeconds: 870,
+      marketBookObservedAtSeconds: 870,
+      marketExecutablePrice: 0.2,
+      marketExecutableQuantity: 10,
+    }),
+    {
+      ...INITIAL_SMART_EXIT_STATE,
+      adverseSampleCount: 3,
+      marketAdverseSampleCount: 3,
+      previousUnderlyingPrice: 100.05,
+      previousUnderlyingAtSeconds: 869,
+      previousMarketWinProbability: 0.1,
+      previousMarketObservedAtSeconds: 870,
+    },
+    { ...config, mode: "live-exit" },
+    870,
+  );
+  assert.equal(decision.timeBand, "critical");
+  assert.equal(decision.marketDirection, "flat");
+  assert.equal(decision.marketDirectionSampleCount, 3);
+  assert.equal(decision.marketDirectionConfirmed, false);
+  assert.notEqual(decision.disposition, "EXIT_SIGNAL");
+  assert.equal(decision.mayExecuteExit, false);
 });
 
 test("final-minute projected crossing is actionable before the target only with both confirmations", () => {
@@ -681,7 +906,7 @@ test("ZEC-style shallow crossing with 131 seconds left cannot jump directly to e
     { ...config, mode: "live-exit", sensitivity: "less_aggressive" },
     769,
   );
-  assert.equal(decision.timeBand, "escalation");
+  assert.equal(decision.timeBand, "urgent");
   assert.equal(decision.targetAlreadyCrossed, true);
   assert.equal(decision.marketDirectionConfirmed, true);
   assert.equal(decision.disposition, "PREPARE_EXIT");

@@ -1478,12 +1478,21 @@ export interface SmartExitEvaluation {
   confidence: number | null;
   reason: string;
   marketLossFraction?: number | null;
+  timeBand?: "monitor" | "escalation" | "urgent" | "critical";
   capitalLossFraction?: number | null;
   deepLossHoldActive?: boolean;
   deepLossHoldKind?: "none" | "recovery" | "terminal";
   secondsRemaining?: number | null;
   projectedCrossingSeconds?: number | null;
   projectedCrossBeforeExpiry?: boolean | null;
+  trajectorySampleCount?: number;
+  trajectoryWindowSeconds?: number;
+  adverseExcursionFraction?: number;
+  adverseLatchActive?: boolean;
+  adverseLatchExpiresAtSeconds?: number | null;
+  recoveryProgress?: number;
+  spotEventAgeMs?: number | null;
+  decisionLatencyMs?: number;
   estimatedSaleValue?: number | null;
   expectedHoldValue?: number | null;
   marketBestBid?: number | null;
@@ -1513,6 +1522,12 @@ export interface SmartExitHealth {
   lastCycleDurationMs?: number | null;
   schedulerOverruns?: number;
   targetCadenceMs?: number;
+  slowTargetCadenceMs?: number;
+  lastHotCycleAt?: string | null;
+  lastHotCycleDurationMs?: number | null;
+  hotSchedulerOverruns?: number;
+  maximumUsableSampleGapMs?: number | null;
+  pendingPersistenceWrites?: number;
 }
 
 export interface SmartExitStatus {

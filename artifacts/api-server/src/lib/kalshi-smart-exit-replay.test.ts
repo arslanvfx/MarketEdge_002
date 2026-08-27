@@ -337,7 +337,7 @@ test("durable replay applies the same terminal and recoverable deep-loss holds a
       marketQuoteAgeMs: 0,
       estimatedSaleValue: 0.12,
     })));
-  assert.equal(tooLate[0]!.candidateExit?.timestampSeconds, 291);
+  assert.equal(tooLate[0]!.candidateExit?.timestampSeconds, 290);
 });
 
 test("durable replay uses the recorded remaining stake after a partial position reduction", () => {
