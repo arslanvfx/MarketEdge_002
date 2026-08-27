@@ -11,6 +11,7 @@ import {
 import {
   advanceScalperExitSamples,
   AbortableRequestRegistry,
+  ScalperExitPriorityGate,
   ScalperHotCadenceTracker,
   selectScalperHotCandidates,
 } from "./kalshi-scalper-smart-exit-scheduler.ts";
@@ -214,6 +215,75 @@ test("aborting a hung coalesced request evicts only that generation and permits 
   assert.equal(await second.promise, "fresh");
   assert.equal(await first.promise, "aborted");
   assert.equal(registry.size(), 0);
+});
+
+test("aborting Smart Exit evidence cannot affect a separately-owned entry request", async () => {
+  const exitRegistry = new AbortableRequestRegistry<string>();
+  const entryRegistry = new AbortableRequestRegistry<string>();
+  let entryAborted = false;
+  let finishEntry!: (value: string) => void;
+  const entry = entryRegistry.getOrCreate("BTC", (signal) => new Promise<string>((resolve) => {
+    finishEntry = resolve;
+    signal.addEventListener("abort", () => {
+      entryAborted = true;
+      resolve("entry-aborted");
+    }, { once: true });
+  }));
+  const exit = exitRegistry.getOrCreate("BTC", (signal) => new Promise<string>((resolve) => {
+    signal.addEventListener("abort", () => resolve("exit-aborted"), { once: true });
+  }));
+
+  exit.abort();
+  assert.equal(await exit.promise, "exit-aborted");
+  assert.equal(entryAborted, false);
+  assert.equal(entryRegistry.size(), 1);
+  finishEntry("entry-finished");
+  assert.equal(await entry.promise, "entry-finished");
+  assert.equal(entryRegistry.size(), 0);
+});
+
+test("Smart Exit DB work is bounded and critical lifecycle work outranks queued telemetry", async () => {
+  const gate = new ScalperExitPriorityGate(2);
+  const releases: Array<() => void> = [];
+  const started: string[] = [];
+  let active = 0;
+  let maxActive = 0;
+  const controlled = (name: string) => gate.run(() => new Promise<string>((resolve) => {
+    started.push(name);
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    releases.push(() => {
+      active -= 1;
+      resolve(name);
+    });
+  }), "background");
+
+  const first = controlled("background-1");
+  const second = controlled("background-2");
+  const third = controlled("background-3");
+  const critical = gate.run(async () => {
+    started.push("critical");
+    return "critical";
+  }, "critical");
+
+  assert.deepEqual(started, ["background-1", "background-2"]);
+  assert.deepEqual(gate.snapshot(), {
+    active: 2,
+    queuedCritical: 1,
+    queuedBackground: 1,
+    maxConcurrency: 2,
+  });
+
+  releases.shift()!();
+  assert.equal(await critical, "critical");
+  await Promise.resolve();
+  assert.deepEqual(started, ["background-1", "background-2", "critical", "background-3"]);
+  assert.equal(maxActive, 2);
+
+  releases.shift()!();
+  releases.shift()!();
+  await Promise.all([first, second, third]);
+  assert.equal(gate.snapshot().active, 0);
 });
 
 test("robust projection rejects an outlier, tiny noise, and deceleration that stops short", () => {

@@ -11,6 +11,83 @@ export interface AbortableCoalescedRequest<T> {
   abort: () => void;
 }
 
+export type ScalperExitWorkPriority = "critical" | "background";
+
+interface QueuedScalperExitWork<T> {
+  priority: ScalperExitWorkPriority;
+  sequence: number;
+  work: () => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+}
+
+/**
+ * Bounds Smart Exit's use of shared process resources. Critical lifecycle work
+ * may move ahead of queued observational writes, while FIFO order is preserved
+ * within each priority. The normal entry path deliberately does not use this
+ * gate, so a small gate limit leaves shared DB capacity available to entries.
+ */
+export class ScalperExitPriorityGate {
+  private readonly queue: QueuedScalperExitWork<unknown>[] = [];
+  private readonly maxConcurrency: number;
+  private active = 0;
+  private sequence = 0;
+
+  constructor(maxConcurrency: number) {
+    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+      throw new Error("maxConcurrency must be a positive integer");
+    }
+    this.maxConcurrency = maxConcurrency;
+  }
+
+  run<T>(
+    work: () => Promise<T>,
+    priority: ScalperExitWorkPriority = "critical",
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queue.push({
+        priority,
+        sequence: this.sequence++,
+        work,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      });
+      this.drain();
+    });
+  }
+
+  snapshot(): {
+    active: number;
+    queuedCritical: number;
+    queuedBackground: number;
+    maxConcurrency: number;
+  } {
+    return {
+      active: this.active,
+      queuedCritical: this.queue.filter((item) => item.priority === "critical").length,
+      queuedBackground: this.queue.filter((item) => item.priority === "background").length,
+      maxConcurrency: this.maxConcurrency,
+    };
+  }
+
+  private drain(): void {
+    while (this.active < this.maxConcurrency && this.queue.length > 0) {
+      this.queue.sort((a, b) => (
+        Number(b.priority === "critical") - Number(a.priority === "critical")
+        || a.sequence - b.sequence
+      ));
+      const next = this.queue.shift()!;
+      this.active += 1;
+      void next.work()
+        .then(next.resolve, next.reject)
+        .finally(() => {
+          this.active -= 1;
+          this.drain();
+        });
+    }
+  }
+}
+
 export class AbortableRequestRegistry<T> {
   private readonly requests = new Map<string, AbortableCoalescedRequest<T>>();
 

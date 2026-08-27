@@ -35,6 +35,8 @@ import {
   AbortableRequestRegistry,
   type AbortableCoalescedRequest,
   ScalperHotCadenceTracker,
+  ScalperExitPriorityGate,
+  type ScalperExitWorkPriority,
   selectScalperHotCandidates,
 } from "./kalshi-scalper-smart-exit-scheduler.ts";
 import type { ScalpOrder } from "./kalshi-scalper-types.ts";
@@ -78,6 +80,17 @@ type HotBookEvidence = NonNullable<Awaited<ReturnType<typeof fetchOrderbookPrice
 const hotSpotRequests = new AbortableRequestRegistry<HotReceipt<HotSpotEvidence> | null>();
 const hotBookRequests = new AbortableRequestRegistry<HotReceipt<HotBookEvidence> | null>();
 const hotTargetRequests = new AbortableRequestRegistry<number | null>();
+// The process-wide PostgreSQL pool has five connections. Smart Exit may use at
+// most two concurrently, so entry-critical reservation/cap work always retains
+// capacity. Lifecycle writes outrank observational history/reporting work.
+const smartExitDbGate = new ScalperExitPriorityGate(2);
+
+function runSmartExitDb<T>(
+  work: () => Promise<T>,
+  priority: ScalperExitWorkPriority = "critical",
+): Promise<T> {
+  return smartExitDbGate.run(work, priority);
+}
 
 function numeric(value: unknown): number | null { const n = Number(value); return Number.isFinite(n) ? n : null; }
 function expiry(windowKey: string): number { const at = Date.parse(`${windowKey}:00Z`); return Number.isFinite(at) ? at + 900_000 : 0; }
@@ -251,7 +264,10 @@ function serializeLifecycle(row: Record<string, unknown>): Record<string, unknow
 }
 
 async function reconcilePendingRequests(): Promise<void> {
-  const pending = await listPendingScalperExitRequests();
+  const pending = await runSmartExitDb(
+    () => listPendingScalperExitRequests(),
+    "background",
+  );
   for (const row of pending) {
     const payload = row.payload && typeof row.payload === "object"
       ? row.payload as Record<string, unknown>
@@ -264,11 +280,11 @@ async function reconcilePendingRequests(): Promise<void> {
     if (!originalSide || count == null || count <= 0 || yesLimitPrice == null
       || exchangeIndex == null || !Number.isInteger(exchangeIndex)
       || !Number.isFinite(createdAt.getTime())) {
-      await resolveScalperExitRequest({
+      await runSmartExitDb(() => resolveScalperExitRequest({
         id: String(row.id), status: "unknown",
         reason: "durable request identity is incomplete; reconciliation blocked",
         evidence: { source: "local_request_validation", blocked: true },
-      });
+      }));
       continue;
     }
     const result = await reconcileScalpExitOrderStrict({
@@ -282,17 +298,17 @@ async function reconcilePendingRequests(): Promise<void> {
       createdAt,
     });
     if (result.outcome === "ambiguous") {
-      await resolveScalperExitRequest({
+      await runSmartExitDb(() => resolveScalperExitRequest({
         id: String(row.id), status: "unknown", reason: result.reason,
         evidence: result.evidence,
-      });
+      }));
     } else if (result.outcome === "zero_fill") {
-      await resolveScalperExitRequest({
+      await runSmartExitDb(() => resolveScalperExitRequest({
         id: String(row.id), status: "zero_fill", reason: result.reason,
         exchangeOrderId: result.orderId, evidence: result.evidence,
-      });
+      }));
     } else {
-      await resolveScalperExitRequest({
+      await runSmartExitDb(() => resolveScalperExitRequest({
         id: String(row.id),
         status: result.filledCount + 1e-9 >= count ? "filled" : "partial",
         reason: result.reason,
@@ -300,7 +316,7 @@ async function reconcilePendingRequests(): Promise<void> {
         winningPrice: result.winningPrice,
         exchangeOrderId: result.orderId,
         evidence: result.evidence,
-      });
+      }));
     }
   }
 }
@@ -322,7 +338,7 @@ async function executeExit(params: {
           evidence: { stage: "pre_submit_expiry" },
         };
       }
-      const latest = await loadScalperExitConfig();
+      const latest = await runSmartExitDb(() => loadScalperExitConfig());
       if (!latest.config.enabled || latest.config.mode !== params.exitMode
         || latest.version !== params.configVersion) {
         return {
@@ -431,74 +447,74 @@ async function executeExit(params: {
         },
       };
     },
-    release: (blocked) => releaseScalperExitLifecycle({
+    release: (blocked) => runSmartExitDb(() => releaseScalperExitLifecycle({
       id: params.lifecycleId,
       reason: blocked.reason,
       evidence: blocked.evidence,
-    }),
+    })),
     claimRequest: async () => {
       if (!isBeforeExpiry(params.order)) {
-        await releaseScalperExitLifecycle({
+        await runSmartExitDb(() => releaseScalperExitLifecycle({
           id: params.lifecycleId,
           reason: "market expired before durable request claim",
           evidence: { stage: "request_claim_expiry" },
-        });
+        }));
         return false;
       }
-      const request = await claimScalperExitRequest({
+      const request = await runSmartExitDb(() => claimScalperExitRequest({
         id: requestId, lifecycleId: params.lifecycleId, clientOrderId,
         payload: {
           orderId: params.order.id, ticker: params.order.ticker, side: params.order.side,
           remainingQuantity: params.remainingQuantity, configVersion: params.configVersion, yesLimitPrice,
           exchangeIndex: params.expectedExchangeIndex,
         },
-      });
+      }));
       return request.claimed;
     },
     submit: async (prepared) => {
-      const submitConfig = await loadScalperExitConfig();
+      const submitConfig = await runSmartExitDb(() => loadScalperExitConfig());
       if (!submitConfig.config.enabled || submitConfig.config.mode !== params.exitMode
         || submitConfig.version !== params.configVersion) {
-        await resolveScalperExitRequest({
+        await runSmartExitDb(() => resolveScalperExitRequest({
           id: requestId,
           status: "blocked",
           reason: "config version changed after durable request claim, before submit",
           evidence: { stage: "durable_request_pre_submit" },
-        });
+        }));
         return;
       }
       if (!isBeforeExpiry(params.order)) {
-        await resolveScalperExitRequest({
+        await runSmartExitDb(() => resolveScalperExitRequest({
           id: requestId,
           status: "blocked",
           reason: "market expired after durable request claim, before broker submit",
           evidence: { stage: "broker_submit_expiry" },
-        });
+        }));
         return;
       }
       if (params.exitMode === "paper-exit") {
-        await resolveScalperExitRequest({
+        await runSmartExitDb(() => resolveScalperExitRequest({
           id: requestId, status: "filled", reason: "paper simulated canonical executable fill",
           fillQuantity: params.remainingQuantity, winningPrice: prepared.executablePrice,
           evidence: { adapter: "paper", finalDecision: prepared.finalDecision },
-        });
+        }));
         return;
       }
       if (params.exitMode !== "live-exit") {
-        await resolveScalperExitRequest({
+        await runSmartExitDb(() => resolveScalperExitRequest({
           id: requestId, status: "blocked",
           reason: "execution adapter unavailable for current mode",
-        });
+        }));
         return;
       }
       try {
         if (!isBeforeExpiry(params.order)) {
-          await resolveScalperExitRequest({
+          await runSmartExitDb(() => resolveScalperExitRequest({
             id: requestId,
             status: "blocked",
             reason: "market expired at final broker boundary",
             evidence: { stage: "final_broker_boundary_expiry" },
-          });
+          }));
           return;
         }
         const result = await placeScalpExitOrderStrict({
@@ -509,7 +525,7 @@ async function executeExit(params: {
           count: params.remainingQuantity,
           clientOrderId,
         });
-        await resolveScalperExitRequest({
+        await runSmartExitDb(() => resolveScalperExitRequest({
           id: requestId,
           status: "unknown",
           reason: result.outcome === "confirmed_fill" || result.outcome === "zero_fill"
@@ -517,16 +533,16 @@ async function executeExit(params: {
             : result.reason,
           exchangeOrderId: result.orderId,
           evidence: { source: "submit_response", finalDecision: prepared.finalDecision },
-        });
+        }));
       } catch (error) {
         const definitive = parseDefinitiveScalpOrderRejection(error);
-        await resolveScalperExitRequest(definitive ? {
+        await runSmartExitDb(() => resolveScalperExitRequest(definitive ? {
           id: requestId, status: "zero_fill", reason: definitive.message,
           evidence: { source: "definitive_http_rejection", status: definitive.status, code: definitive.code },
         } : {
           id: requestId, status: "unknown", reason: `ambiguous transport: ${String(error)}`,
           evidence: { source: "submit_exception", ambiguous: true },
-        });
+        }));
       }
     },
   });
@@ -641,13 +657,13 @@ async function processOrder(
     publishHotBlock(order, remainingQuantity, "market expired before ownership claim", false);
     return;
   }
-  const lifecycle = await claimScalperExitLifecycle({
+  const lifecycle = await runSmartExitDb(() => claimScalperExitLifecycle({
     id: randomUUID(), scalpOrderId: order.id, mode: evaluationConfig.mode, symbol: order.symbol,
     ticker: order.ticker, windowKey: order.windowKey, side: order.side, remainingQuantity,
     status: evaluationConfig.mode === "shadow" ? "advisory" : "requested",
     triggerReason: decision.reason, evidence, executableQuantity: executable.quantity,
     executablePrice: executable.price, entryWinningPrice, configVersion: evaluationVersion,
-  });
+  }));
   if (!lifecycle.id || evaluationConfig.mode === "shadow") return;
   if (!lifecycle.claimed && lifecycle.status !== "zero_fill") return;
   await executeExit({
@@ -666,13 +682,19 @@ async function refreshActiveOrders(): Promise<void> {
       activeOrders.clear();
       return;
     }
-    const orders = await getUnsettledScalpOrders();
+    const orders = await runSmartExitDb(
+      () => getUnsettledScalpOrders(),
+      "background",
+    );
     const eligible = orders.filter((order) =>
       (order.status === "filled" || order.status === "paper")
       && order.filledCount > 0
       && expiry(order.windowKey) > Date.now()
       && modeIncludesOrder(order));
-    const statesByOrder = await getScalperExitOrderStates(eligible.map((order) => order.id));
+    const statesByOrder = await runSmartExitDb(
+      () => getScalperExitOrderStates(eligible.map((order) => order.id)),
+      "background",
+    );
     const nextIds = new Set<string>();
     for (const order of eligible) {
       const orderState = statesByOrder.get(order.id);
@@ -767,7 +789,11 @@ async function flushEvaluationWrites(): Promise<void> {
   if (pendingEvaluationWrites.size === 0) return;
   const writes = [...pendingEvaluationWrites.values()];
   pendingEvaluationWrites.clear();
-  const results = await Promise.allSettled(writes.map((write) => recordScalperExitEvaluation(write)));
+  const results = await Promise.allSettled(writes.map((write) =>
+    runSmartExitDb(
+      () => recordScalperExitEvaluation(write),
+      "background",
+    )));
   for (let index = 0; index < results.length; index++) {
     if (results[index]!.status === "rejected") {
       pendingEvaluationWrites.set(writes[index]!.scalpOrderId, writes[index]!);
@@ -789,7 +815,10 @@ async function runMaintenance(): Promise<void> {
       lastReconciledAt = now;
     }
     if (now - lastSettlementAt >= 30_000) {
-      await finalizeSettledScalperExitLifecycles();
+      await runSmartExitDb(
+        () => finalizeSettledScalperExitLifecycles(),
+        "background",
+      );
       lastSettlementAt = now;
     }
   } catch (error) {
@@ -801,11 +830,14 @@ async function runMaintenance(): Promise<void> {
 }
 
 export async function initScalperSmartExit(): Promise<void> {
-  await runScalperExitMigrations();
-  const loaded = await loadScalperExitConfig();
+  await runSmartExitDb(() => runScalperExitMigrations());
+  const loaded = await runSmartExitDb(() => loadScalperExitConfig());
   config = loaded.config; version = loaded.version; started = true;
   await reconcilePendingRequests();
-  await finalizeSettledScalperExitLifecycles();
+  await runSmartExitDb(
+    () => finalizeSettledScalperExitLifecycles(),
+    "background",
+  );
   await refreshActiveOrders();
   if (hotTimer) clearInterval(hotTimer);
   if (discoveryTimer) clearInterval(discoveryTimer);
@@ -841,12 +873,16 @@ export function getScalperSmartExitStatus() {
         ? null
         : new Date(lastHotOverloadAtMs).toISOString(),
       lastDiscoveryAt: lastDiscoveryAtMs == null ? null : new Date(lastDiscoveryAtMs).toISOString(),
+      sharedDbLane: smartExitDbGate.snapshot(),
     },
     evaluations: [...latestEvaluations.values()],
     isolation: "dedicated_scalper_exit_ledger_and_exchange_boundary" };
 }
 export async function getScalperSmartExitLifecycle(limit?: number) {
-  const records = (await listScalperExitLifecycles(limit)).map(serializeLifecycle);
+  const records = (await runSmartExitDb(
+    () => listScalperExitLifecycles(limit),
+    "background",
+  )).map(serializeLifecycle);
   type Accounting = {
     triggered: number; settled: number; scoreable: number; pending: number;
     helped: number; harmed: number; grossMoneySaved: number;
@@ -873,7 +909,10 @@ export async function getScalperSmartExitLifecycle(limit?: number) {
   };
 }
 export async function getScalperSmartExitHistoryProjection(orderIds: readonly string[]) {
-  const rows = await getScalperExitLifecyclesByOrderIds(orderIds);
+  const rows = await runSmartExitDb(
+    () => getScalperExitLifecyclesByOrderIds(orderIds),
+    "background",
+  );
   const byOrderId = new Map<string, Record<string, unknown>>();
   const aggregates = new Map<string, { fill: number; exitPnl: number }>();
   for (const row of rows) {
@@ -892,7 +931,10 @@ export async function getScalperSmartExitHistoryProjection(orderIds: readonly st
   return byOrderId;
 }
 export async function getScalperSmartExitReplay() {
-  const rows = await listScalperExitEvidenceForReplay();
+  const rows = await runSmartExitDb(
+    () => listScalperExitEvidenceForReplay(),
+    "background",
+  );
   const sensitivities: ScalperExitSensitivity[] = ["more_aggressive", "default", "less_aggressive"];
   const byOrder = new Map<string, Record<string, unknown>[]>();
   for (const row of rows) {
@@ -963,12 +1005,16 @@ export async function updateScalperSmartExitConfig(patch: Record<string, unknown
   // No update promotes to live implicitly: live requires the explicit mode and
   // enabled fields in the same authenticated operator request.
   if (patch.mode === "live-exit" && patch.enabled !== true) throw new Error("live-exit requires enabled=true in the same authenticated request");
-  const saved = await saveScalperExitConfig({ ...config, ...patch });
+  const saved = await runSmartExitDb(
+    () => saveScalperExitConfig({ ...config, ...patch }),
+  );
   config = saved.config; version = saved.version;
   return { ...config };
 }
 export async function emergencyDisableScalperSmartExit() {
-  const saved = await saveScalperExitConfig({ ...config, enabled: false, mode: "off" });
+  const saved = await runSmartExitDb(
+    () => saveScalperExitConfig({ ...config, enabled: false, mode: "off" }),
+  );
   config = saved.config; version = saved.version;
   return { ...config };
 }

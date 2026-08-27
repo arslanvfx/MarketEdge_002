@@ -71,6 +71,23 @@ test("the 250ms hot lane is coalesced per order and bounded independently of mai
   assert.doesNotMatch(hot, /reconcilePendingRequests|finalizeSettledScalperExitLifecycles|getUnsettledScalpOrders/);
 });
 
+test("Smart Exit database work is capped below the shared pool and prioritizes lifecycle writes", () => {
+  assert.match(service, /const smartExitDbGate = new ScalperExitPriorityGate\(2\)/);
+  assert.match(service, /runSmartExitDb\(/);
+  const flush = service.slice(
+    service.indexOf("async function flushEvaluationWrites"),
+    service.indexOf("async function runMaintenance"),
+  );
+  assert.match(flush, /runSmartExitDb\(/);
+  assert.match(flush, /"background"/);
+  assert.doesNotMatch(flush, /recordScalperExitEvaluation\(write\)\)\)/);
+  const claim = service.slice(
+    service.indexOf("async function processOrder"),
+    service.indexOf("async function refreshActiveOrders"),
+  );
+  assert.match(claim, /runSmartExitDb\(\(\) => claimScalperExitLifecycle/);
+});
+
 test("hot evidence is deadline-bounded and coalesced instead of spawning overlapping provider calls", () => {
   assert.match(service, /const HOT_EVIDENCE_DEADLINE_MS = 700/);
   assert.match(service, /hotSpotRequests\.getOrCreate\(product/);
@@ -156,7 +173,7 @@ test("a pre-submit revalidation block releases ownership before any request atte
     service.indexOf("async function processOrder"),
   );
   const finalDecision = execute.indexOf("const finalDecision = evaluateScalperExit");
-  const requestClaim = execute.indexOf("const request = await claimScalperExitRequest");
+  const requestClaim = execute.indexOf("const request = await runSmartExitDb");
   const brokerSubmit = execute.indexOf("const result = await placeScalpExitOrderStrict");
   assert.ok(finalDecision >= 0 && finalDecision < requestClaim);
   assert.ok(requestClaim < brokerSubmit);
