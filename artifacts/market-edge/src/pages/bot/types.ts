@@ -1501,6 +1501,7 @@ export interface SmartExitEvaluation {
   executed?: boolean;
   executionStatus?: "not_requested" | "requested" | "filled" | "blocked" | "unknown";
   effectiveSensitivity?: SmartExitSensitivity;
+  degradedComponents?: string[];
 }
 
 export interface SmartExitHealth {

@@ -352,11 +352,28 @@ function evidenceProblem(position: SmartExitPosition, evidence: SmartExitEvidenc
   if (!isFresh(evidence.spotReceivedAtSeconds, now, config.maxEvidenceAgeSeconds)) {
     return "spot transport is stale or unavailable";
   }
-  if (!finite(evidence.underlyingPrice) || !finite(evidence.volatilityLogReturnPerSqrtSecond)) {
-    return "spot or volatility evidence is missing";
-  }
-  if (evidence.underlyingPrice <= 0 || evidence.volatilityLogReturnPerSqrtSecond < 0) return "evidence is invalid";
+  if (!finite(evidence.underlyingPrice)) return "spot evidence is missing";
+  if (evidence.underlyingPrice <= 0
+      || (finite(evidence.volatilityLogReturnPerSqrtSecond)
+        && evidence.volatilityLogReturnPerSqrtSecond < 0)) return "evidence is invalid";
   return null;
+}
+
+export function missingSmartExitCrossingEvidence(
+  evidence: Pick<
+    SmartExitEvidence,
+    "volatilityLogReturnPerSqrtSecond" | "momentumLogReturn" | "momentumWindowSeconds"
+      | "tradeFlowImbalance" | "bookImbalance"
+  >,
+): string[] {
+  const missing: string[] = [];
+  if (!finite(evidence.volatilityLogReturnPerSqrtSecond)) missing.push("volatility");
+  if (!finite(evidence.momentumLogReturn)
+      || !finite(evidence.momentumWindowSeconds)
+      || evidence.momentumWindowSeconds <= 0) missing.push("momentum");
+  if (!finite(evidence.tradeFlowImbalance)) missing.push("trade_flow");
+  if (!finite(evidence.bookImbalance)) missing.push("book_imbalance");
+  return missing;
 }
 
 export function evaluateSmartExit(
@@ -376,6 +393,19 @@ export function evaluateSmartExit(
   }
   const problem = evidenceProblem(position, evidence, config, nowSeconds);
   if (problem) return unavailable(problem, state);
+  const targetAlreadyCrossed = position.side === "yes"
+    ? evidence.underlyingPrice! <= position.strikePrice
+    : evidence.underlyingPrice! >= position.strikePrice;
+  const missingAtCrossing = targetAlreadyCrossed
+    ? missingSmartExitCrossingEvidence(evidence)
+    : [];
+  if (missingAtCrossing.length > 0) {
+    return unavailable(
+      `target crossed while mandatory crossing evidence is unavailable: ${missingAtCrossing.join(", ")}`,
+      state,
+      missingAtCrossing,
+    );
+  }
   const probability = modelWinProbability(position, evidence, config, nowSeconds);
   const continuation = adverseContinuationScore(position.side, evidence, config);
   if (probability === null) return unavailable("model inputs are unavailable", state);

@@ -68,7 +68,10 @@ test("continuation is adverse-side aligned", () => {
   assert.ok(adverseContinuationScore("no", evidence(), config)! < 0);
 });
 test("missing, stale, and commodity evidence fail closed", () => {
-  assert.notEqual(evaluateSmartExit(position, evidence({ tradeFlowImbalance: null }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
+  assert.notEqual(evaluateSmartExit(position, evidence({
+    underlyingPrice: 110,
+    tradeFlowImbalance: null,
+  }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit(position, evidence({ observedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit(position, evidence({ spotReceivedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit({ ...position, underlyingKind: "commodity" }, evidence(), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
@@ -233,6 +236,58 @@ test("actual target crossing can escalate immediately but requires complete exec
   assert.equal(executable.mayExecuteExit, true);
 });
 
+test("target crossing during collector warm-up is explicitly unavailable until all crossing evidence recovers", () => {
+  const warming = evaluateSmartExit(
+    position,
+    evidence({
+      momentumLogReturn: null,
+      momentumWindowSeconds: null,
+      tradeFlowImbalance: null,
+    }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(warming.disposition, "UNAVAILABLE");
+  assert.equal(warming.mayExecuteExit, false);
+  assert.deepEqual(warming.degradedComponents, ["momentum", "trade_flow"]);
+  assert.match(warming.reason, /target crossed.*unavailable/i);
+
+  const recovered = evaluateSmartExit(
+    position,
+    evidence({
+      observedAtSeconds: 101,
+      spotReceivedAtSeconds: 101,
+      tapeReceivedAtSeconds: 101,
+      bookReceivedAtSeconds: 101,
+      spotObservedAtSeconds: 101,
+      tapeObservedAtSeconds: 101,
+      bookObservedAtSeconds: 101,
+      marketQuoteObservedAtSeconds: 101,
+      marketBookObservedAtSeconds: 101,
+      marketExecutablePrice: 0.9,
+    }),
+    warming.nextState,
+    { ...config, mode: "live-exit" },
+    101,
+  );
+  assert.equal(recovered.disposition, "EXIT_SIGNAL");
+  assert.equal(recovered.mayExecuteExit, true);
+});
+
+test("crossed target missing volatility keeps the crossing-specific unavailable reason", () => {
+  const decision = evaluateSmartExit(
+    position,
+    evidence({ volatilityLogReturnPerSqrtSecond: null }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, mode: "live-exit" },
+    100,
+  );
+  assert.equal(decision.disposition, "UNAVAILABLE");
+  assert.deepEqual(decision.degradedComponents, ["volatility"]);
+  assert.match(decision.reason, /target crossed.*volatility/i);
+});
+
 test("actual target crossing does not wait for a 25-percent Kalshi repricing", () => {
   const decision = evaluateSmartExit(
     position,
@@ -334,6 +389,7 @@ test("quiet tape degrades confidence without erasing the shadow decision", () =>
   const decision = evaluateSmartExit(
     position,
     evidence({
+      underlyingPrice: 110,
       tapeObservedAtSeconds: 70,
       tradeFlowImbalance: null,
       bookImbalance: -1,

@@ -89,7 +89,7 @@ function RecBadge({ ev, mode }: { ev: SmartExitEvaluation, mode: string }) {
   }
   return (
     <div className={`inline-flex items-center px-2 py-0.5 rounded-[4px] text-[9px] font-bold uppercase tracking-wider border ${style}`}>
-      {ev.recommendation}
+      {ev.recommendation === "unavailable" ? "UNAVAILABLE" : ev.recommendation}
       {sub && <span className="ml-1.5 pl-1.5 border-l border-current opacity-70">{sub}</span>}
     </div>
   );
@@ -627,7 +627,16 @@ export function BotSmartExitPanel({ authPost }: Props) {
                           <RecBadge ev={ev} mode={mode} />
                         </div>
                         <div className="h-4 flex items-center">
-                          {ev.debounceTarget && ev.debounceTarget > 1 ? (
+                          {ev.recommendation === "unavailable" ? (
+                            <span
+                              className="truncate text-[9px] font-mono text-red-400"
+                              title={ev.reason}
+                            >
+                              Missing: {ev.degradedComponents?.length
+                                ? ev.degradedComponents.join(", ").replaceAll("_", " ")
+                                : ev.reason}
+                            </span>
+                          ) : ev.debounceTarget && ev.debounceTarget > 1 ? (
                             <div className="flex items-center gap-2 w-full">
                               <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
                                 <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, ((ev.debounceProgress || 0) / ev.debounceTarget) * 100)}%` }} />

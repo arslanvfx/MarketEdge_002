@@ -104,6 +104,10 @@ const durableEvaluation = (
   underlyingPrice: 100.5,
   strikePrice: 100,
   volatilityLogReturnPerSqrtSecond: 0.01,
+  momentumLogReturn: -0.01,
+  momentumWindowSeconds: 15,
+  tradeFlowImbalance: -1,
+  bookImbalance: -1,
   continuationScore: 1,
   adverseVelocityPerSecond: 0.2,
   adverseAccelerationPerSecond2: 0,
@@ -184,6 +188,72 @@ test("durable replay treats a fully executable actual crossing as immediate", ()
   ]);
   assert.equal(replay[0]!.candidateExit?.timestampSeconds, 20);
   assert.match(replay[0]!.candidateExit?.reason ?? "", /actual target crossing/);
+});
+
+test("ZEC cold-cross replay waits for complete evidence and compares all sensitivity timings deterministically", () => {
+  const settlement = {
+    owner: "regular" as const,
+    positionId: "zec-2026-08-26",
+    symbol: "ZEC",
+    regime: "reversal",
+    entryTimestampSeconds: Date.parse("2026-08-26T23:42:08Z") / 1_000,
+    expiryTimestampSeconds: Date.parse("2026-08-26T23:45:00Z") / 1_000,
+    entryContractCost: 0.48,
+    quantity: 1,
+    holdToExpiryPnl: 0.52,
+  };
+  const coldCross = durableEvaluation(settlement.entryTimestampSeconds + 10, {
+    positionId: settlement.positionId,
+    symbol: "ZEC",
+    side: "no",
+    strikePrice: 817.7313,
+    underlyingPrice: 818,
+    volatilityLogReturnPerSqrtSecond: null,
+    momentumLogReturn: null,
+    tradeFlowImbalance: null,
+    bookImbalance: null,
+    secondsRemaining: settlement.expiryTimestampSeconds - (settlement.entryTimestampSeconds + 10),
+  });
+  const warmed = [46, 47, 48, 49].map((offset) => durableEvaluation(
+    settlement.entryTimestampSeconds + offset,
+    {
+      positionId: settlement.positionId,
+      symbol: "ZEC",
+      side: "no",
+      strikePrice: 817.7313,
+      underlyingPrice: 817.5 - (offset - 46) * 0.1,
+      secondsRemaining: settlement.expiryTimestampSeconds - (settlement.entryTimestampSeconds + offset),
+    },
+  ));
+  const samples = [coldCross, ...warmed];
+  const timing = (sensitivity: "more_aggressive" | "default" | "less_aggressive") =>
+    buildCrossingRiskReplayLifecycles([settlement], samples, { sensitivity })[0]!.candidateExit?.timestampSeconds;
+  assert.equal(timing("more_aggressive"), settlement.entryTimestampSeconds + 48);
+  assert.equal(timing("default"), settlement.entryTimestampSeconds + 49);
+  assert.equal(timing("less_aggressive"), undefined);
+});
+
+test("replay cannot execute a crossed sample whose momentum window is missing", () => {
+  const settlement = {
+    owner: "regular" as const,
+    positionId: "missing-window",
+    symbol: "ZEC",
+    regime: "cold",
+    entryTimestampSeconds: 10,
+    expiryTimestampSeconds: 100,
+    entryContractCost: 0.48,
+    quantity: 1,
+    holdToExpiryPnl: 0.52,
+  };
+  const replay = buildCrossingRiskReplayLifecycles([settlement], [
+    durableEvaluation(20, {
+      positionId: settlement.positionId,
+      symbol: settlement.symbol,
+      underlyingPrice: 99,
+      momentumWindowSeconds: null,
+    }),
+  ]);
+  assert.equal(replay[0]!.candidateExit, null);
 });
 
 test("durable replay applies the same terminal and recoverable deep-loss holds as live policy", () => {

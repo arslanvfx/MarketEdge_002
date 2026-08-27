@@ -251,6 +251,7 @@ export interface SmartExitEvaluationRecord {
   readonly threshold: number | null;
   readonly volatilityLogReturnPerSqrtSecond: number | null;
   readonly momentumLogReturn: number | null;
+  readonly momentumWindowSeconds: number | null;
   readonly tradeFlowImbalance: number | null;
   readonly bookImbalance: number | null;
   readonly continuationScore: number | null;

@@ -7,6 +7,7 @@ import type { SmartExitEvaluationRecord, SmartExitSensitivity } from "./kalshi-s
 import {
   assessSmartExitCrossingRisk,
   assessSmartExitDeepLossHold,
+  missingSmartExitCrossingEvidence,
   SMART_EXIT_MAX_SUSTAINED_SAMPLE_GAP_SECONDS,
   resolveSmartExitSensitivity,
 } from "./kalshi-smart-exit-policy.ts";
@@ -355,10 +356,23 @@ export function buildCrossingRiskReplayLifecycles(
       const sampleElapsedSeconds = previousSampleAt === null
         ? null
         : sampleAt - previousSampleAt;
+      const crossingEvidenceReady = missingSmartExitCrossingEvidence({
+        volatilityLogReturnPerSqrtSecond: sample.volatilityLogReturnPerSqrtSecond,
+        momentumLogReturn: sample.momentumLogReturn,
+        momentumWindowSeconds: sample.momentumWindowSeconds,
+        tradeFlowImbalance: sample.tradeFlowImbalance,
+        bookImbalance: sample.bookImbalance,
+      }).length === 0;
+      const actualTargetCrossed = sample.underlyingPrice !== null
+        && (sample.side === "yes"
+          ? sample.underlyingPrice <= sample.strikePrice
+          : sample.underlyingPrice >= sample.strikePrice);
       const crossing = sample.underlyingPrice !== null
         && sample.underlyingPrice > 0
         && sample.strikePrice > 0
         && sample.volatilityLogReturnPerSqrtSecond !== null
+        && Number.isFinite(sample.volatilityLogReturnPerSqrtSecond)
+        && (!actualTargetCrossed || crossingEvidenceReady)
         ? assessSmartExitCrossingRisk({
             side: sample.side,
             underlyingPrice: sample.underlyingPrice,

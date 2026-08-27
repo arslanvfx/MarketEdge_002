@@ -112,6 +112,7 @@ const latestValidEvaluations = new Map<string, SmartExitEvaluationRecord>();
 const lastEvidencePersistenceMs = new Map<string, number>();
 const bookSnapshots = new Map<string, BookSnapshot>();
 const bookRefreshes = new Map<string, Promise<void>>();
+const PREWARMABLE_COINS = CRYPTO_COINS.filter((coin) => coin.category !== "commodity");
 
 function identityKey(owner: SmartExitOwnerKind, positionId: string): string {
   return `${owner}:${positionId}`;
@@ -727,6 +728,7 @@ async function evaluateOne(position: SmartExitPosition, evidence: SmartExitEvide
     threshold: decision.threshold,
     volatilityLogReturnPerSqrtSecond: evidence.volatilityLogReturnPerSqrtSecond,
     momentumLogReturn: evidence.momentumLogReturn,
+    momentumWindowSeconds: evidence.momentumWindowSeconds,
     tradeFlowImbalance: evidence.tradeFlowImbalance,
     bookImbalance: evidence.bookImbalance,
     continuationScore: decision.continuationScore,
@@ -815,10 +817,20 @@ async function runCycle(): Promise<void> {
     schedulerOverruns += 1;
     return;
   }
-  if (!config.enabled || config.mode === "off") return;
   const cycleStartedAt = Date.now();
   cycleInFlight = true;
   try {
+    const prewarmable = PREWARMABLE_COINS;
+    if (prewarmable.length > 0) {
+      const coin = prewarmable[prewarmCursor % prewarmable.length]!;
+      prewarmCursor += 1;
+      await collector.collect(coin.symbol, coin.product, null);
+    }
+    if (!config.enabled || config.mode === "off") {
+      lastCycleAt = new Date().toISOString();
+      lastError = null;
+      return;
+    }
     const regular = [...openPositions.values()].filter((position) =>
       smartExitModeIncludesPosition(config.mode, position.entryMode));
     const scalper = (await listOpenScalperPositions()).filter((position) =>
@@ -886,14 +898,6 @@ async function runCycle(): Promise<void> {
         : scalperSnapshot(raw as Record<string, unknown>, evidence);
       await evaluateOne(snapshot, evidence);
     }));
-    const prewarmable = CRYPTO_COINS.filter((coin) =>
-      coin.category !== "commodity" && !evidenceBySymbol.has(coin.symbol));
-    if (prewarmable.length > 0) {
-      const coin = prewarmable[prewarmCursor % prewarmable.length]!;
-      prewarmCursor += 1;
-      void collector.collect(coin.symbol, coin.product, null).catch((error) =>
-        logger.debug({ error, symbol: coin.symbol }, "[kalshi-smart-exit] background prewarm skipped"));
-    }
     lastCycleAt = new Date().toISOString();
     lastError = null;
   } catch (error) {
@@ -908,14 +912,9 @@ async function runCycle(): Promise<void> {
 function stopScheduler(): void {
   if (interval) clearInterval(interval);
   interval = null;
-  collector.stop();
 }
 
 function startScheduler(): void {
-  if (!config.enabled || config.mode === "off") {
-    stopScheduler();
-    return;
-  }
   if (interval) return;
   interval = setInterval(() => void runCycle(), SCHEDULER_MS);
   interval.unref?.();
@@ -949,6 +948,8 @@ export async function initSmartExit(): Promise<void> {
     latestEvaluations.set(key, evaluation);
     if (evaluation.recommendation !== "unavailable") latestValidEvaluations.set(key, evaluation);
   }
+  await Promise.allSettled(PREWARMABLE_COINS.map((coin) =>
+    collector.collect(coin.symbol, coin.product, null)));
   startScheduler();
   if (!lifecycleReconcileInterval) {
     lifecycleReconcileInterval = setInterval(() => {
@@ -1042,7 +1043,7 @@ export async function updateSmartExitConfig(patch: Record<string, unknown>): Pro
     latestValidEvaluations.clear();
   }
   config = next;
-  if (next.enabled) startScheduler(); else stopScheduler();
+  startScheduler();
   return getSmartExitConfig();
 }
 
@@ -1050,7 +1051,7 @@ export async function emergencyDisableSmartExit(): Promise<SmartExitConfig> {
   const next = { ...config, enabled: false, mode: "off" as const };
   await saveSmartExitConfig(next);
   config = next;
-  stopScheduler();
+  startScheduler();
   return getSmartExitConfig();
 }
 
@@ -1294,7 +1295,9 @@ export async function getSmartExitReplayReports(): Promise<Array<Record<string, 
       .map((record) => Date.parse(record.settledAt!))
       .filter(Number.isFinite),
   );
-  const canonicalCreatedAt = canonicalGlobal?.createdAt?.getTime() ?? 0;
+  const canonicalCreatedAt = canonicalGlobal?.createdAt == null
+    ? 0
+    : new Date(canonicalGlobal.createdAt).getTime();
   if (latestSettledAt > canonicalCreatedAt) {
     canonicalReplayRefresh ??= calibrateSmartExitFromDurableHistory()
       .then(() => undefined)

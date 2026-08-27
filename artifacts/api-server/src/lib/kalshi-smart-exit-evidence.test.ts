@@ -69,3 +69,32 @@ test("freshly received quiet tape keeps transport freshness separate from event 
   assert.equal(evidence.tapeReceivedAtSeconds, 100);
   assert.equal(evidence.tapeObservedAtSeconds, 90);
 });
+
+test("bounded pre-position collection is ready for a newly opened position and survives repeated warm samples", async () => {
+  let clock = 20_000;
+  let tick = 0;
+  const fetch: SmartExitEvidenceFetch = async (url) => {
+    if (url.includes("/ticker")) {
+      tick += 1;
+      return reply({ price: String(100 + tick), time: new Date(clock).toISOString() });
+    }
+    if (url.includes("/trades")) return reply([
+      { trade_id: `old-${tick}`, price: "99", size: "1", side: "buy", time: new Date(clock - 16_000).toISOString() },
+      { trade_id: `new-${tick}`, price: "101", size: "2", side: "sell", time: new Date(clock).toISOString() },
+    ]);
+    return reply({ bids: [["100", "2"]], asks: [["102", "1"]] });
+  };
+  const collector = new KalshiSmartExitEvidenceCollector({
+    fetch, now: () => clock, momentumWindowSeconds: 15, maxPriceSamples: 3, maxTradeSamples: 4,
+  });
+  for (let index = 0; index < 5; index += 1) {
+    await collector.collect("ZEC", "ZEC-USD", null);
+    clock += 1_000;
+  }
+  const atOpen = collector.latest("ZEC")!;
+  assert.notEqual(atOpen.volatilityLogReturnPerSqrtSecond, null);
+  assert.notEqual(atOpen.momentumLogReturn, null);
+  assert.notEqual(atOpen.tradeFlowImbalance, null);
+  assert.equal(collector.health().priceSamples <= 3, true);
+  assert.equal(collector.health().tradeSamples <= 4, true);
+});
