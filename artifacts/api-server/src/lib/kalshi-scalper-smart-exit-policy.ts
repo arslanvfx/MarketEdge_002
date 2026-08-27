@@ -39,6 +39,8 @@ export interface ScalperExitInput {
   executableQuantity: number;
   remainingQuantity: number;
   depthAtFloor: boolean;
+  valuePreservingExecutableQuantity: number;
+  valuePreservingWinningProbability: number | null;
   config: ScalperExitConfig;
   requireSourceTimestamps?: boolean;
 }
@@ -64,17 +66,50 @@ export interface ScalperExitDecision {
   sourceAgeMs: number | null;
   projectionMethod: string | null;
   projectionState: string | null;
+  targetBreachConfirmationCount: number;
+  targetBreachSpanMs: number | null;
+  quoteLagProtectionEligible: boolean;
+  quoteLagProtectionFloor: number | null;
+}
+
+export const MAX_SCALPER_EXIT_SAMPLE_GAP_MS = 15_000;
+export const MAX_SCALPER_EXIT_SAMPLE_SPAN_MS = 30_000;
+const QUOTE_LAG_PROTECTION_MIN_GAIN = 0.01;
+
+function orderableSourceSequence(sequence: string | null | undefined): bigint | null {
+  return sequence && /^\d+$/.test(sequence) ? BigInt(sequence) : null;
+}
+
+export function isScalperSourceSequenceRegression(
+  priorSequence: string | null | undefined,
+  nextSequence: string | null | undefined,
+): boolean {
+  const prior = orderableSourceSequence(priorSequence);
+  const next = orderableSourceSequence(nextSequence);
+  return prior != null && next != null && next <= prior;
+}
+
+function hasScalperSourceSequenceRegression(samples: readonly ScalperExitSample[]): boolean {
+  let lastOrderable: bigint | null = null;
+  for (const sample of samples) {
+    const current = orderableSourceSequence(sample.sourceSequence);
+    if (current == null) continue;
+    if (lastOrderable != null && current <= lastOrderable) return true;
+    lastOrderable = current;
+  }
+  return false;
 }
 
 const PRESETS: Readonly<Record<ScalperExitSensitivity, Readonly<{
   confirmations: number; minVelocityPctPerSecond: number;
   minAccelerationPctPerSecond2: number; minDeterioration: number; reserveSeconds: number;
+  breachConfirmations: number; breachPersistenceMs: number;
 }>>> = Object.freeze({
   // Faster than regular Smart Exit, but still requires two independent fresh
   // post-entry moves and a material Kalshi reprice.
-  more_aggressive: Object.freeze({ confirmations: 2, minVelocityPctPerSecond: 0.015, minAccelerationPctPerSecond2: 0.002, minDeterioration: 0.12, reserveSeconds: 2 }),
-  default: Object.freeze({ confirmations: 3, minVelocityPctPerSecond: 0.025, minAccelerationPctPerSecond2: 0.005, minDeterioration: 0.18, reserveSeconds: 3 }),
-  less_aggressive: Object.freeze({ confirmations: 4, minVelocityPctPerSecond: 0.04, minAccelerationPctPerSecond2: 0.01, minDeterioration: 0.25, reserveSeconds: 5 }),
+  more_aggressive: Object.freeze({ confirmations: 2, minVelocityPctPerSecond: 0.015, minAccelerationPctPerSecond2: 0.002, minDeterioration: 0.12, reserveSeconds: 2, breachConfirmations: 2, breachPersistenceMs: 1_500 }),
+  default: Object.freeze({ confirmations: 3, minVelocityPctPerSecond: 0.025, minAccelerationPctPerSecond2: 0.005, minDeterioration: 0.18, reserveSeconds: 3, breachConfirmations: 3, breachPersistenceMs: 2_000 }),
+  less_aggressive: Object.freeze({ confirmations: 4, minVelocityPctPerSecond: 0.04, minAccelerationPctPerSecond2: 0.01, minDeterioration: 0.25, reserveSeconds: 5, breachConfirmations: 4, breachPersistenceMs: 3_000 }),
 });
 
 export function resolveScalperExitSensitivity(value: unknown): ScalperExitSensitivity {
@@ -145,6 +180,8 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
     volatilityPctPerSecond: null, noiseFloorPctPerSecond: null, projectedPriceAtDeadline: null,
     reserveSeconds: null, sampleCount: 0, latestGapMs: null, worstGapMs: null,
     sourceAgeMs: null, projectionMethod: null, projectionState: null,
+    targetBreachConfirmationCount: 0, targetBreachSpanMs: null,
+    quoteLagProtectionEligible: false, quoteLagProtectionFloor: null,
   });
   if (!input.config.enabled || input.config.mode === "off") return empty("off", "scalper exit disabled");
   if (!Number.isFinite(input.expiresAtMs) || input.nowMs >= input.expiresAtMs) {
@@ -167,7 +204,10 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
   const gaps = samples.slice(1).map((sample, index) => sample.atMs - samples[index]!.atMs);
   const latestGapMs = gaps[gaps.length - 1] ?? null;
   const worstGapMs = gaps.length ? Math.max(...gaps) : null;
-  if (gaps.some((gap) => gap <= 0 || gap > 900)) return empty("blocked", "sample cadence is discontinuous");
+  if (gaps.some((gap) => gap <= 0 || gap > MAX_SCALPER_EXIT_SAMPLE_GAP_MS)
+    || samples[samples.length - 1]!.atMs - samples[0]!.atMs > MAX_SCALPER_EXIT_SAMPLE_SPAN_MS) {
+    return empty("blocked", "provider sample cadence is discontinuous");
+  }
   const sourced = samples.filter((sample) => sample.sourceAtMs != null);
   if (input.requireSourceTimestamps && samples.some((sample) =>
     sample.sourceAtMs == null || !sample.sourceSequence)) {
@@ -178,6 +218,7 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
     || sample.sourceAtMs! > sample.atMs)
     || (sourceAgeMs != null && sourceAgeMs > age)
     || sourced.some((sample, index) => index > 0 && sample.sourceAtMs! < sourced[index - 1]!.sourceAtMs!)
+    || hasScalperSourceSequenceRegression(samples)
     || samples.some((sample, index) => index > 0
       && sample.sourceAtMs === samples[index - 1]!.sourceAtMs
       && sample.sourceSequence != null
@@ -218,6 +259,40 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
   const deterioration = input.currentWinningProbability != null && input.entryWinningProbability > 0
     ? Math.max(0, (input.entryWinningProbability - input.currentWinningProbability) / input.entryWinningProbability) : null;
   const preset = PRESETS[resolveScalperExitSensitivity(input.config.sensitivity)];
+  let targetBreachConfirmationCount = 0;
+  let firstTargetBreachAtMs: number | null = null;
+  const distinctBreachUpdates = new Set<string>();
+  for (let index = samples.length - 1; index >= 0; index--) {
+    const sample = samples[index]!;
+    const onLosingSide = input.side === "yes"
+      ? sample.price <= input.target!
+      : sample.price >= input.target!;
+    if (!onLosingSide) break;
+    const orderableSequence = orderableSourceSequence(sample.sourceSequence);
+    const updateKey = orderableSequence != null
+      ? `sequence:${orderableSequence}`
+      : sample.sourceAtMs != null
+        ? `source-time:${sample.sourceAtMs}`
+        : `local-time:${sample.atMs}`;
+    if (distinctBreachUpdates.has(updateKey)) continue;
+    distinctBreachUpdates.add(updateKey);
+    targetBreachConfirmationCount += 1;
+    firstTargetBreachAtMs = sample.atMs;
+  }
+  const targetBreachSpanMs = firstTargetBreachAtMs == null
+    ? null
+    : last.atMs - firstTargetBreachAtMs;
+  const quoteLagProtectionFloor = Math.min(
+    0.99,
+    input.entryWinningProbability + QUOTE_LAG_PROTECTION_MIN_GAIN,
+  );
+  const quoteLagProtectionEligible =
+    input.valuePreservingExecutableQuantity + 1e-9 >= input.remainingQuantity
+    && input.valuePreservingWinningProbability != null
+    && input.valuePreservingWinningProbability + 1e-9 >= quoteLagProtectionFloor;
+  const persistentTargetBreach = targetBreachConfirmationCount >= preset.breachConfirmations
+    && targetBreachSpanMs != null
+    && targetBreachSpanMs >= preset.breachPersistenceMs;
   // The conservative trajectory starts below robust velocity by its noise
   // allowance. Positive acceleration is useful but never required; negative
   // acceleration explicitly stops the projection when it runs out of speed.
@@ -255,6 +330,20 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
     volatilityPctPerSecond: volatility / input.target! * 100, noiseFloorPctPerSecond: noiseFloor / input.target! * 100,
     projectedPriceAtDeadline: projectedPrice, reserveSeconds: preset.reserveSeconds, sampleCount: samples.length,
     latestGapMs, worstGapMs, sourceAgeMs, projectionMethod: "weighted-median-mad-bounded-quadratic", projectionState };
+  const enriched = {
+    ...common,
+    targetBreachConfirmationCount,
+    targetBreachSpanMs,
+    quoteLagProtectionEligible,
+    quoteLagProtectionFloor,
+  };
+  if (persistentTargetBreach && quoteLagProtectionEligible) {
+    return {
+      disposition: "exit",
+      reason: "persistent target breach with value-preserving authenticated depth",
+      ...enriched,
+    };
+  }
   const crossingPlausible = remaining > preset.reserveSeconds
     && crossing !== null
     && crossing <= remaining - preset.reserveSeconds;
@@ -264,12 +353,16 @@ export function evaluateScalperExit(input: ScalperExitInput): ScalperExitDecisio
   const deteriorated = deterioration !== null && deterioration >= preset.minDeterioration;
   if (rapid && crossingPlausible && deteriorated && confirmations >= preset.confirmations) {
     if (isolatedOutlier) {
-      return { disposition: "watch", reason: "latest adverse print is an isolated trajectory outlier", ...common };
+      return { disposition: "watch", reason: "latest adverse print is an isolated trajectory outlier", ...enriched };
     }
-    return { disposition: "exit", reason: "confirmed rapid adverse target-crossing with Kalshi deterioration", ...common };
+    return { disposition: "exit", reason: "confirmed rapid adverse target-crossing with Kalshi deterioration", ...enriched };
   }
   return { disposition: "watch", reason: !crossingPlausible
     ? "target crossing not plausible before expiry"
     : !rapid ? "adverse trajectory is below conservative signal floor"
-      : "awaiting repeated adverse confirmation or Kalshi deterioration", ...common };
+      : persistentTargetBreach && !quoteLagProtectionEligible
+        ? "target breach confirmed but executable value does not preserve entry"
+        : targetBreachConfirmationCount > 0
+          ? "awaiting persistent target-breach confirmation"
+          : "awaiting repeated adverse confirmation or Kalshi deterioration", ...enriched };
 }

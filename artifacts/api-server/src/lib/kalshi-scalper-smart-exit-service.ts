@@ -208,6 +208,8 @@ function buildInput(params: {
   book: Awaited<ReturnType<typeof fetchOrderbookPrices>>; remainingQuantity: number;
   entryWinningPrice: number; executableQuantity: number;
   executablePrice: number | null; nowMs: number;
+  valuePreservingExecutableQuantity?: number;
+  valuePreservingWinningProbability?: number | null;
   evaluationConfig?: ScalperExitConfig;
   quoteAtMs?: number;
   bookAtMs?: number;
@@ -225,6 +227,10 @@ function buildInput(params: {
     executableQuantity: params.executableQuantity,
     remainingQuantity: params.remainingQuantity,
     depthAtFloor: params.executableQuantity >= params.remainingQuantity,
+    valuePreservingExecutableQuantity:
+      params.valuePreservingExecutableQuantity ?? params.executableQuantity,
+    valuePreservingWinningProbability:
+      params.valuePreservingWinningProbability ?? params.executablePrice,
     config: params.evaluationConfig ?? config,
     requireSourceTimestamps: true,
   };
@@ -325,6 +331,7 @@ async function executeExit(params: {
   order: ScalpOrder; lifecycleId: string; remainingQuantity: number;
   floor: number; history: ScalperExitSample[]; expectedExchangeIndex: number;
   configVersion: number; exitMode: ScalperExitConfig["mode"];
+  authorization: "trajectory" | "quote_lag";
 }): Promise<void> {
   const requestId = randomUUID();
   const clientOrderId = `scalp-exit-${requestId}`;
@@ -423,11 +430,21 @@ async function executeExit(params: {
       );
       const entryWinningPrice = params.order.winningContractCost
         ?? (params.order.side === "yes" ? params.order.entryYesPrice : 1 - params.order.entryYesPrice);
+      const valuePreservingFloor = Math.min(0.99, entryWinningPrice + 0.01);
+      const valuePreservingExecutable = computeScalperExitExecutableDepth(
+        params.order.side,
+        book.yesDepth,
+        book.noDepth,
+        params.remainingQuantity,
+        valuePreservingFloor,
+      );
       const finalDecision = evaluateScalperExit(buildInput({
         order: params.order, target, history: finalHistory, book,
         remainingQuantity: params.remainingQuantity, entryWinningPrice,
         executableQuantity: executable.quantity,
         executablePrice: executable.price,
+        valuePreservingExecutableQuantity: valuePreservingExecutable.quantity,
+        valuePreservingWinningProbability: valuePreservingExecutable.price,
         nowMs,
         evaluationConfig: latest.config,
       }));
@@ -436,6 +453,15 @@ async function executeExit(params: {
           ready: false as const,
           reason: `final policy revalidation: ${finalDecision.reason}`,
           evidence: { stage: "pre_submit_policy", finalDecision },
+        };
+      }
+      const finalUsesQuoteLagProtection = finalDecision.reason
+        === "persistent target breach with value-preserving authenticated depth";
+      if (finalUsesQuoteLagProtection && params.authorization !== "quote_lag") {
+        return {
+          ready: false as const,
+          reason: "final policy requires a stronger value-preserving order floor",
+          evidence: { stage: "pre_submit_policy_floor", finalDecision },
         };
       }
       return {
@@ -617,11 +643,21 @@ async function processOrder(
     remainingQuantity,
     floor,
   );
+  const valuePreservingFloor = Math.min(0.99, entryWinningPrice + 0.01);
+  const valuePreservingExecutable = computeScalperExitExecutableDepth(
+    order.side,
+    bookReceipt.value.yesDepth,
+    bookReceipt.value.noDepth,
+    remainingQuantity,
+    valuePreservingFloor,
+  );
   const nowMs = receiptAt;
   const input = buildInput({
     order, target, history, book: bookReceipt.value, remainingQuantity, entryWinningPrice,
     executableQuantity: executable.quantity,
     executablePrice: executable.price,
+    valuePreservingExecutableQuantity: valuePreservingExecutable.quantity,
+    valuePreservingWinningProbability: valuePreservingExecutable.price,
     nowMs,
     evaluationConfig,
     quoteAtMs: spotReceipt.receivedAtMs,
@@ -657,20 +693,25 @@ async function processOrder(
     publishHotBlock(order, remainingQuantity, "market expired before ownership claim", false);
     return;
   }
+  const quoteLagAuthorization = decision.reason
+    === "persistent target breach with value-preserving authenticated depth";
+  const authorizedFloor = quoteLagAuthorization ? valuePreservingFloor : floor;
+  const authorizedExecutable = quoteLagAuthorization ? valuePreservingExecutable : executable;
   const lifecycle = await runSmartExitDb(() => claimScalperExitLifecycle({
     id: randomUUID(), scalpOrderId: order.id, mode: evaluationConfig.mode, symbol: order.symbol,
     ticker: order.ticker, windowKey: order.windowKey, side: order.side, remainingQuantity,
     status: evaluationConfig.mode === "shadow" ? "advisory" : "requested",
-    triggerReason: decision.reason, evidence, executableQuantity: executable.quantity,
-    executablePrice: executable.price, entryWinningPrice, configVersion: evaluationVersion,
+    triggerReason: decision.reason, evidence, executableQuantity: authorizedExecutable.quantity,
+    executablePrice: authorizedExecutable.price, entryWinningPrice, configVersion: evaluationVersion,
   }));
   if (!lifecycle.id || evaluationConfig.mode === "shadow") return;
   if (!lifecycle.claimed && lifecycle.status !== "zero_fill") return;
   await executeExit({
-    order, lifecycleId: lifecycle.id, remainingQuantity, floor, history,
+    order, lifecycleId: lifecycle.id, remainingQuantity, floor: authorizedFloor, history,
     expectedExchangeIndex: refreshedMarket.exchangeIndex,
     configVersion: evaluationVersion,
     exitMode: evaluationConfig.mode,
+    authorization: quoteLagAuthorization ? "quote_lag" : "trajectory",
   });
 }
 

@@ -42,6 +42,8 @@ function input(overrides: Partial<ScalperExitInput> = {}): ScalperExitInput {
     executableQuantity: 10,
     remainingQuantity: 10,
     depthAtFloor: true,
+    valuePreservingExecutableQuantity: 10,
+    valuePreservingWinningProbability: 0.81,
     config: {
       ...DEFAULT_SCALPER_EXIT_CONFIG,
       enabled: true,
@@ -96,8 +98,8 @@ test("fails closed on stale evidence, target retreat, and insufficient depth", (
 test("projection rejects gaps and source timestamp freshness/order failures", () => {
   assert.equal(evaluateScalperExit(input({
     samples: [
-      { atMs: 7_000, price: 102.2 }, { atMs: 8_000, price: 102.0 },
-      { atMs: 9_000, price: 101.5 }, { atMs: 10_000, price: 100.7 },
+      { atMs: -40_000, price: 102.2 }, { atMs: -20_000, price: 102.0 },
+      { atMs: -10_000, price: 101.5 }, { atMs: 10_000, price: 100.7 },
     ],
   })).disposition, "blocked");
   const sourced = [
@@ -154,28 +156,133 @@ test("clock-controlled hot cadence and contention stay bounded without starving 
   assert.equal(selected.coalescedCount, 2);
 });
 
-test("source discontinuity resets the projection window and fresh observations recover promptly", () => {
+test("provider-native sparse cadence stays continuous but excessive gaps reset the projection window", () => {
   let history: ScalperExitSample[] = [
     { atMs: 1_000, price: 102, sourceAtMs: 990, sourceSequence: "a" },
     { atMs: 1_250, price: 101.8, sourceAtMs: 1_240, sourceSequence: "b" },
   ];
   history = advanceScalperExitSamples(
     history,
-    { atMs: 2_500, price: 101.5, sourceAtMs: 2_490, sourceSequence: "c" },
+    { atMs: 12_500, price: 101.5, sourceAtMs: 12_490, sourceSequence: "c" },
   );
+  assert.equal(history.length, 3);
+  history = advanceScalperExitSamples(history, { atMs: 28_000, price: 101.2, sourceAtMs: 27_990, sourceSequence: "d" });
   assert.equal(history.length, 1);
-  history = advanceScalperExitSamples(history, { atMs: 2_750, price: 101.2, sourceAtMs: 2_740, sourceSequence: "d" });
-  history = advanceScalperExitSamples(history, { atMs: 3_000, price: 100.9, sourceAtMs: 2_990, sourceSequence: "e" });
-  history = advanceScalperExitSamples(history, { atMs: 3_250, price: 100.6, sourceAtMs: 3_240, sourceSequence: "f" });
-  assert.equal(history.length, 4);
+  history = advanceScalperExitSamples(history, { atMs: 28_250, price: 100.9, sourceAtMs: 28_240, sourceSequence: "e" });
+  history = advanceScalperExitSamples(history, { atMs: 28_500, price: 100.6, sourceAtMs: 28_490, sourceSequence: "f" });
+  assert.equal(history.length, 3);
   assert.deepEqual(
-    advanceScalperExitSamples(history, { atMs: 3_500, price: 100.4, sourceAtMs: 3_240, sourceSequence: "f" }),
+    advanceScalperExitSamples(history, { atMs: 28_750, price: 100.4, sourceAtMs: 28_490, sourceSequence: "f" }),
     history,
   );
   assert.deepEqual(
-    advanceScalperExitSamples(history, { atMs: 3_500, price: 100.4, sourceAtMs: null }),
+    advanceScalperExitSamples(history, { atMs: 28_750, price: 100.4, sourceAtMs: null }),
     history,
   );
+});
+
+test("August 27 HYPE sparse-feed loss reaches a value-preserving exit", () => {
+  const nowMs = 40_000;
+  const result = evaluateScalperExit(input({
+    target: 83.1047,
+    nowMs,
+    expiresAtMs: nowMs + 43_870,
+    entryWinningProbability: 0.954,
+    currentWinningProbability: 0.9934,
+    valuePreservingWinningProbability: 0.9934,
+    quoteAtMs: nowMs,
+    bookAtMs: nowMs,
+    samples: [
+      { atMs: 18_000, price: 83.16, sourceAtMs: 17_900, sourceSequence: "8920297" },
+      { atMs: 21_000, price: 83.15, sourceAtMs: 20_900, sourceSequence: "8920298" },
+      { atMs: 30_000, price: 83.04, sourceAtMs: 29_900, sourceSequence: "8920339" },
+      { atMs: 30_250, price: 83.03, sourceAtMs: 30_150, sourceSequence: "8920340" },
+      { atMs: 40_000, price: 83.05, sourceAtMs: 39_900, sourceSequence: "8920344" },
+    ],
+    requireSourceTimestamps: true,
+  }));
+  assert.equal(result.disposition, "exit");
+  assert.equal(result.reason, "persistent target breach with value-preserving authenticated depth");
+  assert.equal(result.targetBreachConfirmationCount, 3);
+  assert.ok((result.targetBreachSpanMs ?? 0) >= 9_000);
+  assert.equal(result.quoteLagProtectionEligible, true);
+});
+
+test("August 27 ZEC sparse-feed loss reaches a value-preserving exit", () => {
+  const nowMs = 20_000;
+  const result = evaluateScalperExit(input({
+    target: 794.3515,
+    nowMs,
+    expiresAtMs: nowMs + 49_573,
+    entryWinningProbability: 0.966,
+    currentWinningProbability: 0.9909,
+    valuePreservingWinningProbability: 0.9909,
+    quoteAtMs: nowMs,
+    bookAtMs: nowMs,
+    samples: [
+      { atMs: 10_000, price: 794.8, sourceAtMs: 9_900, sourceSequence: "61537080" },
+      { atMs: 10_750, price: 794.59, sourceAtMs: 10_650, sourceSequence: "61537081" },
+      { atMs: 15_000, price: 794.2, sourceAtMs: 14_900, sourceSequence: "61537085" },
+      { atMs: 15_350, price: 793.8, sourceAtMs: 15_250, sourceSequence: "61537092" },
+      { atMs: 20_000, price: 793.37, sourceAtMs: 19_900, sourceSequence: "61537096" },
+    ],
+    requireSourceTimestamps: true,
+  }));
+  assert.equal(result.disposition, "exit");
+  assert.equal(result.targetBreachConfirmationCount, 3);
+  assert.equal(result.quoteLagProtectionEligible, true);
+});
+
+test("quote-lag protection rejects one print, recovery, and value below entry", () => {
+  const baseSamples: ScalperExitSample[] = [
+    { atMs: 6_000, price: 101, sourceAtMs: 5_900, sourceSequence: "a" },
+    { atMs: 7_000, price: 100.8, sourceAtMs: 6_900, sourceSequence: "b" },
+    { atMs: 8_000, price: 99.8, sourceAtMs: 7_900, sourceSequence: "c" },
+    { atMs: 10_000, price: 99.7, sourceAtMs: 9_900, sourceSequence: "d" },
+  ];
+  assert.notEqual(evaluateScalperExit(input({
+    samples: baseSamples.slice(0, 3).concat({ atMs: 10_000, price: 100.2, sourceAtMs: 9_900, sourceSequence: "d" }),
+    currentWinningProbability: 0.99,
+    entryWinningProbability: 0.95,
+    valuePreservingWinningProbability: 0.99,
+    requireSourceTimestamps: true,
+  })).disposition, "exit");
+  assert.notEqual(evaluateScalperExit(input({
+    samples: baseSamples,
+    currentWinningProbability: 0.955,
+    entryWinningProbability: 0.95,
+    valuePreservingWinningProbability: 0.955,
+    requireSourceTimestamps: true,
+  })).disposition, "exit");
+  assert.notEqual(evaluateScalperExit(input({
+    samples: baseSamples,
+    currentWinningProbability: 0.99,
+    entryWinningProbability: 0.95,
+    valuePreservingExecutableQuantity: 9,
+    valuePreservingWinningProbability: 0.99,
+    requireSourceTimestamps: true,
+  })).disposition, "exit");
+});
+
+test("quote-lag target-breach protection is symmetric for NO positions", () => {
+  const result = evaluateScalperExit(input({
+    side: "no",
+    target: 100,
+    samples: [
+      { atMs: 6_000, price: 99.4, sourceAtMs: 5_900, sourceSequence: "a" },
+      { atMs: 7_000, price: 99.8, sourceAtMs: 6_900, sourceSequence: "b" },
+      { atMs: 8_000, price: 100.2, sourceAtMs: 7_900, sourceSequence: "c" },
+      { atMs: 9_000, price: 100.4, sourceAtMs: 8_900, sourceSequence: "d" },
+      { atMs: 10_000, price: 100.6, sourceAtMs: 9_900, sourceSequence: "e" },
+    ],
+    currentWinningProbability: 0.98,
+    entryWinningProbability: 0.95,
+    valuePreservingWinningProbability: 0.98,
+    requireSourceTimestamps: true,
+  }));
+  assert.equal(result.disposition, "exit");
+  assert.equal(result.targetBreachConfirmationCount, 3);
+  assert.equal(result.quoteLagProtectionEligible, true);
 });
 
 test("Pyth whole-second timestamps accept distinct authoritative updates without fabricating duplicates", () => {
@@ -196,6 +303,85 @@ test("Pyth whole-second timestamps accept distinct authoritative updates without
     ).length,
     pythSamples.length,
   );
+});
+
+test("regressing orderable provider sequences are rejected at admission and policy boundaries", () => {
+  const history: ScalperExitSample[] = [
+    { atMs: 7_000, price: 101, sourceAtMs: 6_900, sourceSequence: "100" },
+    { atMs: 8_000, price: 100.8, sourceAtMs: 7_900, sourceSequence: "101" },
+  ];
+  assert.deepEqual(advanceScalperExitSamples(
+    history,
+    { atMs: 9_000, price: 99.8, sourceAtMs: 8_900, sourceSequence: "99" },
+  ), history);
+  assert.deepEqual(advanceScalperExitSamples(
+    history,
+    { atMs: 9_000, price: 99.8, sourceAtMs: 7_900, sourceSequence: "99" },
+  ), history);
+  assert.equal(evaluateScalperExit(input({
+    requireSourceTimestamps: true,
+    samples: [
+      { atMs: 7_000, price: 101, sourceAtMs: 6_900, sourceSequence: "100" },
+      { atMs: 8_000, price: 100.8, sourceAtMs: 7_900, sourceSequence: "101" },
+      { atMs: 9_000, price: 99.8, sourceAtMs: 8_900, sourceSequence: "99" },
+      { atMs: 10_000, price: 99.5, sourceAtMs: 9_900, sourceSequence: "102" },
+    ],
+  })).disposition, "blocked");
+  assert.equal(evaluateScalperExit(input({
+    side: "no",
+    requireSourceTimestamps: true,
+    samples: [
+      { atMs: 7_000, price: 99, sourceAtMs: 6_900, sourceSequence: "100" },
+      { atMs: 8_000, price: 99.4, sourceAtMs: 7_900, sourceSequence: "102" },
+      { atMs: 9_000, price: 100.2, sourceAtMs: 7_900, sourceSequence: "101" },
+      { atMs: 10_000, price: 100.5, sourceAtMs: 9_900, sourceSequence: "103" },
+    ],
+  })).disposition, "blocked");
+});
+
+test("opaque identities cannot hide a regressing numeric provider cursor", () => {
+  const yesHistory: ScalperExitSample[] = [
+    { atMs: 7_000, price: 101, sourceAtMs: 6_900, sourceSequence: "100" },
+    { atMs: 8_000, price: 100.8, sourceAtMs: 7_900, sourceSequence: "opaque" },
+  ];
+  assert.deepEqual(advanceScalperExitSamples(
+    yesHistory,
+    { atMs: 9_000, price: 99.8, sourceAtMs: 8_900, sourceSequence: "99" },
+  ), yesHistory);
+  for (const side of ["yes", "no"] as const) {
+    const prices = side === "yes" ? [101, 100.8, 99.8, 99.5] : [99, 99.2, 100.2, 100.5];
+    assert.equal(evaluateScalperExit(input({
+      side,
+      requireSourceTimestamps: true,
+      currentWinningProbability: 0.99,
+      entryWinningProbability: 0.95,
+      valuePreservingWinningProbability: 0.99,
+      samples: prices.map((price, index) => ({
+        atMs: 7_000 + index * 1_000,
+        price,
+        sourceAtMs: 6_900 + index * 1_000,
+        sourceSequence: ["100", "opaque", "99", "101"][index]!,
+      })),
+    })).disposition, "blocked");
+  }
+});
+
+test("opaque same-timestamp fingerprints cannot fabricate quote-lag persistence", () => {
+  const result = evaluateScalperExit(input({
+    requireSourceTimestamps: true,
+    currentWinningProbability: 0.99,
+    entryWinningProbability: 0.95,
+    valuePreservingWinningProbability: 0.99,
+    samples: [
+      { atMs: 6_000, price: 101, sourceAtMs: 5_000, sourceSequence: "5000:10100:10" },
+      { atMs: 7_000, price: 100.8, sourceAtMs: 6_000, sourceSequence: "6000:10080:10" },
+      { atMs: 9_000, price: 99.8, sourceAtMs: 9_000, sourceSequence: "9000:9980:10" },
+      { atMs: 9_500, price: 99.6, sourceAtMs: 9_000, sourceSequence: "9000:9960:10" },
+      { atMs: 10_000, price: 99.4, sourceAtMs: 9_000, sourceSequence: "9000:9940:10" },
+    ],
+  }));
+  assert.notEqual(result.reason, "persistent target breach with value-preserving authenticated depth");
+  assert.equal(result.targetBreachConfirmationCount, 1);
 });
 
 test("aborting a hung coalesced request evicts only that generation and permits an immediate replacement", async () => {

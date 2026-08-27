@@ -984,6 +984,10 @@ export interface ScalperSmartExitEvaluation {
   sourceAgeMs: number | null;
   projectionMethod: string | null;
   projectionState: string | null;
+  targetBreachConfirmationCount: number;
+  targetBreachSpanMs: number | null;
+  quoteLagProtectionEligible: boolean;
+  quoteLagProtectionFloor: number | null;
   sampleGapMs?: number | null;
   schedulerGapMs?: number | null;
   updatedAt: string;

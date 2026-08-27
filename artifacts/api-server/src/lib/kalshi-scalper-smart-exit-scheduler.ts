@@ -1,4 +1,9 @@
-import type { ScalperExitSample } from "./kalshi-scalper-smart-exit-policy.ts";
+import {
+  MAX_SCALPER_EXIT_SAMPLE_GAP_MS,
+  MAX_SCALPER_EXIT_SAMPLE_SPAN_MS,
+  isScalperSourceSequenceRegression,
+  type ScalperExitSample,
+} from "./kalshi-scalper-smart-exit-policy.ts";
 
 export interface ScalperHotCadenceSnapshot {
   latestGapMs: number | null;
@@ -169,15 +174,24 @@ export function advanceScalperExitSamples(
   history: readonly ScalperExitSample[],
   next: ScalperExitSample,
   maxHistory = 32,
-  maxGapMs = 900,
+  maxGapMs = MAX_SCALPER_EXIT_SAMPLE_GAP_MS,
+  maxSpanMs = MAX_SCALPER_EXIT_SAMPLE_SPAN_MS,
 ): ScalperExitSample[] {
   if (next.sourceAtMs == null || !next.sourceSequence) return [...history];
   const prior = history[history.length - 1];
-  const base = prior && next.atMs - prior.atMs > maxGapMs ? [] : [...history];
+  const base = prior && next.atMs - prior.atMs > maxGapMs
+    ? []
+    : history.filter((sample) => next.atMs - sample.atMs <= maxSpanMs);
   const comparablePrior = base[base.length - 1];
+  const lastOrderablePrior = [...base].reverse().find((sample) =>
+    sample.sourceSequence != null && /^\d+$/.test(sample.sourceSequence));
   if (comparablePrior && (
     next.atMs <= comparablePrior.atMs
     || (comparablePrior.sourceAtMs != null && next.sourceAtMs < comparablePrior.sourceAtMs)
+    || isScalperSourceSequenceRegression(
+      lastOrderablePrior?.sourceSequence,
+      next.sourceSequence,
+    )
     || (next.sourceAtMs === comparablePrior.sourceAtMs
       && next.sourceSequence === comparablePrior.sourceSequence)
   )) {
