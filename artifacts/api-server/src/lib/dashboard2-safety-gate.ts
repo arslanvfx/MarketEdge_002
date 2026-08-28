@@ -94,6 +94,11 @@ export interface Dashboard2SafetyGateInput {
   readonly policy: Dashboard2Policy;
   readonly visibleExecutableDepth: number | null;
   readonly observationOnly: boolean;
+  /**
+   * Paper simulations must clear every non-broker gate, but never require or
+   * acquire the real execution owner.
+   */
+  readonly paperSimulation?: boolean;
   readonly owner: string | null;
 }
 
@@ -227,6 +232,9 @@ export function evaluateDashboard2SafetyGate(input: Dashboard2SafetyGateInput): 
       blockingReason: "execution_observation_only" as const,
       capital,
     });
+  }
+  if (input.paperSimulation) {
+    return Object.freeze({ shadowQualified: true, executionAuthorized: true, blockingReason: null, capital });
   }
   if (input.owner !== "dashboard2_bot") {
     return Object.freeze({

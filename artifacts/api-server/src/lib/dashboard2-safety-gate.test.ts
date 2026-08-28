@@ -31,7 +31,7 @@ test("Safety Gate fail-closes every mandatory unknown", () => {
 test("Safety Gate honors minute and inclusive cost boundaries", () => {
   assert.equal(decide({ elapsedMinutes: 7.999 }).blockingReason, "entry_window_not_open");
   assert.equal(decide({ sideCost: 0.79 }).blockingReason, "execution_observation_only");
-  assert.equal(decide({ sideCost: 0.85 }).blockingReason, "execution_observation_only");
+  assert.equal(decide({ sideCost: 0.87 }).blockingReason, "execution_observation_only");
 });
 
 test("Safety Gate rejects missing or mismatched bound identity", () => {
@@ -63,4 +63,31 @@ test("observation-only is shadow-qualified but never execution-authorized", () =
   });
   assert.equal(ownerBlocked.shadowQualified, true);
   assert.equal(ownerBlocked.executionAuthorized, false);
+});
+
+test("paper simulation clears the full safety gate without requiring live ownership", () => {
+  const approved = evaluateDashboard2SafetyGate({
+    expectedIdentity: evidence().identity,
+    evidence: evidence(),
+    policy: DEFAULT_DASHBOARD2_POLICY,
+    visibleExecutableDepth: 2,
+    observationOnly: false,
+    paperSimulation: true,
+    owner: "current_bot",
+  });
+  assert.equal(approved.shadowQualified, true);
+  assert.equal(approved.executionAuthorized, true);
+  assert.equal(approved.blockingReason, null);
+
+  const stale = evaluateDashboard2SafetyGate({
+    expectedIdentity: evidence().identity,
+    evidence: { ...evidence(), bookFresh: false },
+    policy: DEFAULT_DASHBOARD2_POLICY,
+    visibleExecutableDepth: 2,
+    observationOnly: false,
+    paperSimulation: true,
+    owner: "current_bot",
+  });
+  assert.equal(stale.executionAuthorized, false);
+  assert.equal(stale.blockingReason, "book_stale");
 });

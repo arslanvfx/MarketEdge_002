@@ -28,7 +28,7 @@ export const DEFAULT_DASHBOARD2_CONFIG: Dashboard2Config = Object.freeze({
   version: 2,
   minEntryMinute: 8,
   sideCostFloor: 0.79,
-  sideCostCeiling: 0.85,
+  sideCostCeiling: 0.87,
   maxContracts: 2,
   maxDollarBudget: 10,
   paperStartingBalance: 5_000,
@@ -229,6 +229,15 @@ export function parseDashboard2Config(
   if (!bool(c.enabled) || typeof c.maxDailyLoss !== "number" || !Number.isFinite(c.maxDailyLoss) || (c.maxDailyLoss as number) < 0 || !Number.isInteger(c.maxConsecutiveLosses) || (c.maxConsecutiveLosses as number) < 1) bad("circuitBreaker fields are invalid");
   if (result.liveActivation !== false) bad("liveActivation cannot be enabled by configuration");
   return Object.freeze(result as Dashboard2Config);
+}
+
+/** Parsed configs have a canonical field order, so semantic equality survives
+ * independent database reads without relying on object identity. */
+export function dashboard2ConfigsEquivalent(
+  left: Dashboard2Config | undefined,
+  right: Dashboard2Config,
+): boolean {
+  return left !== undefined && JSON.stringify(left) === JSON.stringify(right);
 }
 
 /** Exact CreateOrder v2 mapping: the exchange limit field is always YES price. */

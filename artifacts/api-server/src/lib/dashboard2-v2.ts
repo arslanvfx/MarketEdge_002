@@ -11,6 +11,7 @@ import {
   dashboard2IocOrderFromQuote,
   dashboard2IocSellOrderFromQuote,
   dashboard2CircuitMetrics,
+  dashboard2ConfigsEquivalent,
   dashboard2ReservationAllowed,
   isDashboard2Mode,
   parseDashboard2Config,
@@ -81,7 +82,7 @@ export async function readDashboard2V2Config(mode: Dashboard2Mode): Promise<{ co
   return { config, updatedAt: row.rows[0].updated_at.toISOString() };
 }
 export function isDashboard2V2ConfigCurrent(mode: Dashboard2Mode, expected: Dashboard2Config): boolean {
-  return configCache.get(mode) === expected;
+  return dashboard2ConfigsEquivalent(configCache.get(mode), expected);
 }
 export async function readDashboard2V2SelectedMode(): Promise<{ selectedMode: Dashboard2Mode; updatedAt: string }> {
   await ensureDashboard2V2Tables();
@@ -173,7 +174,16 @@ export async function pauseDashboard2V2(mode: Dashboard2Mode, actorId: string): 
 }
 
 /** Paper fills use only the immutable executable depth supplied by the book store. */
-export async function runDashboard2PaperCandidate(input: { symbol: string; windowKey: string; quote: ExecutableBook | null; elapsedMinutes: number; config?: Dashboard2Config; authorizedCount?: number; decisionEvidence?: Record<string, unknown> }): Promise<string> {
+export async function runDashboard2PaperCandidate(input: {
+  symbol: string;
+  windowKey: string;
+  quote: ExecutableBook | null;
+  elapsedMinutes: number;
+  config?: Dashboard2Config;
+  authorizedCount?: number;
+  decisionEvidence?: Record<string, unknown>;
+  preSubmitGuard?: (state: Dashboard2ReservationGuardState) => boolean;
+}): Promise<string> {
   const config = input.config ?? (await readDashboard2V2Config("paper")).config;
   const symbol = input.symbol.toUpperCase();
   let status = "blocked", requested = 0, filled = 0, cost: number | null = null, details: object = {};
@@ -191,7 +201,16 @@ export async function runDashboard2PaperCandidate(input: { symbol: string; windo
       decisionEvidence: input.decisionEvidence ?? null };
   }
   if (!input.quote || status === "blocked") return "blocked";
-  const claim = await reserveDashboard2V2Entry({ mode: "paper", symbol, windowKey: input.windowKey, quote: input.quote, requestedContracts: requested, config });
+  const claim = await reserveDashboard2V2Entry({
+    mode: "paper",
+    symbol,
+    windowKey: input.windowKey,
+    quote: input.quote,
+    requestedContracts: requested,
+    config,
+    decisionEvidence: input.decisionEvidence,
+    preInsertGuard: input.preSubmitGuard,
+  });
   if (!claim) return "duplicate";
   await pool.query("UPDATE dashboard2_v2_ledger SET status=$1,filled_contracts=$2,entry_cost=$3,details=$4::jsonb,updated_at=NOW() WHERE id=$5 AND status='reserved'", [status, filled, cost, JSON.stringify(details), claim.id]);
   return claim.id;
@@ -236,9 +255,19 @@ export async function dashboard2V2EntryState(mode: Dashboard2Mode, symbol: strin
 
 /** Serializes all portfolio claims for a mode. Reserved and unknown rows are
  * charged at the configured ceiling until an exact fill is durably recorded. */
+export type Dashboard2ReservationGuardState = {
+  config: Dashboard2Config;
+  conflict: boolean;
+  exposure: number;
+  positions: number;
+  dailyPnl: number;
+  consecutiveLosses: number;
+};
+
 export async function reserveDashboard2V2Entry(input: {
   mode: Dashboard2Mode; symbol: string; windowKey: string; quote: ExecutableBook; requestedContracts: number; config: Dashboard2Config;
   decisionEvidence?: Record<string, unknown>;
+  preInsertGuard?: (state: Dashboard2ReservationGuardState) => boolean;
 }): Promise<{ id: string; clientOrderId: string } | null> {
   await ensureDashboard2V2Tables();
   const client = await pool.connect();
@@ -246,6 +275,17 @@ export async function reserveDashboard2V2Entry(input: {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`dashboard2-v2-reservation:${input.mode}`]);
+    await client.query("LOCK TABLE dashboard2_v2_ledger, dashboard2_v2_exit_intents IN SHARE ROW EXCLUSIVE MODE");
+    const persisted = await client.query<{ config: unknown }>(
+      "SELECT config FROM dashboard2_v2_config WHERE mode=$1 FOR SHARE",
+      [input.mode],
+    );
+    const transactionConfig = persisted.rows[0]
+      ? parseDashboard2Config(persisted.rows[0].config)
+      : DEFAULT_DASHBOARD2_CONFIG;
+    if (!dashboard2ConfigsEquivalent(transactionConfig, input.config)) {
+      await client.query("ROLLBACK"); return null;
+    }
     const totals = await client.query<{ duplicate: string; positions: string; exposure: string; unknown: string }>(
       `SELECT COUNT(*) FILTER (WHERE symbol=$2 AND window_key=$3)::text duplicate,
         COUNT(*) FILTER (WHERE settled_at IS NULL AND (status IN ('reserved','unknown') OR filled_contracts>0))::text positions,
@@ -253,10 +293,40 @@ export async function reserveDashboard2V2Entry(input: {
         COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN requested_contracts*($4::numeric) ELSE filled_contracts*COALESCE(entry_cost,0) END)
           FILTER (WHERE settled_at IS NULL),0)::text exposure
        FROM dashboard2_v2_ledger WHERE mode=$1`,
-      [input.mode, input.symbol.toUpperCase(), input.windowKey, input.config.sideCostCeiling],
+      [input.mode, input.symbol.toUpperCase(), input.windowKey, transactionConfig.sideCostCeiling],
     );
     const row = totals.rows[0]!;
-    if (Number(row.unknown) > 0 || !dashboard2ReservationAllowed({ duplicate: Number(row.duplicate) > 0, openPositions: Number(row.positions), exposure: Number(row.exposure), requestedContracts: input.requestedContracts, sideCostCeiling: input.config.sideCostCeiling, maxConcurrentPositions: input.config.maxConcurrentPositions, maxTotalExposure: input.config.maxTotalExposure })) {
+    const conflict = Number(row.duplicate) > 0 || Number(row.unknown) > 0;
+    const exposure = Number(row.exposure);
+    const positions = Number(row.positions);
+    if (Number(row.unknown) > 0 || !dashboard2ReservationAllowed({ duplicate: conflict, openPositions: positions, exposure, requestedContracts: input.requestedContracts, sideCostCeiling: transactionConfig.sideCostCeiling, maxConcurrentPositions: transactionConfig.maxConcurrentPositions, maxTotalExposure: transactionConfig.maxTotalExposure })) {
+      await client.query("ROLLBACK"); return null;
+    }
+    const settled = await client.query<{ settled_at: Date; pnl: string }>(
+      `SELECT l.settled_at,(COALESCE(x.exit_pnl,0) + CASE
+         WHEN l.filled_contracts-COALESCE(x.exited,0)>0
+         THEN (l.settlement_value-COALESCE(l.entry_cost,0))*(l.filled_contracts-COALESCE(x.exited,0))
+         ELSE 0 END)::text pnl
+       FROM dashboard2_v2_ledger l LEFT JOIN (
+         SELECT x.ledger_id,SUM(x.filled_contracts)::int exited,
+           SUM((x.exit_proceeds_price-l2.entry_cost)*x.filled_contracts) exit_pnl
+         FROM dashboard2_v2_exit_intents x JOIN dashboard2_v2_ledger l2 ON l2.id=x.ledger_id
+         WHERE x.filled_contracts>0 GROUP BY x.ledger_id
+       ) x ON x.ledger_id=l.id
+       WHERE l.mode=$1 AND l.settled_at IS NOT NULL ORDER BY l.settled_at DESC`,
+      [input.mode],
+    );
+    const metrics = dashboard2CircuitMetrics(
+      settled.rows.map(result => ({ settledAt: result.settled_at, pnl: Number(result.pnl) })),
+    );
+    if (input.preInsertGuard && !input.preInsertGuard({
+      config: transactionConfig,
+      conflict,
+      exposure,
+      positions,
+      dailyPnl: metrics.dailyPnl,
+      consecutiveLosses: metrics.consecutiveLosses,
+    })) {
       await client.query("ROLLBACK"); return null;
     }
     await client.query(`INSERT INTO dashboard2_v2_ledger(id,mode,symbol,window_key,ticker,side,status,requested_contracts,book_version,client_order_id,details)

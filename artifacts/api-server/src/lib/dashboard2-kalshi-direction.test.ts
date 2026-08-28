@@ -35,6 +35,13 @@ test("selects NO when only the direct NO ask is inside the entry band", () => {
   assert.equal(selected?.ask, 0.8);
 });
 
+test("selects a brief 85.5-cent NO dip inside the 87-cent ceiling", () => {
+  const quote = snapshot({ yesAsk: 0.145, noAsk: 0.855 });
+  const selected = selectDashboard2KalshiDirection(quote, 0.79, 0.87);
+  assert.equal(selected?.side, "no");
+  assert.equal(selected?.ask, 0.855);
+});
+
 test("fails closed when both opposite direct asks are inside the entry band", () => {
   assert.equal(selectDashboard2KalshiDirection(snapshot(), 0.79, 0.85), null);
 });

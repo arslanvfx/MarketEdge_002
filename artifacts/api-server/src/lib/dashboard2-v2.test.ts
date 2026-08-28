@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dashboard2CircuitMetrics, dashboard2EtDayBounds, dashboard2EtHour, dashboard2FinalizedPosition, dashboard2IocOrderFromQuote, dashboard2IocSellOrderFromQuote, dashboard2LifecyclePnl, dashboard2ReservationAllowed, dashboard2RoiPct, dashboard2WhatIfPosition, parseDashboard2Config } from "./dashboard2-v2-pure.ts";
+import { dashboard2CircuitMetrics, dashboard2ConfigsEquivalent, dashboard2EtDayBounds, dashboard2EtHour, dashboard2FinalizedPosition, dashboard2IocOrderFromQuote, dashboard2IocSellOrderFromQuote, dashboard2LifecyclePnl, dashboard2ReservationAllowed, dashboard2RoiPct, dashboard2WhatIfPosition, parseDashboard2Config } from "./dashboard2-v2-pure.ts";
 
 test("Dashboard2 V2 config has conservative immutable defaults", () => {
   const config = parseDashboard2Config({});
@@ -83,6 +83,17 @@ test("Dashboard2 V2 config supports a strict partial patch", () => {
   assert.throws(() => parseDashboard2Config({ unexpected: true }), /unknown config field/);
   assert.throws(() => parseDashboard2Config({ liveActivation: true }), /cannot be enabled/);
   assert.throws(() => parseDashboard2Config({ sideCostFloor: 0.9, sideCostCeiling: 0.8 }), /must not exceed/);
+});
+
+test("independent persisted config parses compare semantically, not by reference", () => {
+  const firstRead = parseDashboard2Config({ enabled: true });
+  const secondRead = parseDashboard2Config(JSON.parse(JSON.stringify(firstRead)));
+  assert.notEqual(firstRead, secondRead);
+  assert.equal(dashboard2ConfigsEquivalent(firstRead, secondRead), true);
+  assert.equal(
+    dashboard2ConfigsEquivalent(firstRead, parseDashboard2Config({ enabled: false }, secondRead)),
+    false,
+  );
 });
 
 test("Dashboard2 circuit metrics use ET day and trailing settled loss streak", () => {

@@ -112,6 +112,8 @@ export interface Dashboard2Status {
     yesAsk: number | null;
     noAsk: number | null;
     quoteAgeMs: number | null;
+    displayState: 'live' | 'refreshing' | 'previous_window' | 'waiting';
+    displaySourceWindowKey: string | null;
     visibleContracts: number;
     bookFresh: boolean;
     safety: 'approved' | 'waiting' | 'blocked';

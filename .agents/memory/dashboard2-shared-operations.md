@@ -27,10 +27,22 @@ Dashboard 2 Live Targets must display the best current quote independently of en
 
 **Why:** Filtering display data through the entry gate made values blink out whenever prices left the band or the authenticated book briefly reconnected, hiding useful real-time context.
 
-**How to apply:** Keep safety fail-closed, visibly label retained data as refreshing/stale, and show a near-top live decision feed with current market reasons plus durable bet/fill events. Keep Active Positions above Live Targets; Live Targets must use fixed rows/columns with no internal vertical scrollbar or expansion jitter.
+**How to apply:** Keep safety fail-closed, visibly label same-window refreshes and previous-window retention, and show a near-top live decision feed with current market reasons plus durable bet/fill events. Retained snapshots may supply display fields only; every execution check must rebuild from the current exact ticker and executable book. Keep Active Positions above Live Targets; Live Targets must use fixed rows/columns with no internal vertical scrollbar or expansion jitter.
 
 Dashboard 2 makes its own regular-entry decision from its authenticated Kalshi WebSocket top-of-book YES/NO asks for the exact ticker, then uses depth only to validate and execute that selected side.
 
 **Why:** Bot 2 is intentionally an independent bot, but weighted whole-order cost and generic spot trend are the wrong inputs for selecting direction. Direction must come from direct Kalshi YES/NO asks; depth answers only how much can fill.
 
 **How to apply:** Trigger from book updates, select only when exactly one direct ask is inside the configured band, and fail closed on stale/ticker-mismatched or dual-in-band books. Revalidate immediately before live submission and persist both asks plus the depth quote.
+
+Dashboard 2's regular-entry band is 79–87¢ inclusive.
+
+**Why:** A real XRP reversal reached 85.5¢ (displayed as 86¢) and Bot 1 caught it while Bot 2's former 85¢ ceiling rejected it before latency mattered.
+
+**How to apply:** Keep the default and saved operator ceiling aligned at 0.87, test the decimal 0.855 boundary explicitly, and derive dashboard labels from policy rather than hardcoding the band.
+
+Dashboard 2 paper fills must clear the same non-broker safety evidence as live and serialize final authorization with the durable reservation.
+
+**Why:** An asynchronous check followed by a separate reservation permits config, circuit, portfolio, or book state to change in between, making paper fills materially more optimistic than live.
+
+**How to apply:** Under the per-mode reservation lock, hold persisted config and ledger/exit writes stable, recompute portfolio and circuit state, then run a synchronous exact-book/direction/canonical-policy check immediately before insert. Paper never acquires live ownership or submits a broker order.

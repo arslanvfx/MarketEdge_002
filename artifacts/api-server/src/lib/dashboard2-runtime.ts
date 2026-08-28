@@ -7,26 +7,13 @@ import { getBalance } from "./kalshi-trader.ts";
 import { readCanonicalBotConfig } from "./kalshi-bot-state.ts";
 import { applyDashboard2CanonicalPolicy } from "./dashboard2-canonical-policy.ts";
 import { selectDashboard2KalshiDirection } from "./dashboard2-kalshi-direction.ts";
+import {
+  retainDashboard2MarketDisplay,
+  type Dashboard2MarketDisplaySnapshot,
+} from "./dashboard2-display-retention.ts";
 
 type ReadinessStatus = "ready" | "warming" | "blocked" | "stale";
 type WindowPhase = "preparing" | "armed" | "eligible" | "blocked";
-type Dashboard2DisplayQuote = {
-  ticker: string;
-  side: "yes" | "no";
-  sideCost: number;
-  marginalLimitCost: number;
-  visibleContracts: number;
-  seq: number;
-  updatedAt: number;
-  bookVersion: string;
-};
-
-type Dashboard2MarketDisplaySnapshot = {
-  windowKey: string;
-  ticker: string | null;
-  target: number | null;
-  quote: Dashboard2DisplayQuote | null;
-};
 
 const lastMarketDisplayBySymbol = new Map<string, Dashboard2MarketDisplaySnapshot>();
 
@@ -85,6 +72,10 @@ function decisionReasonLabel(reason: string | null): string {
     canonical_coin_paused: "this market is paused",
     canonical_budget_below_one_contract: "dollar stake is below one contract",
     kalshi_direction_ambiguous: "both YES and NO asks are in range; no direction selected",
+    no_direct_ask_in_entry_band: "neither direct ask is inside the entry band",
+    no_executable_depth: "selected direction has no complete executable contract",
+    awaiting_current_window_quote: "showing the previous window while the current market warms up",
+    waiting_for_first_quote: "waiting for the first authenticated quote",
     execution_observation_only: "monitoring current candidate",
   };
   return reason ? labels[reason] ?? reason.replaceAll("_", " ") : "monitoring";
@@ -190,27 +181,149 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
       targetProximityPositive: !config.proximityGuard.enabled || (signal.distancePct != null && signal.distancePct >= config.proximityGuard.minPct),
       availableFunding: funding, exposureAllowance: state.exposure >= config.maxTotalExposure ? 0 : Math.floor((config.maxTotalExposure - state.exposure) / config.sideCostCeiling),
     };
-    // Paper is intentionally an observation authorization: it never acquires
-    // broker capability and therefore does not require the live owner.
-    const decision = evaluateDashboard2SafetyGate({ expectedIdentity: evidence.identity, evidence, policy, visibleExecutableDepth: quote.visibleContracts, observationOnly: mode === "paper" ? true : !(owner.owner === "dashboard2_bot"), owner: owner.owner });
+    // Paper clears the full non-broker gate but never acquires broker
+    // capability and therefore does not require the live execution owner.
+    const decision = evaluateDashboard2SafetyGate({
+      expectedIdentity: evidence.identity,
+      evidence,
+      policy,
+      visibleExecutableDepth: quote.visibleContracts,
+      observationOnly: mode === "live" && owner.owner !== "dashboard2_bot",
+      paperSimulation: mode === "paper",
+      owner: owner.owner,
+    });
     const canonicalPolicy = applyDashboard2CanonicalPolicy({
       canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
       dashboardBudget: config.maxDollarBudget, maxContracts: dollarDerivedMaxContracts,
       intendedQuantity: decision.capital.quantity, now: new Date(now),
     });
     if (mode === "paper") {
-      if (!decision.shadowQualified || !canonicalPolicy.allowed) continue;
+      if (!decision.executionAuthorized || !canonicalPolicy.allowed) continue;
+      const placementPolicy = applyDashboard2CanonicalPolicy({
+        canonicalConfig: readCanonicalBotConfig(),
+        symbol,
+        mode,
+        sideCost: quote.sideCost,
+        dashboardBudget: config.maxDollarBudget,
+        maxContracts: dollarDerivedMaxContracts,
+        intendedQuantity: canonicalPolicy.cappedQuantity,
+        now: new Date(),
+      });
+      if (!placementPolicy.allowed) continue;
       const claim = await runDashboard2PaperCandidate({
         symbol,
         windowKey,
         elapsedMinutes,
         quote,
         config,
-        authorizedCount: canonicalPolicy.cappedQuantity,
+        authorizedCount: placementPolicy.cappedQuantity,
         decisionEvidence: entryDecisionEvidence,
+        preSubmitGuard: (finalState) => {
+          try {
+            const finalConfig = finalState.config;
+            const finalNow = Date.now();
+            const finalTarget = getKalshiCachedData(symbol);
+            const finalSignal = directionAndProximity(symbol, finalTarget?.value, finalNow);
+            const finalTargetFresh = Boolean(
+              finalTarget?.value != null
+              && finalTarget.ticker === exactTicker
+              && fresh(finalTarget.at, finalNow),
+            );
+            const finalDirectionSelection = selectDashboard2KalshiDirection(
+              dashboard2KalshiOrderbookService.getTopOfBook(exactTicker),
+              finalConfig.sideCostFloor,
+              finalConfig.sideCostCeiling,
+            );
+            const current = dashboard2KalshiOrderbookService.getExecutable(
+              exactTicker,
+              quote.side,
+              dollarDerivedMaxContracts,
+              finalConfig.sideCostFloor,
+              finalConfig.sideCostCeiling,
+            );
+            const finalPolicy = applyDashboard2CanonicalPolicy({
+              canonicalConfig: readCanonicalBotConfig(),
+              symbol,
+              mode,
+              sideCost: quote.sideCost,
+              dashboardBudget: finalConfig.maxDollarBudget,
+              maxContracts: dollarDerivedMaxContracts,
+              intendedQuantity: placementPolicy.cappedQuantity,
+              now: new Date(finalNow),
+            });
+            if (
+              finalDirectionSelection?.side !== quote.side
+              || !current
+              || current.bookVersion !== quote.bookVersion
+              || current.sideCost !== quote.sideCost
+              || current.marginalLimitCost !== quote.marginalLimitCost
+              || current.visibleContracts < placementPolicy.cappedQuantity
+              || !finalPolicy.allowed
+              || finalPolicy.cappedQuantity < placementPolicy.cappedQuantity
+              || !isDashboard2V2ConfigCurrent("paper", config)
+              || !dashboard2KalshiOrderbookService.isFresh(exactTicker)
+            ) return false;
+            const finalCircuitOpen = finalConfig.circuitBreaker.enabled && (
+              finalState.dailyPnl <= -finalConfig.circuitBreaker.maxDailyLoss
+              || finalState.consecutiveLosses >= finalConfig.circuitBreaker.maxConsecutiveLosses
+            );
+            const finalEvidence = {
+              identity: {
+                symbol,
+                ticker: exactTicker,
+                windowKey,
+                side: current.side,
+                bookVersion: current.bookVersion,
+              },
+              elapsedMinutes: (finalNow - windowStart) / 60_000,
+              sideCost: current.sideCost,
+              sequenceValid: true,
+              bookFresh: true,
+              signalPreparationComplete: finalTargetFresh && finalSignal.spotFresh,
+              hasDuplicateOrOpenPosition: finalState.conflict
+                || finalState.positions >= finalConfig.maxConcurrentPositions,
+              quietHoursAllows: dashboard2QuietHoursAllows(finalConfig.quietHours, finalNow)
+                && !finalCircuitOpen
+                && finalPolicy.allowed,
+              directionEvidencePositive: !finalConfig.directionGuard.enabled
+                || current.side === finalDirectionSelection.side,
+              targetProximityPositive: !finalConfig.proximityGuard.enabled
+                || (
+                  finalSignal.distancePct != null
+                  && finalSignal.distancePct >= finalConfig.proximityGuard.minPct
+                ),
+              availableFunding: remainingFunding,
+              exposureAllowance: finalState.exposure >= finalConfig.maxTotalExposure
+                ? 0
+                : Math.floor(
+                    (finalConfig.maxTotalExposure - finalState.exposure)
+                    / finalConfig.sideCostCeiling,
+                  ),
+            };
+            const finalDecision = evaluateDashboard2SafetyGate({
+              expectedIdentity: finalEvidence.identity,
+              evidence: finalEvidence,
+              policy: {
+                version: `dashboard2-v2-${finalConfig.version}`,
+                minEntryMinute: finalConfig.minEntryMinute,
+                sideCostFloor: finalConfig.sideCostFloor,
+                sideCostCeiling: finalConfig.sideCostCeiling,
+                maxContracts: dollarDerivedMaxContracts,
+              },
+              visibleExecutableDepth: current.visibleContracts,
+              observationOnly: false,
+              paperSimulation: true,
+              owner: owner.owner,
+            });
+            return finalDecision.executionAuthorized
+              && finalDecision.capital.quantity >= placementPolicy.cappedQuantity;
+          } catch {
+            return false;
+          }
+        },
       });
       if (claim !== "blocked" && claim !== "duplicate") {
-        remainingFunding = Math.max(0, (remainingFunding ?? 0) - canonicalPolicy.cappedQuantity * config.sideCostCeiling);
+        remainingFunding = Math.max(0, (remainingFunding ?? 0) - placementPolicy.cappedQuantity * config.sideCostCeiling);
       }
       continue;
     }
@@ -293,10 +406,8 @@ export async function getDashboard2RuntimeStatus(
     const market = getKalshiCachedData(normalized);
     const signal = directionAndProximity(normalized, market?.value, now);
     const previousDisplay = lastMarketDisplayBySymbol.get(normalized);
-    const retainedDisplay = previousDisplay?.windowKey === windowKey ? previousDisplay : null;
-    const ticker = market?.ticker ?? retainedDisplay?.ticker ?? null;
-    const target = market?.value ?? retainedDisplay?.target ?? null;
-    const topOfBook = ticker ? dashboard2KalshiOrderbookService.getTopOfBook(ticker) : null;
+    const currentTicker = market?.ticker ?? null;
+    const topOfBook = currentTicker ? dashboard2KalshiOrderbookService.getTopOfBook(currentTicker) : null;
     const executionDirectionSelection = selectDashboard2KalshiDirection(
       topOfBook,
       policy.sideCostFloor,
@@ -308,10 +419,10 @@ export async function getDashboard2RuntimeStatus(
       policy.sideCostCeiling,
       true,
     );
-    const liveQuotes = ticker
+    const liveQuotes = currentTicker
       ? (["yes", "no"] as const)
           .map(side => dashboard2KalshiOrderbookService.getExecutable(
-            ticker, side, policy.maxContracts, 0.01, 0.99,
+            currentTicker, side, policy.maxContracts, 0.01, 0.99,
           ))
           .filter((book): book is NonNullable<typeof book> => book !== null)
           .sort((a, b) =>
@@ -319,23 +430,39 @@ export async function getDashboard2RuntimeStatus(
             - distanceFromEntryBand(b.sideCost, policy.sideCostFloor, policy.sideCostCeiling)
           )
       : [];
-    const freshDisplayQuote = displayDirectionSelection
+    const currentDisplayQuote = displayDirectionSelection
       ? liveQuotes.find(quote => quote.side === displayDirectionSelection.side) ?? null
       : null;
-    const displayQuote = freshDisplayQuote
-      ?? (retainedDisplay?.quote?.ticker === ticker ? retainedDisplay.quote : null);
-    lastMarketDisplayBySymbol.set(normalized, {
+    const currentDisplaySnapshot: Dashboard2MarketDisplaySnapshot | null =
+      currentTicker && topOfBook
+        ? {
+            sourceWindowKey: windowKey,
+            ticker: currentTicker,
+            target: market?.value ?? null,
+            side: displayDirectionSelection?.side ?? null,
+            selectedAsk: displayDirectionSelection?.ask ?? null,
+            yesAsk: topOfBook.yesAsk,
+            noAsk: topOfBook.noAsk,
+            executableCost: currentDisplayQuote?.sideCost ?? null,
+            visibleContracts: currentDisplayQuote?.visibleContracts ?? 0,
+            bookVersion: topOfBook.bookVersion,
+            observedAt: topOfBook.updatedAt,
+          }
+        : null;
+    const retainedDisplay = retainDashboard2MarketDisplay(
+      previousDisplay ?? null,
+      currentDisplaySnapshot,
       windowKey,
-      ticker,
-      target,
-      quote: displayQuote,
-    });
-    const quoteInBand = Boolean(
-      displayQuote
-      && executionDirectionSelection
-      && displayQuote.side === executionDirectionSelection.side,
     );
-    const eligibleSide = quoteInBand ? displayQuote : null;
+    if (currentDisplaySnapshot) lastMarketDisplayBySymbol.set(normalized, currentDisplaySnapshot);
+    const display = retainedDisplay.snapshot;
+    const target = market?.value ?? display?.target ?? null;
+    const quoteInBand = Boolean(
+      currentDisplayQuote
+      && executionDirectionSelection
+      && currentDisplayQuote.side === executionDirectionSelection.side,
+    );
+    const eligibleSide = quoteInBand ? currentDisplayQuote : null;
     const dualInBand = Boolean(
       topOfBook
       && topOfBook.yesAsk !== null
@@ -345,7 +472,12 @@ export async function getDashboard2RuntimeStatus(
       && topOfBook.noAsk >= policy.sideCostFloor
       && topOfBook.noAsk <= policy.sideCostCeiling,
     );
-    const bookFresh = Boolean(ticker && dashboard2KalshiOrderbookService.isFresh(ticker));
+    const bookFresh = Boolean(
+      currentTicker
+      && dashboard2KalshiOrderbookService.isFresh(currentTicker)
+      && display?.ticker === currentTicker
+      && retainedDisplay.state === "live",
+    );
     const canonicalPolicy = eligibleSide
       ? applyDashboard2CanonicalPolicy({
           canonicalConfig: readCanonicalBotConfig(), symbol: normalized, mode: selected.selectedMode,
@@ -357,52 +489,62 @@ export async function getDashboard2RuntimeStatus(
 
     const safetyDecision = evaluateDashboard2SafetyGate({
       expectedIdentity: {
-         symbol: normalized, ticker: ticker ?? null, windowKey, side: displayQuote?.side ?? null,
-         bookVersion: displayQuote?.bookVersion ?? null,
+         symbol: normalized, ticker: currentTicker, windowKey, side: currentDisplayQuote?.side ?? null,
+         bookVersion: currentDisplayQuote?.bookVersion ?? null,
       },
       evidence: {
         identity: {
-           symbol: normalized, ticker: ticker ?? null, windowKey, side: displayQuote?.side ?? null,
-           bookVersion: displayQuote?.bookVersion ?? null,
+           symbol: normalized, ticker: currentTicker, windowKey, side: currentDisplayQuote?.side ?? null,
+           bookVersion: currentDisplayQuote?.bookVersion ?? null,
         },
         elapsedMinutes: elapsedSeconds / 60,
-         sideCost: displayQuote?.sideCost ?? null,
-         sequenceValid: freshDisplayQuote ? true : displayQuote ? null : null,
-        bookFresh: ticker ? bookFresh : null,
+         sideCost: currentDisplayQuote?.sideCost ?? null,
+         sequenceValid: currentDisplayQuote ? true : null,
+        bookFresh: currentTicker ? bookFresh : null,
         signalPreparationComplete: null,
         // These require legacy state or broad imports; Dashboard 2 observes them
         // as unknown rather than reading or mutating execution state.
         hasDuplicateOrOpenPosition: null, quietHoursAllows: eligibleSide ? canonicalPolicy!.allowed : null, directionEvidencePositive: null,
         targetProximityPositive: null, availableFunding: null, exposureAllowance: null,
       },
-       policy, visibleExecutableDepth: displayQuote?.visibleContracts ?? null,
+       policy, visibleExecutableDepth: currentDisplayQuote?.visibleContracts ?? null,
       observationOnly: true, owner,
     });
     const reason = dualInBand
       ? "kalshi_direction_ambiguous"
-      : !freshDisplayQuote && displayQuote
+      : retainedDisplay.state === "previous_window"
+      ? "awaiting_current_window_quote"
+      : retainedDisplay.state === "refreshing"
       ? "book_stale"
+      : retainedDisplay.state === "waiting"
+      ? "waiting_for_first_quote"
+      : !executionDirectionSelection
+      ? "no_direct_ask_in_entry_band"
+      : !currentDisplayQuote
+      ? "no_executable_depth"
       : canonicalPolicy?.reason ?? safetyDecision.blockingReason ?? "execution_observation_only";
 
     return {
       symbol: normalized,
-      ticker: ticker ?? null,
-      side: displayQuote?.side ?? null,
-      sideCost: displayDirectionSelection?.ask ?? null,
-      executableCost: displayQuote?.sideCost ?? null,
-      yesAsk: topOfBook?.yesAsk ?? null,
-      noAsk: topOfBook?.noAsk ?? null,
-      quoteAgeMs: topOfBook ? Math.max(0, now - topOfBook.updatedAt) : null,
-      visibleContracts: displayQuote?.visibleContracts ?? 0,
+      ticker: display?.ticker ?? currentTicker,
+      side: display?.side ?? null,
+      sideCost: display?.selectedAsk ?? null,
+      executableCost: display?.executableCost ?? null,
+      yesAsk: display?.yesAsk ?? null,
+      noAsk: display?.noAsk ?? null,
+      quoteAgeMs: display ? Math.max(0, now - display.observedAt) : null,
+      displayState: retainedDisplay.state,
+      displaySourceWindowKey: display?.sourceWindowKey ?? null,
+      visibleContracts: display?.visibleContracts ?? 0,
       target,
       spot: signal.spotPrice,
       distancePct: signal.distancePct,
       intendedQuantity: canonicalPolicy?.cappedQuantity ?? 0,
       effectiveBudget: canonicalPolicy?.effectiveBudget ?? null,
       sizingReason: canonicalPolicy?.limitingReason ?? null,
-      bookVersion: displayQuote?.bookVersion ?? null,
+      bookVersion: display?.bookVersion ?? null,
       bookFresh,
-       safety: safetyDecision.shadowQualified ? ("waiting" as const) : ("blocked" as const),
+       safety: eligibleSide && canonicalPolicy?.allowed ? ("waiting" as const) : ("blocked" as const),
       reason,
       signalsReady: false, preparing: false,
     };
@@ -447,9 +589,9 @@ export async function getDashboard2RuntimeStatus(
     {
       id: "strategy-preparation",
       label: "Strategy preparation",
-       status: "stale",
-       detail: "V2 safety evidence is scheduler-owned and is not read from legacy bot state",
-       updatedAt: null,
+       status: canonicalConfigAvailable ? "ready" : "blocked",
+       detail: "Fresh market identity, direction, proximity, portfolio, and capital evidence is rebuilt for every entry",
+       updatedAt: canonicalConfigAvailable ? nowIso : null,
     },
     {
       id: "entry-timing",
@@ -468,23 +610,31 @@ export async function getDashboard2RuntimeStatus(
         ? cachedMarkets.some(market => market.visibleContracts > 0) ? "ready" : "warming"
         : "stale",
       detail: bookConnection.ready
-        ? `${cachedMarkets.filter(market => market.visibleContracts > 0).length}/${cachedMarkets.length} markets have fresh 79–85¢ executable depth`
+        ? `${cachedMarkets.filter(market => market.visibleContracts > 0).length}/${cachedMarkets.length} markets have fresh ${Math.round(policy.sideCostFloor * 100)}–${Math.round(policy.sideCostCeiling * 100)}¢ executable depth`
         : `Authenticated stream disconnected; reconnect attempt ${bookConnection.reconnectAttempt}`,
       updatedAt: bookConnection.connectedAt,
     },
     {
       id: "safety-gate",
       label: "Safety Gate",
-      status: "blocked",
-       detail: selected.selectedMode === "live" ? (liveReadiness.activationReady ? "Live Safety Gate is ready" : liveReadiness.reasons.join(", ")) : "Paper Safety Gate evaluates selected-mode evidence",
+      status: selected.selectedMode === "paper"
+        ? selectedConfig.config.enabled && canonicalConfigAvailable ? "ready" : "blocked"
+        : liveReadiness.activationReady ? "ready" : "blocked",
+       detail: selected.selectedMode === "live"
+         ? (liveReadiness.activationReady ? "Live Safety Gate is ready" : liveReadiness.reasons.join(", "))
+         : "Paper fills require the complete live-equivalent Safety Gate; only broker ownership and submission are simulated",
       updatedAt: nowIso,
     },
     {
       id: "buy-executor",
       label: "Buy executor",
-      status: "blocked",
-       detail: selected.selectedMode === "live" ? "IOC executor is guarded by one-use authorization" : "Paper ledger executor",
-      updatedAt: null,
+      status: selected.selectedMode === "paper"
+        ? selectedConfig.config.enabled ? "ready" : "blocked"
+        : liveReadiness.activationReady && owner === "dashboard2_bot" ? "ready" : "blocked",
+       detail: selected.selectedMode === "live"
+         ? "IOC executor is guarded by one-use authorization"
+         : "Paper executor simulates a fill only after final quote, policy, and portfolio revalidation",
+      updatedAt: nowIso,
     },
     {
       id: "canonical-entry-controls",

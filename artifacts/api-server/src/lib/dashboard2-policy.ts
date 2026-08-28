@@ -21,7 +21,7 @@ export type Dashboard2QuoteDecision =
 export function createDashboard2Policy(existingMaxBetSize?: number | null): Dashboard2Policy {
   const configDerivedCap =
     Number.isFinite(existingMaxBetSize) && existingMaxBetSize! > 0
-      ? Math.floor(existingMaxBetSize! / 0.85)
+      ? Math.floor(existingMaxBetSize! / 0.87)
       : DASHBOARD2_CONSERVATIVE_MAX_CONTRACTS;
   const maxContracts = Math.max(
     0,
@@ -31,7 +31,7 @@ export function createDashboard2Policy(existingMaxBetSize?: number | null): Dash
     version: DASHBOARD2_POLICY_VERSION,
     minEntryMinute: 8,
     sideCostFloor: 0.79,
-    sideCostCeiling: 0.85,
+    sideCostCeiling: 0.87,
     maxContracts,
   });
 }

@@ -13,9 +13,9 @@ test("Dashboard 2.0 rejects before 8:00 and accepts at 8:00", () => {
 
 test("Dashboard 2.0 side-cost boundaries are inclusive and ceiling is absolute", () => {
   assert.equal(authorizeDashboard2Quote({ elapsedMinutes: 8, sideCost: 0.79, contractCount: 1 }).authorized, true);
-  assert.equal(authorizeDashboard2Quote({ elapsedMinutes: 8, sideCost: 0.85, contractCount: 1 }).authorized, true);
+  assert.equal(authorizeDashboard2Quote({ elapsedMinutes: 8, sideCost: 0.87, contractCount: 1 }).authorized, true);
   assert.deepEqual(
-    authorizeDashboard2Quote({ elapsedMinutes: 8, sideCost: 0.850001, contractCount: 1 }),
+    authorizeDashboard2Quote({ elapsedMinutes: 8, sideCost: 0.870001, contractCount: 1 }),
     { authorized: false, action: "reject", reason: "side_cost_above_ceiling" },
   );
 });
