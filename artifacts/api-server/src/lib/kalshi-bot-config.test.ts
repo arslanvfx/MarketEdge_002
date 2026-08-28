@@ -55,6 +55,17 @@ test("existing persisted configurations fall back to the legacy live execution g
   assert.equal(restored.liveExecutionGateway, "legacy");
 });
 
+test("disabled regular direction/freefall guard survives persistence and restart", () => {
+  const original: BotConfig = {
+    ...DEFAULT_BOT_CONFIG,
+    convictionDirectionGuardEnabled: false,
+  };
+  const stored = jsonRoundtrip(original);
+  const restored = applyStoredConfig(stored as unknown as Record<string, unknown>);
+
+  assert.equal(restored.convictionDirectionGuardEnabled, false);
+});
+
 test("ml_gate survives JSON roundtrip + DEFAULT_BOT_CONFIG spread", () => {
   const original: BotConfig = { ...DEFAULT_BOT_CONFIG, decisionMode: "ml_gate" };
   const stored = jsonRoundtrip(original);

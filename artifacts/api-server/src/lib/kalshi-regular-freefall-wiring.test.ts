@@ -39,3 +39,27 @@ test("dashboard distinguishes paper advisory and exposes regular-mode guard stat
   assert.match(source, />Live guard</);
   assert.match(source, /status-regular-guard-/);
 });
+
+test("one persisted false disables both regular direction guard checkpoints", () => {
+  const tickSource = readFileSync(
+    new URL("./kalshi-bot-tick.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    tickSource,
+    /\(S\.config\.convictionDirectionGuardEnabled \?\? true\) &&\s*candles\.length >= 2/,
+  );
+  assert.match(
+    tickSource,
+    /evaluateRegularFreefallPreSubmitGuard\(\{\s*enabled: S\.config\.convictionDirectionGuardEnabled \?\? true,/,
+  );
+
+  const routeSource = readFileSync(
+    new URL("../routes/kalshi-bot.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    routeSource,
+    /typeof convictionDirectionGuardEnabled === "boolean"[\s\S]*partial\.convictionDirectionGuardEnabled = convictionDirectionGuardEnabled/,
+  );
+});
