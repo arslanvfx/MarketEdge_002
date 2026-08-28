@@ -343,24 +343,12 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
         const storedCooldownMs = convictionAbortCooldownMs.get(cooldownKey) ?? CONVICTION_ABORT_COOLDOWN_MS;
         const cooldownActive   = abortedAt != null && Date.now() - abortedAt < storedCooldownMs;
 
-        // Always clear the abort-cooldown record on zone re-entry so that the
-        // 5-second loop can retry on its next evaluation even if we do not
-        // dispatch here (e.g. because the cooldown is still active).
-        if (abortedAt != null) {
+        // Retain an ACTIVE cooldown so authenticated-book deltas cannot bypass
+        // the same intentional rate limit. Once expired, remove the stale
+        // record and allow either trigger source to retry.
+        if (abortedAt != null && !cooldownActive) {
           convictionAbortCooldown.delete(cooldownKey);
-          if (cooldownActive) {
-            logger.info(
-              {
-                sym, windowKey,
-                yesAsk: yesAsk != null ? +yesAsk.toFixed(4) : null,
-                noAsk:  noAsk  != null ? +noAsk.toFixed(4)  : null,
-                lockPrice, lockPriceCap,
-                side: yesInZone ? "YES" : "NO",
-                remainingMs: Math.round(storedCooldownMs - (Date.now() - abortedAt)),
-              },
-              "[conviction-poller] zone entry — abort cooldown cleared (was active); loop will retry on next cycle",
-            );
-          }
+          convictionAbortCooldownMs.delete(cooldownKey);
         }
 
         // ── Pre-warm orderbook + immediate dispatch ───────────────────────────

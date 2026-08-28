@@ -318,10 +318,10 @@ export const CONVICTION_OB_CACHE_TTL_MS = 1_500;
 // (deriveConvictionZone(floor, cap)) before dispatching — belt-and-suspenders
 // so a future poller zone drift cannot dispatch out-of-zone ticks again.
 let _convictionZoneEntryFn:
-  | ((sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => void)
+  | ((sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => void | Promise<void>)
   | null = null;
 export function setConvictionZoneEntryCallback(
-  fn: (sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => void,
+  fn: (sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => void | Promise<void>,
 ): void {
   _convictionZoneEntryFn = fn;
 }
@@ -331,8 +331,8 @@ export function callConvictionZoneEntry(
   noAsk: number | null,
   ticker: string,
   target: number,
-): void {
-  _convictionZoneEntryFn?.(sym, yesAsk, noAsk, ticker, target);
+): void | Promise<void> {
+  return _convictionZoneEntryFn?.(sym, yesAsk, noAsk, ticker, target);
 }
 // Per-coin rolling price ticks from the conviction 1 s poller.
 // Used by the direction guard to detect consecutive-seconds adverse movement.

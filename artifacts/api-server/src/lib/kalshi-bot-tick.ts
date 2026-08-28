@@ -52,6 +52,7 @@ import {
   hasUnresolvedRegularIntent,
 } from "./kalshi-regular-order-intent";
 import { quoteAuthenticatedBookExecution } from "./kalshi-bot-authenticated-book-gateway";
+import { buildKalshi15mTicker } from "./kalshi-15m-ticker";
 import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service";
 import {
   describeRegularFreefallDecision,
@@ -1870,15 +1871,7 @@ async function _runBotTick(
   // (fetchKalshiTarget matches on close_time; windowKey "2026-07-18T00:15" returned
   // "KXNEAR15M-26JUL172030-30" = 20:30 EDT = 00:30 UTC = window close time).
   // Using the open time gives market_not_found 404 on every order attempt.
-  const _MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  const _windowCloseUtc = new Date(new Date(windowKey + ":00Z").getTime() + 15 * 60 * 1000); // close = open + 15 min
-  const _windowCloseEdt = new Date(_windowCloseUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
-  const _tyy  = String(_windowCloseEdt.getUTCFullYear()).slice(-2);
-  const _tmon = _MONTHS[_windowCloseEdt.getUTCMonth()];
-  const _tdd  = String(_windowCloseEdt.getUTCDate()).padStart(2, '0');
-  const _thh  = String(_windowCloseEdt.getUTCHours()).padStart(2, '0');
-  const _tmm  = String(_windowCloseEdt.getUTCMinutes()).padStart(2, '0');
-  const expectedTicker = `KX${sym}15M-${_tyy}${_tmon}${_tdd}${_thh}${_tmm}-${_tmm}`;
+  const expectedTicker = buildKalshi15mTicker(sym, windowKey) ?? "";
 
   if (S.config.decisionMode === "conviction") {
     if (
