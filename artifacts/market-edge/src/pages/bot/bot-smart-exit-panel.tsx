@@ -151,8 +151,8 @@ function ScalperSmartExitSection({
     // Live activation deliberately carries both fields in one authenticated request.
     void update({ mode, enabled: mode !== "off" });
   };
-  const actual = lifecycle?.summary.actual;
-  const shadow = lifecycle?.summary.shadowObserved;
+  const actual = lifecycle?.summary?.actual;
+  const shadow = lifecycle?.summary?.shadowObserved;
 
   return (
     <div className="mb-6 overflow-hidden rounded-xl border border-amber-300/25 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.11),transparent_38%),#070706] shadow-[0_18px_60px_rgba(0,0,0,0.45)]">
@@ -831,7 +831,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
         <div className="flex flex-col h-full bg-[#0d1017]">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-white/[0.02] px-4 py-2">
             <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-              Exit Lifecycle &amp; Effectiveness · {lifecycle?.summary.triggered ?? 0} triggered · {lifecycle?.summary.sold ?? 0} sold · {lifecycle?.summary.settled ?? 0} settled
+              Exit Lifecycle &amp; Effectiveness · {lifecycle?.summary?.triggered ?? 0} triggered · {lifecycle?.summary?.sold ?? 0} sold · {lifecycle?.summary?.settled ?? 0} settled
             </div>
             <button
               type="button"
