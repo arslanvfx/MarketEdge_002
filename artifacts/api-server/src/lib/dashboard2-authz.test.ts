@@ -3,13 +3,25 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { decideDashboard2OperatorAuthz } from "./dashboard2-authz.ts";
 
-test("Dashboard 2 operator authorization rejects unsigned and ordinary users", () => {
+test("Dashboard 2 operator authorization rejects unsigned users and enforces configured operators", () => {
   assert.equal(decideDashboard2OperatorAuthz({ userId: null }), "unauthenticated");
   assert.equal(decideDashboard2OperatorAuthz({
     userId: "user-ordinary",
     sessionClaims: { publicMetadata: { role: "member" } },
+    configuredUserIds: "user-operator",
   }), "forbidden");
-  assert.equal(decideDashboard2OperatorAuthz({ userId: "user-ordinary" }), "forbidden");
+  assert.equal(decideDashboard2OperatorAuthz({
+    userId: "user-ordinary",
+    configuredUserIds: "user-operator",
+  }), "forbidden");
+});
+
+test("Dashboard 2 allows signed-in users when no operator allowlist is configured", () => {
+  assert.equal(decideDashboard2OperatorAuthz({ userId: "user-signed-in" }), "allowed");
+  assert.equal(decideDashboard2OperatorAuthz({
+    userId: "user-signed-in",
+    configuredUserIds: " , ",
+  }), "allowed");
 });
 
 test("Dashboard 2 operator authorization allows only explicit IDs or verified roles", () => {

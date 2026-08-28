@@ -44,7 +44,11 @@ export function decideDashboard2OperatorAuthz(input: {
   configuredUserIds?: string | undefined;
 }): Dashboard2OperatorDecision {
   if (!input.userId) return "unauthenticated";
-  if (configuredOperators(input.configuredUserIds).has(input.userId)) return "allowed";
+  const operators = configuredOperators(input.configuredUserIds);
+  // Match the canonical Bot 1 control policy: in a single-user/dev setup with
+  // no explicit allowlist, any authenticated user may operate the dashboard.
+  if (operators.size === 0) return "allowed";
+  if (operators.has(input.userId)) return "allowed";
   const role = claimRole(input.sessionClaims);
   return role && OPERATOR_ROLES.has(role) ? "allowed" : "forbidden";
 }

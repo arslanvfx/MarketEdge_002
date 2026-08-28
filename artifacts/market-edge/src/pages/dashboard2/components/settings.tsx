@@ -150,11 +150,11 @@ export default function SettingsView({ mode }: { mode: 'paper' | 'live' }) {
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-[11px] text-muted-foreground uppercase tracking-wider mb-1.5 font-semibold">Max Contracts</label>
+                <label className="block text-[11px] text-muted-foreground uppercase tracking-wider mb-1.5 font-semibold">Contracts per bet</label>
                 <input type="number" step="1" {...register("maxContracts")} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground font-mono focus:border-primary/50 focus:ring-1 focus:ring-primary/30 outline-none transition-all" />
               </div>
               <div>
-                <label className="block text-[11px] text-muted-foreground uppercase tracking-wider mb-1.5 font-semibold">Max Concurrent</label>
+                <label className="block text-[11px] text-muted-foreground uppercase tracking-wider mb-1.5 font-semibold">Open positions at once</label>
                 <input type="number" step="1" {...register("maxConcurrentPositions")} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground font-mono focus:border-primary/50 focus:ring-1 focus:ring-primary/30 outline-none transition-all" />
               </div>
             </div>
