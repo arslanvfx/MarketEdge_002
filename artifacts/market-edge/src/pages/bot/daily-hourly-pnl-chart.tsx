@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -60,17 +62,24 @@ function HourTooltip({ active, payload }: { active?: boolean; payload?: TooltipP
 }
 
 export function DailyHourlyPnlChart({ mode }: { mode: "paper" | "live" }) {
+  const [daysAgo, setDaysAgo] = useState(0);
+  const selectedDate = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(Date.now() - daysAgo * 86_400_000));
   const { data, isLoading, isError } = useQuery<DailyHourlyPnlData>({
-    queryKey: ["daily-hourly-pnl", mode],
+    queryKey: ["daily-hourly-pnl", mode, selectedDate],
     queryFn: async () => {
-      const r = await fetch(`${API_BASE}/crypto/bot/daily-pnl-hourly?mode=${mode}`, {
+      const r = await fetch(`${API_BASE}/crypto/bot/daily-pnl-hourly?mode=${mode}&date=${selectedDate}`, {
         cache: "no-store",
         headers: { "Cache-Control": "no-cache" },
       });
       if (!r.ok) throw new Error("Failed to load hourly P&L");
       return r.json();
     },
-    refetchInterval: 15_000,
+    refetchInterval: daysAgo === 0 ? 15_000 : false,
     staleTime: 0,
   });
 
@@ -115,10 +124,22 @@ export function DailyHourlyPnlChart({ mode }: { mode: "paper" | "live" }) {
   return (
     <div className="bg-slate-900/60 border border-slate-700/50 rounded-xl p-4 mb-4">
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
         <div>
-          <h3 className="text-sm font-semibold text-slate-200">Today's P&L by Hour</h3>
-          <p className="text-xs text-slate-500 mt-0.5">12 AM – 12 AM ET · {mode === "live" ? "Live" : "Paper"}</p>
+          <h3 className="text-sm font-semibold text-slate-200">Daily P&amp;L by Hour</h3>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {new Date(`${selectedDate}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" })}
+            {" · "}12 AM – 12 AM ET · {mode === "live" ? "Live" : "Paper"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button aria-label="Previous day" onClick={() => setDaysAgo(v => Math.min(29, v + 1))} disabled={daysAgo >= 29} className="rounded-md border border-slate-700 p-1.5 text-slate-300 disabled:opacity-30">
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+          <span className="min-w-16 text-center text-xs font-medium text-slate-300">{daysAgo === 0 ? "Today" : `${daysAgo}d ago`}</span>
+          <button aria-label="Next day" onClick={() => setDaysAgo(v => Math.max(0, v - 1))} disabled={daysAgo === 0} className="rounded-md border border-slate-700 p-1.5 text-slate-300 disabled:opacity-30">
+            <ChevronRight className="h-4 w-4" />
+          </button>
         </div>
         {hasData && (
           <div className="flex gap-3 text-xs text-slate-400">
@@ -136,7 +157,7 @@ export function DailyHourlyPnlChart({ mode }: { mode: "paper" | "live" }) {
 
       {!hasData ? (
         <div className="h-32 flex items-center justify-center text-slate-500 text-sm">
-          No settled bets yet today
+          No settled bets on this date
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={140}>

@@ -32,3 +32,9 @@ description: Safety rules for comparing paper opportunities with live regular-or
 **Why:** A durable claim on the shared pool can sit behind unrelated analytics writes, while one transaction per symbol serializes simultaneous opportunities until their prices leave range.
 
 **How to apply:** Collect finalized same-window candidates for only a market-negligible interval, enforce duplicate/order/exposure limits once under cross-process locks, commit all intents before POST, then let every approved continuation submit concurrently.
+
+**Rule:** Bot 1 may offer a selectable movement-safety profile, but the strict profile is the default. A relaxed profile may downgrade only ordinary directional confirmation to advisory; unavailable evidence, target crossing, rapid moves, and adverse excursions remain hard stops. Paper and live must resolve the same selected profile.
+
+**Why:** The operator needs a reversible way to admit neutral or mildly unfavorable entries without weakening fail-closed market evidence or making paper/live comparisons invalid.
+
+**How to apply:** Treat the profile as an explicit global operator control, never as a decision-mode preset or automatic mode default. Persist both the raw guard verdict and the profile-resolved classification, and keep every downstream funding, intent, quote, exposure, and reconciliation boundary unchanged.

@@ -22,6 +22,7 @@ interface CoinSignalBoardProps {
   kalshiTargets: Record<string, number | null>;
   windowKey?: string | null;
   decisionMode?: string | null;
+  entrySafetyProfile?: "current" | "extreme_only";
   coinStability?: Record<string, CoinStabilityResult>;
   coinTrajectory?: Record<string, TrajectoryGateResult>;
   stabilityConfig?: StabilityThresholds | null;
@@ -76,7 +77,7 @@ function MetricPill({ value, ok }: { value: string; ok: boolean }) {
 
 const COIN_ORDER = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "NEAR", "ZEC"];
 
-export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, coinStability, coinTrajectory, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes, extremeCautionAborted, convictionDirectionBlocked, activeScheduleBracket }: CoinSignalBoardProps) {
+export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisionMode, entrySafetyProfile = "current", coinStability, coinTrajectory, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes, extremeCautionAborted, convictionDirectionBlocked, activeScheduleBracket }: CoinSignalBoardProps) {
   const isConviction = decisionMode === "conviction";
   const pinnedStrikes = useRef<Record<string, number>>({});
   for (const [sym, val] of Object.entries(kalshiTargets)) {
@@ -100,6 +101,7 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
         extremeCautionAborted={extremeCautionAborted}
         convictionDirectionBlocked={convictionDirectionBlocked}
         activeScheduleBracket={activeScheduleBracket}
+        entrySafetyProfile={entrySafetyProfile}
       />
     );
   }
@@ -109,6 +111,13 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
       <div className="flex flex-wrap items-center gap-2.5 px-3 sm:px-5 py-3 border-b border-border">
         <Activity className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Live Signals</h2>
+        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+          entrySafetyProfile === "extreme_only"
+            ? "bg-orange-500/10 text-orange-300 border-orange-500/25"
+            : "bg-emerald-500/10 text-emerald-300 border-emerald-500/25"
+        }`}>
+          Safety: {entrySafetyProfile === "extreme_only" ? "Extreme-only" : "Current"}
+        </span>
         {windowKey && (
           <span className="max-w-full text-xs leading-tight px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
             Window {wkToEstRange(windowKey)} {ET_LABEL}
@@ -161,15 +170,15 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
                                ? "bg-slate-500/15 text-slate-300 border-slate-500/25"
                                : "bg-orange-500/15 text-orange-300 border-orange-500/25"
                          }`}
-                         title={guard.advisory
-                           ? `Paper advisory: a live entry would be blocked${guard.reason ? ` (${guard.reason})` : ""}; paper entry still proceeds`
+                          title={guard.advisory
+                            ? `Extreme-only advisory: ordinary movement guard relaxed${guard.reason ? ` (${guard.reason})` : ""}; paper and live entries proceed`
                            : guard.evidenceClass === "unavailable"
                              ? `Guard unavailable${guard.reason ? ` (${guard.reason})` : ""}; live entry blocked fail-closed`
                              : `Momentum blocked${guard.reason ? ` (${guard.reason})` : ""}`}
                        >
                          <AlertTriangle className="w-2.5 h-2.5" />
-                         {guard.advisory
-                           ? "Would block live"
+                          {guard.advisory
+                            ? "Relaxed"
                            : guard.evidenceClass === "unavailable" ? "Unavailable" : "Blocked"}
                        </span>
                      ) : (
@@ -199,6 +208,7 @@ interface MarketConditionsBoardProps {
   extremeCautionAborted?: string[];
   convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; advisory?: boolean; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; evidenceClass?: "unavailable" | "adverse" | "clear"; reason?: string | null; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
   activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
+  entrySafetyProfile?: "current" | "extreme_only";
 }
 
 function useNow(intervalMs: number): number {
@@ -210,7 +220,7 @@ function useNow(intervalMs: number): number {
   return now;
 }
 
-function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, coinTrajectory, windowKey, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes, extremeCautionAborted, convictionDirectionBlocked, activeScheduleBracket }: MarketConditionsBoardProps) {
+function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability, coinTrajectory, windowKey, stabilityConfig, trajectoryConfig, maxBetMinWindowEntryMinutes, extremeCautionAborted, convictionDirectionBlocked, activeScheduleBracket, entrySafetyProfile = "current" }: MarketConditionsBoardProps) {
   const minER                 = stabilityConfig?.minER                 ?? 0.30;
   const maxOsc                = stabilityConfig?.maxOsc                ?? 8;
   const maxVolPct             = stabilityConfig?.maxVolPct             ?? 3.0;
@@ -239,6 +249,13 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
       <div className="flex flex-wrap items-center gap-2.5 px-3 sm:px-5 py-3 border-b border-border">
         <TrendingUp className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Market Conditions</h2>
+        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+          entrySafetyProfile === "extreme_only"
+            ? "bg-orange-500/10 text-orange-300 border-orange-500/25"
+            : "bg-emerald-500/10 text-emerald-300 border-emerald-500/25"
+        }`}>
+          Safety: {entrySafetyProfile === "extreme_only" ? "Extreme-only" : "Current"}
+        </span>
         {windowKey && (
           <span className="max-w-full text-xs leading-tight px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
             Window {wkToEstRange(windowKey)} {ET_LABEL}
@@ -326,7 +343,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
 
                         let tooltipText: string;
                         if (advisory) {
-                          tooltipText = `Paper advisory: a live entry would be blocked${reason ? ` (${reason})` : ""}; the paper entry still proceeds`;
+                          tooltipText = `Extreme-only advisory: ordinary movement guard relaxed${reason ? ` (${reason})` : ""}; paper and live entries proceed`;
                         } else if (isNoDataGate) {
                           tooltipText = `Guard unavailable${reason ? ` (${reason})` : ""} — entry blocked until authoritative price evidence recovers (fail-closed safety)`;
                         } else if (isTickGate) {
@@ -344,7 +361,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
                         }
 
                         const label = advisory
-                          ? "Would block live"
+                          ? "Relaxed"
                           : isNoDataGate
                           ? "Guard unavailable"
                           : evidenceClass === "adverse"

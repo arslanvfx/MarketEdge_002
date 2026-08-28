@@ -356,7 +356,7 @@ export const convictionEmergencyCloses = new Map<string, number>();
 
 export interface ConvictionDirectionBlockInfo {
   direction: "yes" | "no";
-  /** Paper-mode verdict only: the simulated entry proceeds, but live would block. */
+  /** Advisory verdict: the selected safety profile allows entry to proceed. */
   advisory?: boolean;
   /** Which gate fired: 7-second tick slope ("tick"), multi-candle slope
    *  ("candle-decline" | "candle-rise"), or fail-closed data outage ("no-data" —

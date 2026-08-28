@@ -14,6 +14,7 @@ import {
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, applyProximityCalibrationMigration, buildStreakSnapshot, restoreStreakState,
   applyQuietHoursAutoTuneDeltas,
+  normalizeEntrySafetyProfile,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry, type QuietHoursAutoTuneDelta, type QuietHoursV2,
 } from "./kalshi-bot-engine";
@@ -91,7 +92,11 @@ export async function loadBotConfigFromDB(): Promise<void> {
       .limit(1);
     if (rows.length > 0 && rows[0].config) {
       const saved = rows[0].config as Partial<BotConfig> & { mode?: BotMode };
-      S.config = { ...DEFAULT_BOT_CONFIG, ...saved };
+      S.config = {
+        ...DEFAULT_BOT_CONFIG,
+        ...saved,
+        entrySafetyProfile: normalizeEntrySafetyProfile(saved.entrySafetyProfile),
+      };
       if (saved.mode === "paper" || saved.mode === "live") {
         // applyStartupModeRestore: extracted to engine-core for unit-testability.
         const { effective, didDowngrade } = applyStartupModeRestore(saved.mode, process.env.NODE_ENV);

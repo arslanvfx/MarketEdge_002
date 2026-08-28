@@ -1293,12 +1293,31 @@ export function applyPlacementTimeReducedPct(
   return Math.floor(contractCount * (final_ / applied));
 }
 
+export type EntrySafetyProfile = "current" | "extreme_only";
+
+export function normalizeEntrySafetyProfile(value: unknown): EntrySafetyProfile {
+  return value === "extreme_only" ? "extreme_only" : "current";
+}
+
+/** Entry safety is an operator-global control, never a decision-mode preset. */
+export function stripEntrySafetyProfileFromModePreset(
+  config: Partial<BotConfig>,
+): Partial<BotConfig> {
+  const { entrySafetyProfile: _ignored, ...modePreset } = config;
+  return modePreset;
+}
+
 export interface BotConfig {
   /**
    * Bot 1 live order transport. The authenticated orderbook path is opt-in;
    * legacy remains the proven default for existing persisted configurations.
    */
   liveExecutionGateway?: "legacy" | "authenticated_book";
+  /**
+   * Bot 1 entry-movement policy. Missing or malformed persisted values resolve
+   * to "current"; "extreme_only" must always be selected explicitly.
+   */
+  entrySafetyProfile?: EntrySafetyProfile;
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
   signalThreshold: number;   // kept for config compat — not used for entry gating (see core-pair gate)
@@ -1714,6 +1733,7 @@ export function applyStartupModeRestore(
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
   liveExecutionGateway: "legacy",
+  entrySafetyProfile: "current",
   betSize: 1.00,
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry

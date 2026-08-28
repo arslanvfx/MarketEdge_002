@@ -2,6 +2,7 @@ import {
   checkFreefallGuard,
   type FreefallPreSubmitDecision,
 } from "./kalshi-scalper-policy.ts";
+import type { EntrySafetyProfile } from "./kalshi-bot-engine-core.ts";
 
 export const REGULAR_FREEFALL_CONSECUTIVE_SECONDS = 4;
 export const REGULAR_FREEFALL_RAPID_LOOKBACK_SECONDS = 4;
@@ -29,6 +30,52 @@ export interface RegularFreefallGuardInput {
 export interface RegularFreefallGuardDecision extends FreefallPreSubmitDecision {
   deferredUnavailable: boolean;
   secondsRemaining: number;
+}
+
+export interface RegularFreefallSafetyDecision {
+  allowed: boolean;
+  advisory: boolean;
+  classification: "clear" | "ordinary_movement" | "hard_boundary";
+}
+
+/**
+ * Apply the operator-selected Bot 1 entry profile without changing the
+ * underlying evidence collector. Extreme-only may relax ordinary directional
+ * confirmation, but never unavailable evidence, target crossing, rapid moves,
+ * or the independent adverse-excursion latch.
+ */
+export function applyRegularFreefallSafetyProfile(
+  decision: RegularFreefallGuardDecision,
+  profile: EntrySafetyProfile,
+): RegularFreefallSafetyDecision {
+  if (decision.allowed) {
+    return { allowed: true, advisory: false, classification: "clear" };
+  }
+  const result = decision.guardResult;
+  const hardBoundary =
+    result == null
+    || !result.evaluable
+    || result.wrongTargetSide
+    || result.rapidMoveBlocked
+    || result.adverseExcursionBlocked === true;
+
+  return hardBoundary
+    ? { allowed: false, advisory: false, classification: "hard_boundary" }
+    : profile === "extreme_only"
+      ? { allowed: true, advisory: true, classification: "ordinary_movement" }
+      : { allowed: false, advisory: false, classification: "ordinary_movement" };
+}
+
+export function applyOrdinaryMovementSafetyProfile(
+  blocked: boolean,
+  profile: EntrySafetyProfile,
+): RegularFreefallSafetyDecision {
+  if (!blocked) {
+    return { allowed: true, advisory: false, classification: "clear" };
+  }
+  return profile === "extreme_only"
+    ? { allowed: true, advisory: true, classification: "ordinary_movement" }
+    : { allowed: false, advisory: false, classification: "ordinary_movement" };
 }
 
 /**

@@ -57,6 +57,8 @@ import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service";
 import {
   describeRegularFreefallDecision,
   evaluateRegularFreefallPreSubmitGuard,
+  applyOrdinaryMovementSafetyProfile,
+  applyRegularFreefallSafetyProfile,
 } from "./kalshi-regular-freefall-guard";
 import { shouldPersistRegularFreefallSkip } from "./kalshi-freefall-telemetry";
 import { regularPlacementFunnel, type RegularPlacementTerminalOutcome } from "./kalshi-regular-placement-funnel";
@@ -107,6 +109,7 @@ import {
   convictionPriceTicks, shadowQhBypassActive,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
+  type ConvictionDirectionBlockInfo,
 } from "./kalshi-bot-state";
 import {
   REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
@@ -2448,6 +2451,8 @@ async function _runBotTick(
     );
   }
 
+  let relaxedMovementAdvisory: ConvictionDirectionBlockInfo | null = null;
+
   // ── Pipeline direction guard (all non-conviction modes) ──────────────────
   // Conviction mode already has its own guard above (with second-level ticks).
   // For pipeline/ml_gate/classic entries the signals tell you *where price
@@ -2462,23 +2467,51 @@ async function _runBotTick(
     const _pLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
     const _pDir = computeConvictionDirectionGate({ candles, direction, lookback: _pLookback });
     if (_pDir.blocked) {
-      releaseConvictionEntryReservation("pipeline direction guard");
-      logger.warn(
-        {
-          sym, direction, windowKey,
-          decisionMode: S.config.decisionMode,
-          fromPrice:    _pDir.fromPrice,
-          toPrice:      _pDir.toPrice,
-          slopePrice:   _pDir.slopePrice?.toFixed(2),
-          lookback:     _pLookback,
-        },
-        "[kalshi-bot] pipeline direction guard: price moving toward strike — order aborted",
+      const _pPolicy = applyOrdinaryMovementSafetyProfile(
+        true,
+        S.config.entrySafetyProfile ?? "current",
       );
-      setTickAbortReason(sym, windowKey,
-        `direction guard: price moving toward strike (slope ${_pDir.slopePrice?.toFixed(2) ?? "?"}/candle) — order aborted`);
-      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "pipeline direction guard");
-      markPlacementTerminal("direction", "pipeline direction guard");
-      return;
+      if (_pPolicy.advisory) {
+        relaxedMovementAdvisory = {
+          direction,
+          advisory: true,
+          gate: direction === "yes" ? "candle-decline" : "candle-rise",
+          evidenceClass: "adverse",
+          reason: "pipeline_direction_not_confirmed",
+          lookback: _pLookback,
+          fromPrice: _pDir.fromPrice ?? undefined,
+          toPrice: _pDir.toPrice ?? undefined,
+        };
+        convictionDirectionGuardBlockedMap.set(sym, relaxedMovementAdvisory);
+        logger.info(
+          {
+            sym, direction, windowKey,
+            entrySafetyProfile: S.config.entrySafetyProfile ?? "current",
+            fromPrice: _pDir.fromPrice,
+            toPrice: _pDir.toPrice,
+            slopePrice: _pDir.slopePrice,
+          },
+          "[kalshi-bot] extreme-only profile relaxed ordinary pipeline direction guard",
+        );
+      } else {
+        releaseConvictionEntryReservation("pipeline direction guard");
+        logger.warn(
+          {
+            sym, direction, windowKey,
+            decisionMode: S.config.decisionMode,
+            fromPrice:    _pDir.fromPrice,
+            toPrice:      _pDir.toPrice,
+            slopePrice:   _pDir.slopePrice?.toFixed(2),
+            lookback:     _pLookback,
+          },
+          "[kalshi-bot] pipeline direction guard: price moving toward strike — order aborted",
+        );
+        setTickAbortReason(sym, windowKey,
+          `direction guard: price moving toward strike (slope ${_pDir.slopePrice?.toFixed(2) ?? "?"}/candle) — order aborted`);
+        regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "pipeline direction guard");
+        markPlacementTerminal("direction", "pipeline direction guard");
+        return;
+      }
     }
     logger.info(
       {
@@ -2603,19 +2636,26 @@ async function _runBotTick(
     hasProduct: freefallProduct != null,
     authoritativeCommodityCadence: freefallProduct?.product.startsWith("PYTH:") ?? false,
   });
+  const regularFreefallPolicy = applyRegularFreefallSafetyProfile(
+    regularFreefall,
+    S.config.entrySafetyProfile ?? "current",
+  );
   const regularFreefallSignals = {
-    allowed: regularFreefall.allowed,
+    allowed: regularFreefallPolicy.allowed,
+    rawAllowed: regularFreefall.allowed,
+    profile: S.config.entrySafetyProfile ?? "current",
+    classification: regularFreefallPolicy.classification,
     evidenceClass: regularFreefall.allowed
       ? "clear"
       : regularFreefall.guardResult?.evaluable === true ? "adverse" : "unavailable",
-    advisory: false,
+    advisory: regularFreefallPolicy.advisory,
     cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "coinbase",
     reason: regularFreefall.reason,
     guardResult: regularFreefall.guardResult,
     sampleCoverageMs: regularFreefall.sampleCoverageMs,
     secondsRemaining: regularFreefall.secondsRemaining,
   } as const;
-  if (!regularFreefall.allowed) {
+  if (!regularFreefallPolicy.allowed) {
     const evidence = describeRegularFreefallDecision(regularFreefall);
     convictionDirectionGuardBlockedMap.set(sym, {
       direction,
@@ -2689,6 +2729,30 @@ async function _runBotTick(
     persistSkip(entryMode);
     if (entryMode === "live" && S.config.shadowPaperBets) persistSkip("paper");
     return;
+  } else if (regularFreefallPolicy.advisory) {
+    convictionDirectionGuardBlockedMap.set(sym, {
+      direction,
+      advisory: true,
+      gate: "tick",
+      evidenceClass: "adverse",
+      reason: regularFreefall.reason,
+      lookback: regularFreefall.guardResult?.samplesUsed ?? 0,
+      fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
+      toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
+    });
+    logger.info(
+      {
+        sym,
+        windowKey,
+        direction,
+        entryMode,
+        entrySafetyProfile: S.config.entrySafetyProfile ?? "current",
+        reason: regularFreefall.reason,
+      },
+      "[kalshi-bot] extreme-only profile relaxed ordinary final movement guard",
+    );
+  } else if (relaxedMovementAdvisory) {
+    convictionDirectionGuardBlockedMap.set(sym, relaxedMovementAdvisory);
   } else {
     convictionDirectionGuardBlockedMap.delete(sym);
   }
