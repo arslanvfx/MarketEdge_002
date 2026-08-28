@@ -7,7 +7,7 @@ test("Dashboard2 V2 config has conservative immutable defaults", () => {
   assert.equal(config.enabled, false);
   assert.equal(config.liveActivation, false);
   assert.equal(config.maxContracts, 2);
-  assert.equal(config.paperStartingBalance, 100);
+  assert.equal(config.paperStartingBalance, 5_000);
   assert(Object.isFrozen(config));
 });
 

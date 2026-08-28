@@ -31,7 +31,7 @@ export const DEFAULT_DASHBOARD2_CONFIG: Dashboard2Config = Object.freeze({
   sideCostCeiling: 0.85,
   maxContracts: 2,
   maxDollarBudget: 10,
-  paperStartingBalance: 100,
+  paperStartingBalance: 5_000,
   minAccountBalance: 0,
   maxTotalExposure: 10,
   maxConcurrentPositions: 2,
