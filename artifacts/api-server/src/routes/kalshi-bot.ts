@@ -48,7 +48,7 @@ import {
   reconcileRegularIntent,
 } from "../lib/kalshi-regular-order-reconcile";
 import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
-import { getDailyPnlSimulation, getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
+import { getDailyHourlyPnl, getDailyPnlSimulation, getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
 import { getRegularPlacementFunnelSnapshot } from "../lib/kalshi-regular-placement-funnel.ts";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
@@ -613,6 +613,26 @@ router.get("/crypto/bot/daily-pnl", async (req, res) => {
     const cfg = getBotState().config;
     const pnlResetAt = mode === "live" ? (cfg.livePnlResetAt ?? null) : (cfg.paperPnlResetAt ?? null);
     res.json(await getDailyTradingPnl(mode, pnlResetAt));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /crypto/bot/daily-pnl-hourly?mode=paper|live — per-ET-hour P&L for today.
+router.get("/crypto/bot/daily-pnl-hourly", async (req, res) => {
+  const requestedMode = req.query.mode;
+  const mode: BotMode =
+    requestedMode === "paper" || requestedMode === "live"
+      ? requestedMode
+      : getBotState().mode;
+  try {
+    res.set({
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    });
+    res.json(await getDailyHourlyPnl(mode));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

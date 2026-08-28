@@ -51,6 +51,63 @@ export const DAILY_TRADING_PNL_SQL = `
 `;
 
 /**
+ * Per-ET-hour P&L breakdown for today. Returns one row per hour (0–23) that
+ * has at least one settled bet, with regular and scalper P&L aggregated
+ * separately so the frontend can display combined and split views.
+ *
+ * $1 = mode
+ */
+export const DAILY_HOURLY_PNL_SQL = `
+  WITH bounds AS (
+    SELECT
+      date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')
+        AT TIME ZONE 'America/New_York' AS day_start_at,
+      (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') + INTERVAL '1 day')
+        AT TIME ZONE 'America/New_York' AS next_reset_at
+  ),
+  regular_hourly AS (
+    SELECT
+      EXTRACT(HOUR FROM b.exited_at AT TIME ZONE 'America/New_York')::int AS et_hour,
+      SUM(b.pnl) AS pnl
+    FROM kalshi_bot_bets b
+    CROSS JOIN bounds
+    WHERE b.mode = $1
+      AND b.source = 'bot'
+      AND b.archived_at IS NULL
+      AND b.action IN ('exit', 'late_recovery_exit', 'expired')
+      AND b.exited_at >= bounds.day_start_at
+      AND b.exited_at < bounds.next_reset_at
+    GROUP BY 1
+  ),
+  scalper_hourly AS (
+    SELECT
+      EXTRACT(HOUR FROM o.settled_at AT TIME ZONE 'America/New_York')::int AS et_hour,
+      SUM(o.pnl) AS pnl
+    FROM kalshi_scalp_orders o
+    CROSS JOIN bounds
+    WHERE o.mode = $1
+      AND o.outcome IN ('win', 'loss')
+      AND o.pnl IS NOT NULL
+      AND o.settled_at >= bounds.day_start_at
+      AND o.settled_at < bounds.next_reset_at
+    GROUP BY 1
+  ),
+  hours AS (
+    SELECT generate_series(0, 23) AS et_hour
+  )
+  SELECT
+    h.et_hour,
+    COALESCE(r.pnl, 0) AS regular_pnl,
+    COALESCE(s.pnl, 0) AS scalper_pnl,
+    COALESCE(r.pnl, 0) + COALESCE(s.pnl, 0) AS total_pnl
+  FROM hours h
+  LEFT JOIN regular_hourly r ON r.et_hour = h.et_hour
+  LEFT JOIN scalper_hourly s ON s.et_hour = h.et_hour
+  WHERE COALESCE(r.pnl, 0) != 0 OR COALESCE(s.pnl, 0) != 0
+  ORDER BY h.et_hour
+`;
+
+/**
  * Settlement-level rows used by the read-only what-if calculator. Keeping the
  * actual cost beside each realized P&L preserves the economics of differently
  * sized wins and losses instead of applying one multiplier to the daily total.

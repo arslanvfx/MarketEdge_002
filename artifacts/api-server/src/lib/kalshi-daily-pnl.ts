@@ -1,6 +1,7 @@
 import { pool } from "@workspace/db";
 import type { BotMode } from "./kalshi-bot-state.ts";
 import {
+  DAILY_HOURLY_PNL_SQL,
   DAILY_PNL_SIMULATION_ROWS_SQL,
   DAILY_TRADING_PNL_SQL,
 } from "./kalshi-daily-pnl-query.ts";
@@ -47,6 +48,51 @@ export async function getDailyTradingPnl(mode: BotMode, pnlResetAt?: string | nu
     regularPnl,
     scalperPnl,
     totalPnl: regularPnl + scalperPnl,
+  };
+}
+
+export interface DailyHourlyPnlBar {
+  /** ET hour 0–23 */
+  etHour: number;
+  regularPnl: number;
+  scalperPnl: number;
+  totalPnl: number;
+}
+
+export interface DailyHourlyPnl {
+  mode: BotMode;
+  timeZone: "America/New_York";
+  dayStartAt: string;
+  nextResetAt: string;
+  hours: DailyHourlyPnlBar[];
+}
+
+export async function getDailyHourlyPnl(mode: BotMode): Promise<DailyHourlyPnl> {
+  const result = await pool.query(DAILY_HOURLY_PNL_SQL, [mode]);
+
+  // Extract bounds from any row (all rows share the same computed bounds)
+  // We need to run a bounds-only query if no rows returned.
+  const boundsResult = await pool.query<{ day_start_at: Date; next_reset_at: Date }>(
+    `SELECT
+       date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York' AS day_start_at,
+       (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') + INTERVAL '1 day') AT TIME ZONE 'America/New_York' AS next_reset_at`,
+  );
+  const bounds = boundsResult.rows[0];
+  if (!bounds) throw new Error("Unable to compute daily P&L bounds");
+
+  const hours: DailyHourlyPnlBar[] = result.rows.map((row) => ({
+    etHour: Number(row["et_hour"]),
+    regularPnl: Number(row["regular_pnl"]),
+    scalperPnl: Number(row["scalper_pnl"]),
+    totalPnl: Number(row["total_pnl"]),
+  }));
+
+  return {
+    mode,
+    timeZone: "America/New_York",
+    dayStartAt: new Date(bounds.day_start_at).toISOString(),
+    nextResetAt: new Date(bounds.next_reset_at).toISOString(),
+    hours,
   };
 }
 

@@ -35,6 +35,7 @@ import { BotScalperPanel } from "./bot/bot-scalper-panel";
 import { BotSmartExitPanel } from "./bot/bot-smart-exit-panel";
 import { BotRegularIntentPanel } from "./bot/bot-regular-intent-panel";
 import { PnlWhatIfCalculator } from "./bot/pnl-what-if-calculator";
+import { DailyHourlyPnlChart } from "./bot/daily-hourly-pnl-chart";
 import { normalizeScalpOrders } from "./bot/scalper-ledger";
 import { readApiResponse } from "./bot/api-response";
 import type { GapAnalyticsResult } from "./bot/types";
@@ -865,6 +866,7 @@ export default function BotDashboard() {
           </div>
         )}
 
+        <DailyHourlyPnlChart mode={activeMode} />
         <PnlWhatIfCalculator
           mode={activeMode}
           isProduction={status?.isProductionEnv ?? false}
