@@ -21,7 +21,11 @@ type ConvictionBookDispatchDependencies = {
     book: KalshiTopOfBook,
   ) => void | Promise<void>;
   telemetry?: (event: string, fields: Record<string, unknown>) => void;
+  now?: () => number;
 };
+
+const UNCHANGED_TOP_RETRY_MS = 1_000;
+const MAX_REMEMBERED_TOPS = 256;
 
 /**
  * Process-local choke point shared by public-poller and authenticated-book
@@ -47,6 +51,7 @@ export class ConvictionDispatchInFlightGate {
 export class ConvictionBookDispatchCoordinator {
   private readonly queuedTickers = new Set<string>();
   private readonly inFlight = new Set<string>();
+  private readonly lastDispatchedTop = new Map<string, { fingerprint: string; at: number }>();
   private readonly deps: ConvictionBookDispatchDependencies;
 
   constructor(deps: ConvictionBookDispatchDependencies) {
@@ -93,7 +98,30 @@ export class ConvictionBookDispatchCoordinator {
       }
       const yesInZone = yesAsk != null && yesAsk >= candidate.lockPrice && yesAsk <= candidate.lockPriceCap;
       const noInZone = noAsk != null && noAsk >= candidate.lockPrice && noAsk <= candidate.lockPriceCap;
-      if (!yesInZone && !noInZone) continue;
+      if (!yesInZone && !noInZone) {
+        // Returning to the same price after leaving the zone is a new signal and
+        // must dispatch immediately rather than inheriting the prior retry age.
+        this.lastDispatchedTop.delete(key);
+        continue;
+      }
+      const now = this.deps.now?.() ?? Date.now();
+      // Only the selected side can change this candidate's executable entry.
+      // Opposite-side quote churn must not wake the full guarded tick.
+      const fingerprint = yesInZone
+        ? `YES:${top.yesBid}:${yesAsk}`
+        : `NO:${top.noBid}:${noAsk}`;
+      const previous = this.lastDispatchedTop.get(key);
+      if (
+        previous?.fingerprint === fingerprint
+        && now - previous.at < UNCHANGED_TOP_RETRY_MS
+      ) {
+        continue;
+      }
+      if (this.lastDispatchedTop.size >= MAX_REMEMBERED_TOPS && !this.lastDispatchedTop.has(key)) {
+        const oldestKey = this.lastDispatchedTop.keys().next().value;
+        if (oldestKey) this.lastDispatchedTop.delete(oldestKey);
+      }
+      this.lastDispatchedTop.set(key, { fingerprint, at: now });
       this.inFlight.add(key);
       this.emit("detected", {
         sym: candidate.sym, windowKey: candidate.windowKey, ticker,

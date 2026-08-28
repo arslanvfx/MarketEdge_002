@@ -1,4 +1,5 @@
 export const REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS = 30_000;
+export const CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS = 1_000;
 
 export function regularZeroFillRetryKey(
   mode: "paper" | "live",

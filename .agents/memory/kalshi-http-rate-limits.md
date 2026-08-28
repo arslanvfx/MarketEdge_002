@@ -7,4 +7,4 @@ Kalshi HTTP reads must share in-flight work and a bounded paced request lane. A 
 
 **Why:** Multiple independent bot pipelines request the same target windows. A short per-symbol cooldown caused synchronized retries, while an unbounded paced lane retained delayed async call chains until the API consumed gigabytes of memory.
 
-**How to apply:** Preserve ticker/window-safe cached targets during cooldown, keep exact live prices on the authenticated WebSocket path, never restore an all-market forced REST loop for live quotes, cap queued delay/work, drain non-success bodies, drop excess best-effort refreshes, and cancel queued reads when another request activates the cooldown.
+**How to apply:** Preserve ticker/window-safe cached targets during cooldown, and make Bot 1's final live-price gate consume a fresh exact-ticker authenticated WebSocket book before REST-derived caches. Never restore an all-market forced REST loop for live quotes; cap queued delay/work, drain non-success bodies, drop excess best-effort refreshes, and cancel queued reads when another request activates the cooldown.

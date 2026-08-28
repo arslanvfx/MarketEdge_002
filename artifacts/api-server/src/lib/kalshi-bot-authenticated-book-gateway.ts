@@ -56,8 +56,9 @@ export function quoteAuthenticatedBookExecution(
     || input.sideCostCeiling > 1
     || input.sideCostFloor > input.sideCostCeiling
   ) return null;
-  // A full requested-depth quote only. getExecutable may otherwise return a
-  // smaller visible quantity, which must never authorize a Bot 1 submission.
+  // Require at least one executable contract. The order is IOC, so partial
+  // fills are expected and tracked by actual fill count; requiring the entire
+  // requested size here turns normal thin-book conditions into missed entries.
   // Read from zero rather than filtering away favorable levels. A marketable
   // IOC cannot impose a minimum fill cost: Kalshi may price-improve into any
   // cheaper resting level. Therefore a cheaper visible level must invalidate
@@ -74,7 +75,7 @@ export function quoteAuthenticatedBookExecution(
     || !service.isFresh(input.ticker)
     || quote.ticker !== input.ticker
     || quote.side !== input.side
-    || quote.visibleContracts < input.requestedCount
+    || quote.visibleContracts < 1
     || !Number.isFinite(quote.bestExecutableCost)
     || quote.bestExecutableCost + Number.EPSILON < input.sideCostFloor
     || quote.marginalLimitCost < input.sideCostFloor
@@ -85,41 +86,41 @@ export function quoteAuthenticatedBookExecution(
   // buying NO therefore converts the conservative side ceiling back to YES.
   const sideCeilingCents = Math.ceil((quote.marginalLimitCost - Number.EPSILON) * 100);
   if (!Number.isInteger(sideCeilingCents) || sideCeilingCents < 0 || sideCeilingCents > 100) return null;
+  const authorizedCount = Math.min(input.requestedCount, Math.floor(quote.visibleContracts));
+  if (authorizedCount < 1) return null;
+  const fixedSideLimit = sideCeilingCents / 100;
   const limitPrice = input.side === "yes"
-    ? sideCeilingCents / 100
+    ? fixedSideLimit
     : (100 - sideCeilingCents) / 100;
-  const worstCaseCost = (sideCeilingCents * input.requestedCount) / 100;
-  const immutableVersion = quote.bookVersion;
-  const immutableMarginalCost = quote.marginalLimitCost;
+  const worstCaseCost = (sideCeilingCents * authorizedCount) / 100;
+  const quotedVersion = quote.bookVersion;
 
   return Object.freeze({
     ticker: input.ticker,
     side: input.side,
-    requestedCount: input.requestedCount,
+    requestedCount: authorizedCount,
     limitPrice,
     worstCaseCost,
-    bookVersion: immutableVersion,
-    marginalLimitCost: immutableMarginalCost,
+    bookVersion: quotedVersion,
+    marginalLimitCost: quote.marginalLimitCost,
     revalidate: () => {
       if (!service.isFresh(input.ticker)) return false;
       const current = service.getExecutable(
         input.ticker,
         input.side,
-        input.requestedCount,
+        authorizedCount,
         0,
-        input.sideCostCeiling,
+        fixedSideLimit,
       );
       return Boolean(
         current
         && current.ticker === input.ticker
         && current.side === input.side
-        && current.visibleContracts >= input.requestedCount
+        && current.visibleContracts >= authorizedCount
         && Number.isFinite(current.bestExecutableCost)
         && current.bestExecutableCost + Number.EPSILON >= input.sideCostFloor
         && current.marginalLimitCost >= input.sideCostFloor
-        && current.marginalLimitCost <= input.sideCostCeiling
-        && current.bookVersion === immutableVersion
-        && current.marginalLimitCost === immutableMarginalCost,
+        && current.marginalLimitCost <= fixedSideLimit,
       );
     },
   });

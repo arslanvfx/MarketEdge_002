@@ -48,6 +48,8 @@ export interface RegularOrderIntentKey {
   maxOrdersPerWindow?: number;
   /** Shared live exposure ceiling. Enforced atomically with the order cap. */
   maxTotalExposure?: number;
+  /** Mode-specific authoritative zero-fill retry floor. */
+  zeroFillRetryCooldownMs?: number;
 }
 
 export interface ClaimIntentResult {
@@ -63,13 +65,10 @@ interface PendingIntentClaim {
 
 interface PendingIntentCohort {
   claims: PendingIntentClaim[];
-  timer: ReturnType<typeof setTimeout>;
 }
 
-// A few milliseconds is enough to collect independent symbol continuations
-// from the same price-poll cycle without creating a market-relevant delay.
-// This replaces one serialized DB transaction per symbol with one cohort claim.
-const INTENT_COHORT_WINDOW_MS = 15;
+// Collect only claims that arrive in the same JavaScript turn. A microtask
+// preserves batching without imposing a fixed market-relevant delay.
 const pendingIntentCohorts = new Map<string, PendingIntentCohort>();
 
 export interface RegularExitIntentKey {
@@ -237,6 +236,7 @@ function claimBatchGroupKey(key: RegularOrderIntentKey): string {
     key.windowKey,
     key.maxOrdersPerWindow ?? "",
     key.maxTotalExposure ?? "",
+    key.zeroFillRetryCooldownMs ?? REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
   ].join("\u0000");
 }
 
@@ -259,6 +259,11 @@ async function claimRegularOrderIntentBatch(
     Number.isFinite(first.maxTotalExposure) && (first.maxTotalExposure ?? 0) > 0
       ? first.maxTotalExposure!
       : null;
+  const zeroFillRetryCooldownMs =
+    Number.isFinite(first.zeroFillRetryCooldownMs)
+      && (first.zeroFillRetryCooldownMs ?? 0) >= 0
+      ? first.zeroFillRetryCooldownMs!
+      : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS;
 
   const claimStartedAt = Date.now();
   const client = await criticalIntentPool.connect();
@@ -319,7 +324,7 @@ async function claimRegularOrderIntentBatch(
               AND resolved_at > NOW() - ($3::double precision * INTERVAL '1 millisecond')
             )
           )`,
-      [first.mode, first.windowKey, REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS],
+      [first.mode, first.windowKey, zeroFillRetryCooldownMs],
     );
     const blockedSymbols = new Set(facts.rows.map((row) => row.symbol.toUpperCase()));
     const cooldownSymbols = new Set(
@@ -458,11 +463,11 @@ export function claimRegularOrderIntent(
     }
     const cohort: PendingIntentCohort = {
       claims: [{ key, resolve, reject }],
-      timer: setTimeout(() => {
-        void flushPendingIntentCohort(groupKey);
-      }, INTENT_COHORT_WINDOW_MS),
     };
     pendingIntentCohorts.set(groupKey, cohort);
+    queueMicrotask(() => {
+      void flushPendingIntentCohort(groupKey);
+    });
   });
 }
 

@@ -112,6 +112,7 @@ import {
   type ConvictionDirectionBlockInfo,
 } from "./kalshi-bot-state";
 import {
+  CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS,
   REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
   regularZeroFillRetryKey,
   regularZeroFillRetryRemainingMs,
@@ -307,6 +308,15 @@ export function refreshTrajectoryForAllCoins(): void {
 // might still recover. Only exit when there is meaningful value to capture.
 const MIN_EXIT_CASHOUT_PER_CONTRACT = 0.15;
 
+type BotTickSource = "standard" | "authenticated_book";
+type PendingBotTick = {
+  kalshiTicker: string | null;
+  kalshiTarget: number | null;
+  yesPrice: number | null;
+  candles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>;
+  source: BotTickSource;
+};
+const pendingBotTicks = new Map<string, PendingBotTick>();
 
 export async function runBotTickForCoin(
   symbol: string,
@@ -314,18 +324,48 @@ export async function runBotTickForCoin(
   kalshiTarget: number | null,
   yesPrice: number | null,
   candles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>,
+  options?: { source?: BotTickSource },
 ): Promise<void> {
   if (!S.config.enabled) return;
 
   const sym = symbol.toUpperCase();
-  if (tickInFlight.has(sym)) return;
+  const requestedTick: PendingBotTick = {
+    kalshiTicker,
+    kalshiTarget,
+    yesPrice,
+    candles,
+    source: options?.source ?? "standard",
+  };
+  if (tickInFlight.has(sym)) {
+    const queued = pendingBotTicks.get(sym);
+    // A routine scheduler snapshot must never overwrite a newer authenticated
+    // book wake-up that is waiting for the current tick to release the lock.
+    if (queued?.source !== "authenticated_book" || requestedTick.source === "authenticated_book") {
+      pendingBotTicks.set(sym, requestedTick);
+    }
+    return;
+  }
   tickInFlight.add(sym);
 
   try {
-    await _runBotTick(sym, kalshiTicker, kalshiTarget, yesPrice, candles);
-  } catch (err) {
-    logger.warn({ err, sym }, "[kalshi-bot] tick error (non-fatal)");
+    let next: PendingBotTick | undefined = requestedTick;
+    while (next) {
+      pendingBotTicks.delete(sym);
+      try {
+        await _runBotTick(
+          sym,
+          next.kalshiTicker,
+          next.kalshiTarget,
+          next.yesPrice,
+          next.candles,
+        );
+      } catch (err) {
+        logger.warn({ err, sym, source: next.source }, "[kalshi-bot] tick error (non-fatal)");
+      }
+      next = pendingBotTicks.get(sym);
+    }
   } finally {
+    pendingBotTicks.delete(sym);
     tickInFlight.delete(sym);
   }
 }
@@ -981,7 +1021,10 @@ async function _runBotTick(
     // Persist at most once per (symbol, window) to avoid flooding the DB
     if (lastDecisionWindowKey.get(sym) !== windowKey) {
       lastDecisionWindowKey.set(sym, windowKey);
-      await persistBetRecord({
+      // Skip-history persistence is telemetry, not an execution prerequisite.
+      // Never hold the per-symbol tick lock behind a DB write: a fresh
+      // authenticated book update may already contain an actionable IOC.
+      void persistBetRecord({
         symbol: sym,
         windowKey,
         ticker: kalshiTicker,
@@ -990,7 +1033,10 @@ async function _runBotTick(
         signals: decision.signals,
         entryPrice: null,
         kalshiTarget,
-      });
+      }).catch((err) => logger.warn(
+        { err, sym, windowKey },
+        "[kalshi-bot] skip-history persistence failed (non-blocking)",
+      ));
     }
     return;
   }
@@ -1918,12 +1964,27 @@ async function _runBotTick(
     const _obCacheFresh = _cachedOb != null
       && Date.now() - _cachedOb.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
       && _cachedOb.ticker === expectedTicker;
+    const _wsTop = dashboard2KalshiOrderbookService.getTopOfBook(expectedTicker);
+    const _wsTopFresh = _wsTop != null
+      && _wsTop.ticker === expectedTicker
+      && dashboard2KalshiOrderbookService.isFresh(expectedTicker);
     const obPrices: { yesAsk: number | null; yesBid: number | null } | null =
-      _obCacheFresh && _cachedOb
+      _wsTopFresh && _wsTop
+        ? { yesAsk: _wsTop.yesAsk, yesBid: _wsTop.yesBid }
+        : _obCacheFresh && _cachedOb
         ? { yesAsk: _cachedOb.yesAsk, yesBid: _cachedOb.yesBid }
         : null;
     logger.debug(
-      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker, obCacheHit: _obCacheFresh },
+      {
+        sym,
+        windowKey,
+        expectedTicker,
+        cacheTickerWasDifferent: freshData?.ticker !== expectedTicker,
+        orderbookSource: _wsTopFresh ? "authenticated_ws" : _obCacheFresh ? "prepared_cache" : "none",
+        wsBookAgeMs: _wsTop ? Date.now() - _wsTop.updatedAt : null,
+        wsBookVersion: _wsTop?.bookVersion ?? null,
+        obCacheHit: _obCacheFresh,
+      },
       "[kalshi-bot] conviction live-price gate: prepared orderbook consumed",
     );
 
@@ -2758,12 +2819,16 @@ async function _runBotTick(
   }
 
   if (entryMode === "live") {
-    // The authenticated gateway is intentionally opt-in. Legacy pricing and
-    // submission remain byte-for-byte on the existing path unless selected.
+    // Conviction always uses the authenticated gateway. The explicit setting
+    // remains available for other live decision modes, but a stale persisted
+    // "legacy" value must never silently disable the low-latency conviction path.
     const authenticatedGatewayZone = S.config.decisionMode === "conviction"
       ? getEffectiveConvictionZone(sym, S.config)
       : { lockPrice: 0, lockPriceCap: 1 };
-    const authenticatedBookQuote = S.config.liveExecutionGateway === "authenticated_book"
+    const useAuthenticatedBookGateway =
+      S.config.decisionMode === "conviction"
+      || S.config.liveExecutionGateway === "authenticated_book";
+    const authenticatedBookQuote = useAuthenticatedBookGateway
       ? quoteAuthenticatedBookExecution({
           ticker: expectedTicker,
           side: direction,
@@ -2772,8 +2837,8 @@ async function _runBotTick(
           sideCostCeiling: authenticatedGatewayZone.lockPriceCap,
         }, dashboard2KalshiOrderbookService)
       : null;
-    if (S.config.liveExecutionGateway === "authenticated_book" && !authenticatedBookQuote) {
-      const reason = "authenticated book gateway requires a fresh exact book with full requested depth";
+    if (useAuthenticatedBookGateway && !authenticatedBookQuote) {
+      const reason = "authenticated book gateway requires a fresh exact book with executable depth";
       releaseConvictionEntryReservation(reason);
       setTickAbortReason(sym, windowKey, `gateway abort: ${reason}`);
       regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);
@@ -2781,6 +2846,10 @@ async function _runBotTick(
       return;
     }
     if (authenticatedBookQuote) {
+      // IOC authorizes only the complete contracts visible at the fixed limit.
+      // Use this capped quantity for every downstream reservation, POST, fill,
+      // exposure, and P&L operation.
+      contractCount = authenticatedBookQuote.requestedCount;
       logger.info(
         {
           sym,
@@ -2866,12 +2935,17 @@ async function _runBotTick(
         requestedCost: worstCaseRouteCost,
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
         maxTotalExposure: S.config.maxTotalExposure,
+        zeroFillRetryCooldownMs: S.config.decisionMode === "conviction"
+          ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS
+          : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
       });
       if (!claim.claimed) {
         if (claim.reason === "authoritative_zero_fill_cooldown") {
           windowZeroFillRetryAfter.set(
             regularZeroFillRetryKey("live", sym, windowKey),
-            Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+            Date.now() + (S.config.decisionMode === "conviction"
+              ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS
+              : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS),
           );
         }
         regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
@@ -3033,7 +3107,9 @@ async function _runBotTick(
         const retryKey = regularZeroFillRetryKey(entryMode, sym, windowKey);
         windowZeroFillRetryAfter.set(
           retryKey,
-          Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+          Date.now() + (S.config.decisionMode === "conviction"
+            ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS
+            : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS),
         );
         // Preserve the established key format consumed by the window-level
         // failed-fill guards and attempt counter.
@@ -3064,7 +3140,7 @@ async function _runBotTick(
           // Without this, the coin stays locked for the whole window after one 0-fill.
           releaseConvictionEntryReservation("entry order returned zero fills; retry allowed");
           setTickAbortReason(sym, windowKey,
-            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS / 1_000}s cooldown`);
+            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${(S.config.decisionMode === "conviction" ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS) / 1_000}s cooldown`);
         }
         // Confirmed zero fill (dead) — release the durable reservation so the
         // next tick may re-claim. This is a DEFINITE outcome, safe to release.

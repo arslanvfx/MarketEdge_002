@@ -72,7 +72,7 @@ import { evalClosedBets, reEvaluateSettledBets } from "./kalshi-bot-eval";
 import { evalShadowBets, checkAllParoles, recordShadowBet } from "./kalshi-bot-shadow";
 import { closePosition, persistBetRecord } from "./kalshi-bot-close";
 import { runBotTickForCoin, refreshTrajectoryForAllCoins } from "./kalshi-bot-tick";
-import { getConvictionLivePrice, getConvictionLivePriceSnapshot } from "./kalshi-conviction-poller";
+import { getConvictionLivePrice } from "./kalshi-conviction-poller";
 import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service";
 import {
   ConvictionBookDispatchCoordinator,
@@ -100,7 +100,14 @@ import {
 // 5-second scheduler loop.  The dispatch is fire-and-forget; all gates still
 // run inside runBotTickForCoin (live-price check, direction guard, candle
 // slope, etc.) — nothing is bypassed.
-const dispatchConvictionZoneEntry = (sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => {
+const dispatchConvictionZoneEntry = (
+  sym: string,
+  yesAsk: number | null,
+  noAsk: number | null,
+  ticker: string,
+  target: number,
+  source: "public_poller" | "authenticated_book" = "public_poller",
+) => {
   if (!S.config.enabled || S.paused || S.dbDegradedSince !== null) return;
   if (S.config.decisionMode !== "conviction") return;
   const wk = currentWindowKey();
@@ -131,7 +138,14 @@ const dispatchConvictionZoneEntry = (sym: string, yesAsk: number | null, noAsk: 
     yesAsk != null && noAsk != null
       ? (yesAsk + (1 - noAsk)) / 2
       : yesAsk ?? (noAsk != null ? 1 - noAsk : null);
-  return runBotTickForCoin(sym, ticker, target, pairedYesPrice, pred?.candles ?? []).catch((err) =>
+  return runBotTickForCoin(
+    sym,
+    ticker,
+    target,
+    pairedYesPrice,
+    pred?.candles ?? [],
+    { source: source === "authenticated_book" ? "authenticated_book" : "standard" },
+  ).catch((err) =>
     logger.warn({ err, sym }, "[conviction-poller-dispatch] per-coin tick error (non-fatal)"),
   );
 };
@@ -140,11 +154,18 @@ const dispatchConvictionZoneEntry = (sym: string, yesAsk: number | null, noAsk: 
 // create parallel pre-reservation paths; durable intent remains the final
 // cross-process/single-POST defense.
 const convictionDispatchInFlight = new ConvictionDispatchInFlightGate();
-setConvictionZoneEntryCallback((sym, yesAsk, noAsk, ticker, target) => {
+const dispatchGuardedConvictionZoneEntry = (
+  sym: string,
+  yesAsk: number | null,
+  noAsk: number | null,
+  ticker: string,
+  target: number,
+  source: "public_poller" | "authenticated_book",
+) => {
   const key = `${sym}:${currentWindowKey()}:${ticker}`;
   const attempt = convictionDispatchInFlight.run(
     key,
-    () => dispatchConvictionZoneEntry(sym, yesAsk, noAsk, ticker, target),
+    () => dispatchConvictionZoneEntry(sym, yesAsk, noAsk, ticker, target, source),
   );
   if (!attempt) {
     logger.info({ sym, ticker, windowKey: currentWindowKey() }, "[conviction-dispatch] poller/book trigger coalesced with guarded tick");
@@ -153,6 +174,9 @@ setConvictionZoneEntryCallback((sym, yesAsk, noAsk, ticker, target) => {
   return attempt.catch((err) => {
     logger.warn({ err, sym, ticker, windowKey: currentWindowKey() }, "[conviction-dispatch] guarded tick failed before Bot 1 error boundary");
   });
+};
+setConvictionZoneEntryCallback((sym, yesAsk, noAsk, ticker, target) => {
+  return dispatchGuardedConvictionZoneEntry(sym, yesAsk, noAsk, ticker, target, "public_poller");
 });
 
 // Authenticated orderbook updates are an additional trigger only. They use the
@@ -166,8 +190,7 @@ const convictionBookDispatch = new ConvictionBookDispatchCoordinator({
     S.config.enabled
     && !S.paused
     && S.dbDegradedSince === null
-    && S.config.decisionMode === "conviction"
-    && S.config.liveExecutionGateway === "authenticated_book",
+    && S.config.decisionMode === "conviction",
   isFresh: (ticker) => dashboard2KalshiOrderbookService.isFresh(ticker),
   getTopOfBook: (ticker) => dashboard2KalshiOrderbookService.getTopOfBook(ticker),
   candidatesForTicker: (ticker): readonly ConvictionBookCandidate[] => {
@@ -175,12 +198,13 @@ const convictionBookDispatch = new ConvictionBookDispatchCoordinator({
     return CRYPTO_COINS.flatMap(({ symbol }) => {
       const sym = symbol.toUpperCase();
       if (!KALSHI_SERIES[sym]) return [];
-      const snapshot = getConvictionLivePriceSnapshot(sym);
-      // The public snapshot supplies immutable market identity/strike only.
+      const snapshot = getKalshiCachedData(sym);
+      // The shared window cache supplies immutable market identity/strike only.
       // Exact current-window ticker matching below prevents a stale prior or
       // prematurely-published next-window market from reaching Bot 1.
-      if (!snapshot || snapshot.ticker !== ticker || snapshot.target == null
-        || !Number.isFinite(snapshot.target) || snapshot.target <= 0) return [];
+      if (!snapshot || snapshot.ticker !== ticker || snapshot.value == null
+        || snapshot.at == null || Date.now() - snapshot.at > 16 * 60_000
+        || !Number.isFinite(snapshot.value) || snapshot.value <= 0) return [];
       const expectedTicker = buildKalshi15mTicker(sym, windowKey);
       if (ticker !== expectedTicker) return [];
       const cooldownKey = `${sym}:${windowKey}`;
@@ -189,7 +213,7 @@ const convictionBookDispatch = new ConvictionBookDispatchCoordinator({
       if (abortedAt != null && Date.now() - abortedAt < cooldownMs) return [];
       const zone = getEffectiveConvictionZone(sym, S.config);
       const { lockPrice, lockPriceCap } = deriveConvictionZone(zone.lockPrice, zone.lockPriceCap);
-      return [{ sym, windowKey, ticker, target: snapshot.target, lockPrice, lockPriceCap }];
+      return [{ sym, windowKey, ticker, target: snapshot.value, lockPrice, lockPriceCap }];
     });
   },
   dispatch: (candidate, yesAsk, noAsk, book) => {
@@ -203,7 +227,14 @@ const convictionBookDispatch = new ConvictionBookDispatchCoordinator({
       fetchedAt: book.updatedAt,
       ticker: candidate.ticker,
     });
-    return callConvictionZoneEntry(candidate.sym, yesAsk, noAsk, candidate.ticker, candidate.target);
+    return dispatchGuardedConvictionZoneEntry(
+      candidate.sym,
+      yesAsk,
+      noAsk,
+      candidate.ticker,
+      candidate.target,
+      "authenticated_book",
+    );
   },
   telemetry: (event, fields) => {
     const message = event === "detected"

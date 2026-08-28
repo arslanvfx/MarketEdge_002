@@ -70,6 +70,55 @@ test("dispatcher coalesces burst updates and races while a guarded tick is activ
   await settle();
 });
 
+test("dispatcher sends unchanged top immediately once, then retries after zero-fill cooldown", async () => {
+  let now = 100;
+  let count = 0;
+  const coordinator = new ConvictionBookDispatchCoordinator({
+    isActive: () => true, isFresh: () => true, now: () => now,
+    getTopOfBook: () => ({
+      ticker: "KXBTC", yesAsk: .92, yesBid: .9, noAsk: .1, noBid: .08,
+      seq: now, updatedAt: now, bookVersion: `1:${now}`,
+    }),
+    candidatesForTicker: () => [candidate],
+    dispatch: () => { count += 1; },
+  });
+  coordinator.onAcceptedBookUpdate("KXBTC");
+  await settle();
+  assert.equal(count, 1, "first actionable top must dispatch immediately");
+
+  now = 999;
+  coordinator.onAcceptedBookUpdate("KXBTC");
+  await settle();
+  assert.equal(count, 1, "unchanged top must not churn the guarded tick");
+
+  now = 1_100;
+  coordinator.onAcceptedBookUpdate("KXBTC");
+  await settle();
+  assert.equal(count, 2, "unchanged top remains eligible after the one-second retry floor");
+});
+
+test("dispatcher sends a top-price change immediately during the retry interval", async () => {
+  let now = 100;
+  let yesAsk = .92;
+  let count = 0;
+  const coordinator = new ConvictionBookDispatchCoordinator({
+    isActive: () => true, isFresh: () => true, now: () => now,
+    getTopOfBook: () => ({
+      ticker: "KXBTC", yesAsk, yesBid: .9, noAsk: .1, noBid: .08,
+      seq: now, updatedAt: now, bookVersion: `1:${now}`,
+    }),
+    candidatesForTicker: () => [candidate],
+    dispatch: () => { count += 1; },
+  });
+  coordinator.onAcceptedBookUpdate("KXBTC");
+  await settle();
+  yesAsk = .93;
+  now = 101;
+  coordinator.onAcceptedBookUpdate("KXBTC");
+  await settle();
+  assert.equal(count, 2);
+});
+
 test("shared in-flight gate coalesces a public-poller and websocket race", async () => {
   const gate = new ConvictionDispatchInFlightGate();
   let resolvePoller!: () => void;
