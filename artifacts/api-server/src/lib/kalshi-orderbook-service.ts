@@ -2,7 +2,7 @@ import WebSocket from "ws";
 import { CRYPTO_COINS, getKalshiCachedData } from "./crypto.ts";
 import { hasKalshiCredentials, makeKalshiSignedHeaders } from "./kalshi-auth.ts";
 import { logger } from "./logger.ts";
-import { KalshiOrderbookStore, type ExecutableBook, type ExecutableSellBook, type KalshiSide } from "./kalshi-orderbook-store.ts";
+import { KalshiOrderbookStore, type ExecutableBook, type ExecutableSellBook, type KalshiSide, type KalshiTopOfBook } from "./kalshi-orderbook-store.ts";
 
 const WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2";
 const WS_SIGNING_PATH = "/trade-api/ws/v2";
@@ -20,6 +20,7 @@ export class KalshiOrderbookService {
   private nextId = 1;
   private connectedAt: number | null = null;
   private resnapshotPending = false;
+  private readonly bookUpdateListeners = new Set<(ticker: string) => void>();
 
   start(): void {
     if (this.started) return;
@@ -35,6 +36,15 @@ export class KalshiOrderbookService {
 
   getExecutable(ticker: string, side: KalshiSide, maxContracts: number, floor: number, ceiling: number): ExecutableBook | null {
     return this.store.getExecutable(ticker, side, maxContracts, floor, ceiling);
+  }
+
+  getTopOfBook(ticker: string): KalshiTopOfBook | null {
+    return this.store.getTopOfBook(ticker);
+  }
+
+  onBookUpdate(listener: (ticker: string) => void): () => void {
+    this.bookUpdateListeners.add(listener);
+    return () => this.bookUpdateListeners.delete(listener);
   }
 
   getExecutableSell(ticker: string, side: KalshiSide, maxContracts: number): ExecutableSellBook | null {
@@ -125,6 +135,8 @@ export class KalshiOrderbookService {
       const ticker = typeof event.msg?.market_ticker === "string" ? event.msg.market_ticker : undefined;
       if (!this.store.apply(raw)) {
         this.requestResnapshot({ ticker, reason: "malformed_or_sequence_gapped" });
+      } else if (ticker) {
+        for (const listener of this.bookUpdateListeners) listener(ticker);
       }
     } catch {
       // A malformed frame has no reliable ticker identity; invalidate all

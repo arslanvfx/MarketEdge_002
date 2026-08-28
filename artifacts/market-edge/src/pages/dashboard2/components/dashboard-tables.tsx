@@ -31,9 +31,12 @@ export function CompactLiveTargets({ markets }: { markets: Dashboard2Status['mar
                 <span className="w-14 text-right text-cyan-400 font-mono text-sm font-bold tabular-nums">{formatCents(m.sideCost)}</span>
               </div>
             </div>
+            <div className="text-right font-mono text-[11px] text-muted-foreground">
+              YES {formatCents(m.yesAsk)} · NO {formatCents(m.noAsk)}
+            </div>
             <div className="grid grid-cols-3 gap-3 text-xs">
               <div><span className="block text-muted-foreground">Target</span><span className="font-mono tabular-nums">{m.target !== null ? m.target.toFixed(2) : "—"}</span></div>
-              <div><span className="block text-muted-foreground">Planned</span><span className="font-mono tabular-nums">{m.intendedQuantity !== null && m.intendedQuantity > 0 ? formatDollar(m.intendedQuantity * (m.sideCost ?? 0)) : "—"}</span></div>
+              <div><span className="block text-muted-foreground">Planned</span><span className="font-mono tabular-nums">{m.intendedQuantity !== null && m.intendedQuantity > 0 ? formatDollar(m.intendedQuantity * (m.executableCost ?? 0)) : "—"}</span></div>
               <div><span className="block text-muted-foreground">Available</span><span className="font-mono tabular-nums">{m.visibleContracts}</span></div>
             </div>
             <div className="min-h-8 text-xs text-muted-foreground">
@@ -49,7 +52,7 @@ export function CompactLiveTargets({ markets }: { markets: Dashboard2Status['mar
           <thead className="bg-background/80 border-b">
             <tr className="text-xs uppercase tracking-wider text-muted-foreground">
               <th className="w-[11%] px-4 py-3 font-semibold">Market</th>
-              <th className="w-[18%] px-3 py-3 font-semibold text-right">Candidate / Ask</th>
+              <th className="w-[18%] px-3 py-3 font-semibold text-right">YES / NO asks</th>
               <th className="w-[15%] px-3 py-3 font-semibold text-right">Target</th>
               <th className="w-[14%] px-3 py-3 font-semibold text-right">Planned</th>
               <th className="w-[10%] px-3 py-3 font-semibold text-right">Avail</th>
@@ -76,11 +79,14 @@ export function CompactLiveTargets({ markets }: { markets: Dashboard2Status['mar
                           {formatCents(m.sideCost)}
                         </span>
                       </div>
+                       <div className="mt-0.5 text-[10px] text-muted-foreground">
+                         Y {formatCents(m.yesAsk)} · N {formatCents(m.noAsk)}
+                       </div>
                     </td>
                     <td className="px-3 py-3 text-right font-mono tabular-nums">{m.target !== null ? m.target.toFixed(2) : "—"}</td>
                     <td className="px-3 py-3 text-right font-mono tabular-nums">
-                      {m.intendedQuantity !== null && m.sideCost !== null && m.intendedQuantity > 0 ? (
-                        <div className="text-foreground">{formatDollar(m.intendedQuantity * m.sideCost)}</div>
+                      {m.intendedQuantity !== null && m.executableCost !== null && m.intendedQuantity > 0 ? (
+                        <div className="text-foreground">{formatDollar(m.intendedQuantity * m.executableCost)}</div>
                       ) : "—"}
                     </td>
                     <td className="px-3 py-3 text-right font-mono tabular-nums">

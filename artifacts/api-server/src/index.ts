@@ -490,13 +490,32 @@ app.listen(port, async (err) => {
     logger.error({ err }, "[dashboard2-v2] migration failed; scheduler remains fail-closed"),
   );
   let dashboard2TickRunning = false;
+  let dashboard2TickQueued = false;
   const dashboard2Tick = async () => {
-    if (dashboard2TickRunning) return;
+    if (dashboard2TickRunning) {
+      dashboard2TickQueued = true;
+      return;
+    }
     dashboard2TickRunning = true;
-    try { await runDashboard2Orchestrator(); }
-    catch (err) { logger.error({ err }, "[dashboard2-v2] scheduler pass failed"); }
-    finally { dashboard2TickRunning = false; }
+    try {
+      do {
+        dashboard2TickQueued = false;
+        await runDashboard2Orchestrator();
+      } while (dashboard2TickQueued);
+    } catch (err) {
+      logger.error({ err }, "[dashboard2-v2] scheduler pass failed");
+    } finally {
+      dashboard2TickRunning = false;
+    }
   };
+  let dashboard2BookTrigger: NodeJS.Timeout | null = null;
+  dashboard2KalshiOrderbookService.onBookUpdate(() => {
+    if (dashboard2BookTrigger) return;
+    dashboard2BookTrigger = setTimeout(() => {
+      dashboard2BookTrigger = null;
+      void dashboard2Tick();
+    }, 10);
+  });
   void dashboard2Tick();
   setInterval(() => void dashboard2Tick(), 2_000);
 

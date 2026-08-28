@@ -29,8 +29,8 @@ Dashboard 2 Live Targets must display the best current quote independently of en
 
 **How to apply:** Keep safety fail-closed, visibly label retained data as refreshing/stale, and show a near-top live decision feed with current market reasons plus durable bet/fill events. Keep Active Positions above Live Targets; Live Targets must use fixed rows/columns with no internal vertical scrollbar or expansion jitter.
 
-Dashboard 2 must take regular-entry direction from Bot 1’s fresh conviction quote for the exact ticker, then use its authenticated depth only to validate and execute that same side.
+Dashboard 2 makes its own regular-entry decision from its authenticated Kalshi WebSocket top-of-book YES/NO asks for the exact ticker, then uses depth only to validate and execute that selected side.
 
-**Why:** Letting Bot 2 independently choose the cheapest depth-book side and approve it with a generic cached trend produced opposite-side paper entries that were not comparable to Bot 1.
+**Why:** Bot 2 is intentionally an independent bot, but weighted whole-order cost and generic spot trend are the wrong inputs for selecting direction. Direction must come from direct Kalshi YES/NO asks; depth answers only how much can fill.
 
-**How to apply:** Match Bot 1’s YES-first conviction-zone semantics, fail closed when its 1.5-second snapshot is absent/stale or ticker-mismatched, and revalidate the chosen side immediately before live submission. Persist both raw conviction asks and the final depth quote with each entry.
+**How to apply:** Trigger from book updates, select only when exactly one direct ask is inside the configured band, and fail closed on stale/ticker-mismatched or dual-in-band books. Revalidate immediately before live submission and persist both asks plus the depth quote.

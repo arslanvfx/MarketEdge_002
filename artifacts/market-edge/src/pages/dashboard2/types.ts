@@ -108,6 +108,10 @@ export interface Dashboard2Status {
     ticker: string | null;
     side: 'yes' | 'no' | null;
     sideCost: number | null;
+    executableCost: number | null;
+    yesAsk: number | null;
+    noAsk: number | null;
+    quoteAgeMs: number | null;
     visibleContracts: number;
     bookFresh: boolean;
     safety: 'approved' | 'waiting' | 'blocked';

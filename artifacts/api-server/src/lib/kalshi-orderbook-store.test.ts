@@ -19,6 +19,16 @@ const delta = (seq: number, side: "yes" | "no", price: string, change: string, t
 test("Kalshi book applies snapshots and complementary executable depth", () => {
   const store = new KalshiOrderbookStore();
   assert.equal(store.apply(snapshot(), 1_000), true);
+  assert.deepEqual(store.getTopOfBook("KXTEST", 1_001), {
+    ticker: "KXTEST",
+    yesBid: .20,
+    yesAsk: .82,
+    noBid: .18,
+    noAsk: .80,
+    seq: 10,
+    updatedAt: 1_000,
+    bookVersion: "7:10",
+  });
   // YES consumes NO bids: 1-.18=.82 before 1-.15=.85.
   assert.deepEqual(store.getExecutable("KXTEST", "yes", 2, .79, .85, 1_001), {
     ticker: "KXTEST", side: "yes", sideCost: .82, marginalLimitCost: .82, visibleContracts: 2,

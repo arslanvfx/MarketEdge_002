@@ -6,8 +6,7 @@ import { completeDashboard2PaperExit, dashboard2SafetyAuthorizations, dashboard2
 import { getBalance } from "./kalshi-trader.ts";
 import { readCanonicalBotConfig } from "./kalshi-bot-state.ts";
 import { applyDashboard2CanonicalPolicy } from "./dashboard2-canonical-policy.ts";
-import { getConvictionLivePrice } from "./kalshi-conviction-poller.ts";
-import { selectDashboard2ConvictionSideFromSnapshot } from "./dashboard2-conviction-side.ts";
+import { selectDashboard2KalshiDirection } from "./dashboard2-kalshi-direction.ts";
 
 type ReadinessStatus = "ready" | "warming" | "blocked" | "stale";
 type WindowPhase = "preparing" | "armed" | "eligible" | "blocked";
@@ -43,7 +42,7 @@ function directionAndProximity(symbol: string, target: number | null | undefined
   const spotPrice = spot?.price;
   const spotFresh = Boolean(spot && fresh(predCache.get(symbol)?.at, now));
   const distancePct = target != null && spotPrice != null && spotPrice > 0 ? Math.abs(target - spotPrice) / spotPrice * 100 : null;
-  return { spotPrice: spotPrice ?? null, spotFresh, distancePct, direction: spot?.indicators.trend ?? null };
+  return { spotPrice: spotPrice ?? null, spotFresh, distancePct };
 }
 
 function contractCeilingForDollarStake(config: { maxDollarBudget: number; sideCostFloor: number }): number {
@@ -56,35 +55,20 @@ function distanceFromEntryBand(cost: number, floor: number, ceiling: number): nu
   return cost < floor ? floor - cost : cost > ceiling ? cost - ceiling : 0;
 }
 
-function selectConvictionSide(
-  symbol: string,
-  ticker: string,
-  floor: number,
-  ceiling: number,
-  allowNearest = false,
-) {
-  return selectDashboard2ConvictionSideFromSnapshot(
-    getConvictionLivePrice(symbol),
-    ticker,
-    floor,
-    ceiling,
-    allowNearest,
-  );
-}
-
-function convictionEvidence(selection: NonNullable<ReturnType<typeof selectDashboard2ConvictionSideFromSnapshot>>) {
+function kalshiDirectionEvidence(selection: NonNullable<ReturnType<typeof selectDashboard2KalshiDirection>>) {
   const snapshot = selection.snapshot;
   return {
-    source: "bot1_conviction_live_price",
+    source: "dashboard2_kalshi_websocket_top_of_book",
     selectedSide: selection.side,
     selectedAsk: selection.ask,
     yesAsk: snapshot.yesAsk,
     yesBid: snapshot.yesBid,
-    noAsk: snapshot.noAsk ?? (snapshot.yesBid !== null ? 1 - snapshot.yesBid : null),
-    ticker: snapshot.ticker ?? null,
-    target: snapshot.target,
-    fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
-    ageMs: Math.max(0, Date.now() - snapshot.fetchedAt),
+    noAsk: snapshot.noAsk,
+    noBid: snapshot.noBid,
+    ticker: snapshot.ticker,
+    updatedAt: new Date(snapshot.updatedAt).toISOString(),
+    ageMs: Math.max(0, Date.now() - snapshot.updatedAt),
+    bookVersion: snapshot.bookVersion,
   };
 }
 
@@ -100,6 +84,7 @@ function decisionReasonLabel(reason: string | null): string {
     canonical_smart_hours_forced_paper: "Smart Hours allows paper observation only",
     canonical_coin_paused: "this market is paused",
     canonical_budget_below_one_contract: "dollar stake is below one contract",
+    kalshi_direction_ambiguous: "both YES and NO asks are in range; no direction selected",
     execution_observation_only: "monitoring current candidate",
   };
   return reason ? labels[reason] ?? reason.replaceAll("_", " ") : "monitoring";
@@ -163,20 +148,23 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     if (!config.enabledSymbols.includes(symbol.toUpperCase())) continue;
     const target = getKalshiCachedData(symbol);
     const ticker = target?.ticker;
-    const convictionSelection = ticker
-      ? selectConvictionSide(symbol, ticker, config.sideCostFloor, config.sideCostCeiling)
-      : null;
-    const quote = ticker && convictionSelection
+    const topOfBook = ticker ? dashboard2KalshiOrderbookService.getTopOfBook(ticker) : null;
+    const directionSelection = selectDashboard2KalshiDirection(
+      topOfBook,
+      config.sideCostFloor,
+      config.sideCostCeiling,
+    );
+    const quote = ticker && directionSelection
       ? dashboard2KalshiOrderbookService.getExecutable(
           ticker,
-          convictionSelection.side,
+          directionSelection.side,
           dollarDerivedMaxContracts,
           config.sideCostFloor,
           config.sideCostCeiling,
         )
       : null;
     if (!quote) continue; // never consume a window before exact executable depth
-    const entryDecisionEvidence = convictionEvidence(convictionSelection!);
+    const entryDecisionEvidence = kalshiDirectionEvidence(directionSelection!);
     const exactTicker = quote.ticker;
     const state = await dashboard2V2EntryState(mode, symbol, windowKey);
     const signal = directionAndProximity(symbol, target?.value, now);
@@ -198,7 +186,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
       sequenceValid: true, bookFresh: dashboard2KalshiOrderbookService.isFresh(exactTicker), signalPreparationComplete: fresh(target?.at, now) && signal.spotFresh,
       hasDuplicateOrOpenPosition: state.conflict || state.positions >= config.maxConcurrentPositions,
       quietHoursAllows: dashboard2QuietHoursAllows(config.quietHours, now) && !circuitOpen && canonicalPreview.allowed,
-       directionEvidencePositive: !config.directionGuard.enabled || quote.side === convictionSelection!.side,
+       directionEvidencePositive: !config.directionGuard.enabled || quote.side === directionSelection!.side,
       targetProximityPositive: !config.proximityGuard.enabled || (signal.distancePct != null && signal.distancePct >= config.proximityGuard.minPct),
       availableFunding: funding, exposureAllowance: state.exposure >= config.maxTotalExposure ? 0 : Math.floor((config.maxTotalExposure - state.exposure) / config.sideCostCeiling),
     };
@@ -248,7 +236,11 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     remainingFunding = Math.max(0, (remainingFunding ?? 0) - placementPolicy.cappedQuantity * config.sideCostCeiling);
     const authorization = dashboard2SafetyAuthorizations.issue({ mode, symbol, ticker: exactTicker, windowKey, side: quote.side, bookVersion: quote.bookVersion }, policy);
     await submitDashboard2LiveIoc({ symbol, windowKey, quote, count: placementPolicy.cappedQuantity, owner: owner.owner, activationReady: true, reservation, preSubmitGuard: () => {
-      const finalConvictionSelection = selectConvictionSide(symbol, exactTicker, config.sideCostFloor, config.sideCostCeiling);
+      const finalDirectionSelection = selectDashboard2KalshiDirection(
+        dashboard2KalshiOrderbookService.getTopOfBook(exactTicker),
+        config.sideCostFloor,
+        config.sideCostCeiling,
+      );
       const current = dashboard2KalshiOrderbookService.getExecutable(exactTicker, quote.side, dollarDerivedMaxContracts, config.sideCostFloor, config.sideCostCeiling);
       const finalPolicy = applyDashboard2CanonicalPolicy({
         canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
@@ -257,7 +249,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
       });
       const consumed = dashboard2SafetyAuthorizations.consume(authorization.token, { mode, symbol, ticker: exactTicker, windowKey, side: quote.side, policyVersion: policy.version, bookVersion: quote.bookVersion });
       return consumed.accepted &&
-        finalConvictionSelection?.side === quote.side &&
+        finalDirectionSelection?.side === quote.side &&
         finalPolicy.allowed &&
         finalPolicy.cappedQuantity >= placementPolicy.cappedQuantity &&
         isDashboard2ExecutionOwnerCurrent("dashboard2_bot") &&
@@ -304,9 +296,18 @@ export async function getDashboard2RuntimeStatus(
     const retainedDisplay = previousDisplay?.windowKey === windowKey ? previousDisplay : null;
     const ticker = market?.ticker ?? retainedDisplay?.ticker ?? null;
     const target = market?.value ?? retainedDisplay?.target ?? null;
-    const displayConvictionSelection = ticker
-      ? selectConvictionSide(normalized, ticker, policy.sideCostFloor, policy.sideCostCeiling, true)
-      : null;
+    const topOfBook = ticker ? dashboard2KalshiOrderbookService.getTopOfBook(ticker) : null;
+    const executionDirectionSelection = selectDashboard2KalshiDirection(
+      topOfBook,
+      policy.sideCostFloor,
+      policy.sideCostCeiling,
+    );
+    const displayDirectionSelection = selectDashboard2KalshiDirection(
+      topOfBook,
+      policy.sideCostFloor,
+      policy.sideCostCeiling,
+      true,
+    );
     const liveQuotes = ticker
       ? (["yes", "no"] as const)
           .map(side => dashboard2KalshiOrderbookService.getExecutable(
@@ -318,8 +319,8 @@ export async function getDashboard2RuntimeStatus(
             - distanceFromEntryBand(b.sideCost, policy.sideCostFloor, policy.sideCostCeiling)
           )
       : [];
-    const freshDisplayQuote = displayConvictionSelection
-      ? liveQuotes.find(quote => quote.side === displayConvictionSelection.side) ?? null
+    const freshDisplayQuote = displayDirectionSelection
+      ? liveQuotes.find(quote => quote.side === displayDirectionSelection.side) ?? null
       : null;
     const displayQuote = freshDisplayQuote
       ?? (retainedDisplay?.quote?.ticker === ticker ? retainedDisplay.quote : null);
@@ -331,10 +332,19 @@ export async function getDashboard2RuntimeStatus(
     });
     const quoteInBand = Boolean(
       displayQuote
-      && displayQuote.sideCost >= policy.sideCostFloor
-      && displayQuote.sideCost <= policy.sideCostCeiling,
+      && executionDirectionSelection
+      && displayQuote.side === executionDirectionSelection.side,
     );
     const eligibleSide = quoteInBand ? displayQuote : null;
+    const dualInBand = Boolean(
+      topOfBook
+      && topOfBook.yesAsk !== null
+      && topOfBook.noAsk !== null
+      && topOfBook.yesAsk >= policy.sideCostFloor
+      && topOfBook.yesAsk <= policy.sideCostCeiling
+      && topOfBook.noAsk >= policy.sideCostFloor
+      && topOfBook.noAsk <= policy.sideCostCeiling,
+    );
     const bookFresh = Boolean(ticker && dashboard2KalshiOrderbookService.isFresh(ticker));
     const canonicalPolicy = eligibleSide
       ? applyDashboard2CanonicalPolicy({
@@ -368,7 +378,9 @@ export async function getDashboard2RuntimeStatus(
        policy, visibleExecutableDepth: displayQuote?.visibleContracts ?? null,
       observationOnly: true, owner,
     });
-    const reason = !freshDisplayQuote && displayQuote
+    const reason = dualInBand
+      ? "kalshi_direction_ambiguous"
+      : !freshDisplayQuote && displayQuote
       ? "book_stale"
       : canonicalPolicy?.reason ?? safetyDecision.blockingReason ?? "execution_observation_only";
 
@@ -376,7 +388,11 @@ export async function getDashboard2RuntimeStatus(
       symbol: normalized,
       ticker: ticker ?? null,
       side: displayQuote?.side ?? null,
-      sideCost: displayQuote?.sideCost ?? null,
+      sideCost: displayDirectionSelection?.ask ?? null,
+      executableCost: displayQuote?.sideCost ?? null,
+      yesAsk: topOfBook?.yesAsk ?? null,
+      noAsk: topOfBook?.noAsk ?? null,
+      quoteAgeMs: topOfBook ? Math.max(0, now - topOfBook.updatedAt) : null,
       visibleContracts: displayQuote?.visibleContracts ?? 0,
       target,
       spot: signal.spotPrice,
@@ -399,7 +415,11 @@ export async function getDashboard2RuntimeStatus(
     const inBand = hasAsk
       && market.sideCost! >= policy.sideCostFloor
       && market.sideCost! <= policy.sideCostCeiling;
-    const action = inBand && !market.reason?.startsWith("canonical_") ? "WATCH" : "SKIP";
+    const action = inBand
+      && market.reason !== "kalshi_direction_ambiguous"
+      && !market.reason?.startsWith("canonical_")
+      ? "WATCH"
+      : "SKIP";
     const ask = hasAsk ? ` ${market.side!.toUpperCase()} ${(market.sideCost! * 100).toFixed(1)}c` : "";
     return {
       id: `decision:${windowKey}:${market.symbol}:${market.side ?? "none"}:${market.reason ?? "none"}`,

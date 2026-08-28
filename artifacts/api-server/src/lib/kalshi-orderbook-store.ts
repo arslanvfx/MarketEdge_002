@@ -28,6 +28,17 @@ export interface ExecutableSellBook {
   readonly bookVersion: string;
 }
 
+export interface KalshiTopOfBook {
+  readonly ticker: string;
+  readonly yesBid: number | null;
+  readonly yesAsk: number | null;
+  readonly noBid: number | null;
+  readonly noAsk: number | null;
+  readonly seq: number;
+  readonly updatedAt: number;
+  readonly bookVersion: string;
+}
+
 type MutableBook = {
   /** Count values are exact hundredths-of-a-contract units. */
   yes: Map<number, number>;
@@ -171,6 +182,30 @@ export class KalshiOrderbookStore {
     for (const book of this.books.values()) {
       if (book.sid === sid) book.gapped = true;
     }
+  }
+
+  /** Returns an immutable executable view only while sequence-valid and fresh. */
+  getTopOfBook(ticker: string, now = Date.now()): KalshiTopOfBook | null {
+    const book = this.books.get(ticker);
+    if (!book || book.gapped || now - book.updatedAt > this.staleAfterMs) return null;
+    const bestBid = (levels: Map<number, number>): number | null => {
+      const prices = [...levels.entries()]
+        .filter(([, units]) => units > 0)
+        .map(([price]) => price);
+      return prices.length > 0 ? Math.max(...prices) : null;
+    };
+    const yesBid = bestBid(book.yes);
+    const noBid = bestBid(book.no);
+    return Object.freeze({
+      ticker,
+      yesBid,
+      yesAsk: noBid === null ? null : Number((1 - noBid).toFixed(8)),
+      noBid,
+      noAsk: yesBid === null ? null : Number((1 - yesBid).toFixed(8)),
+      seq: book.seq,
+      updatedAt: book.updatedAt,
+      bookVersion: `${book.sid}:${book.seq}`,
+    });
   }
 
   /** Returns an immutable executable view only while sequence-valid and fresh. */
