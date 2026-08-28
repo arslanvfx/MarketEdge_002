@@ -19,7 +19,7 @@
 // lifecycle. Paper mode never creates rows here — paper behavior stays isolated.
 // ---------------------------------------------------------------------------
 
-import { pool } from "@workspace/db";
+import { criticalIntentPool, pool } from "@workspace/db";
 import { logger } from "./logger.ts";
 import { regularCountHundredths } from "./kalshi-regular-fixed-point.ts";
 
@@ -53,6 +53,23 @@ export interface ClaimIntentResult {
   claimed: boolean;   // false only when a live intent for (mode,symbol,window) already exists
   reason: string | null;
 }
+
+interface PendingIntentClaim {
+  key: RegularOrderIntentKey;
+  resolve: (result: ClaimIntentResult) => void;
+  reject: (error: unknown) => void;
+}
+
+interface PendingIntentCohort {
+  claims: PendingIntentClaim[];
+  timer: ReturnType<typeof setTimeout>;
+}
+
+// A few milliseconds is enough to collect independent symbol continuations
+// from the same price-poll cycle without creating a market-relevant delay.
+// This replaces one serialized DB transaction per symbol with one cohort claim.
+const INTENT_COHORT_WINDOW_MS = 15;
+const pendingIntentCohorts = new Map<string, PendingIntentCohort>();
 
 export interface RegularExitIntentKey {
   clientOrderId: string;
@@ -206,117 +223,204 @@ const advisoryKey = (mode: string, windowKey: string): string =>
  *
  * Live mode ONLY — the caller must not call this for paper entries.
  */
-export async function claimRegularOrderIntent(
-  key: RegularOrderIntentKey,
-): Promise<ClaimIntentResult> {
+function validateRegularIntentKey(key: RegularOrderIntentKey): void {
   const requestedUnits = regularCountHundredths(key.requestedCount);
   if (requestedUnits == null || requestedUnits <= 0n) {
     throw new Error("requestedCount must be a positive FixedPointCount with at most two decimal places");
   }
+}
+
+function claimBatchGroupKey(key: RegularOrderIntentKey): string {
+  return [
+    key.mode,
+    key.windowKey,
+    key.maxOrdersPerWindow ?? "",
+    key.maxTotalExposure ?? "",
+  ].join("\u0000");
+}
+
+async function claimRegularOrderIntentBatch(
+  keys: RegularOrderIntentKey[],
+): Promise<Map<string, ClaimIntentResult>> {
+  const results = new Map<string, ClaimIntentResult>();
+  if (keys.length === 0) return results;
   // DDL belongs to startup/reconciliation, never to an eligible quote's
   // critical path. Until startup establishes readiness, entry fails closed.
   if (!_migrated) {
     throw new Error("regular order intent migration is not ready; refusing live claim");
   }
-  const client = await pool.connect();
+  const first = keys[0]!;
+  const maxOrders =
+    Number.isInteger(first.maxOrdersPerWindow) && (first.maxOrdersPerWindow ?? 0) > 0
+      ? first.maxOrdersPerWindow!
+      : null;
+  const maxExposure =
+    Number.isFinite(first.maxTotalExposure) && (first.maxTotalExposure ?? 0) > 0
+      ? first.maxTotalExposure!
+      : null;
+
+  const claimStartedAt = Date.now();
+  const client = await criticalIntentPool.connect();
+  const poolAcquireMs = Date.now() - claimStartedAt;
   try {
     await client.query("BEGIN");
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-      advisoryKey(key.mode, key.windowKey),
+      advisoryKey(first.mode, first.windowKey),
+    ]);
+    // Exposure spans unresolved intents from prior windows, so every claim also
+    // takes one mode-wide lock. All callers acquire window then mode in this
+    // fixed order, preventing cross-window exposure races and deadlocks.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `kalshi-regular-order-exposure:${first.mode}`,
     ]);
 
-    const maxOrders =
-      Number.isInteger(key.maxOrdersPerWindow) && (key.maxOrdersPerWindow ?? 0) > 0
-        ? key.maxOrdersPerWindow!
-        : null;
-    const requestedCost =
-      Number.isFinite(key.requestedCost) && (key.requestedCost ?? 0) > 0
-        ? key.requestedCost!
-        : null;
-    const maxExposure =
-      Number.isFinite(key.maxTotalExposure) && (key.maxTotalExposure ?? 0) > 0
-        ? key.maxTotalExposure!
-        : null;
-    const claim = await client.query<{ claimed: boolean; reason: string | null }>(
-      `WITH facts AS (
-         SELECT
-           EXISTS (
-             SELECT 1
-               FROM kalshi_regular_order_intents
-              WHERE mode = $2 AND symbol = $3
-                AND (
-                  status IN ('reserved','unknown')
-                  OR (window_key = $4 AND status = 'filled')
-                )
-           ) AS symbol_blocked,
-           (
-             SELECT COUNT(*)::int
-               FROM kalshi_regular_order_intents
-              WHERE mode = $2 AND window_key = $4
-                AND status IN ('reserved','unknown','filled')
-           ) AS active_count,
-           (
-             SELECT COALESCE(SUM(reserved_cost), 0)::numeric
-               FROM kalshi_regular_order_intents
-              WHERE mode = $2
-                AND (
-                  status IN ('reserved','unknown')
-                  OR (window_key = $4 AND status = 'filled')
-                )
-           ) AS active_cost
-       ),
-       inserted AS (
-         INSERT INTO kalshi_regular_order_intents
+    const facts = await client.query<{
+      symbol: string;
+      window_key: string;
+      status: string;
+      reserved_cost: string | number | null;
+    }>(
+      `SELECT symbol, window_key, status, reserved_cost
+         FROM kalshi_regular_order_intents
+        WHERE mode = $1
+          AND (
+            status IN ('reserved','unknown')
+            OR (window_key = $2 AND status = 'filled')
+          )`,
+      [first.mode, first.windowKey],
+    );
+    const blockedSymbols = new Set(facts.rows.map((row) => row.symbol.toUpperCase()));
+    let activeCount = facts.rows.filter((row) => row.window_key === first.windowKey).length;
+    let activeCost = facts.rows.reduce((sum, row) => sum + (Number(row.reserved_cost) || 0), 0);
+    const approved: RegularOrderIntentKey[] = [];
+
+    for (const key of keys) {
+      const symbol = key.symbol.toUpperCase();
+      const requestedCost =
+        Number.isFinite(key.requestedCost) && (key.requestedCost ?? 0) > 0
+          ? key.requestedCost!
+          : null;
+      if (blockedSymbols.has(symbol)) {
+        results.set(key.clientOrderId, { claimed: false, reason: "unresolved_intent_exists" });
+        continue;
+      }
+      if (maxOrders != null && activeCount >= maxOrders) {
+        results.set(key.clientOrderId, { claimed: false, reason: "window_order_cap_reached" });
+        continue;
+      }
+      if (maxExposure != null && requestedCost != null && activeCost + requestedCost > maxExposure + 0.01) {
+        results.set(key.clientOrderId, { claimed: false, reason: "exposure_cap_reached" });
+        continue;
+      }
+      approved.push({ ...key, symbol });
+      blockedSymbols.add(symbol);
+      activeCount++;
+      activeCost += requestedCost ?? 0;
+    }
+
+    if (approved.length > 0) {
+      const values: string[] = [];
+      const params: unknown[] = [];
+      for (const key of approved) {
+        const offset = params.length;
+        values.push(
+          `($${offset + 1},$${offset + 2},$${offset + 3},$${offset + 4},$${offset + 5},$${offset + 6},$${offset + 7},$${offset + 8},$${offset + 9},'reserved',NOW())`,
+        );
+        params.push(
+          key.clientOrderId,
+          key.mode,
+          key.symbol,
+          key.windowKey,
+          key.ticker,
+          key.side,
+          key.requestedCount,
+          key.limitPrice,
+          Number.isFinite(key.requestedCost) && (key.requestedCost ?? 0) > 0 ? key.requestedCost : null,
+        );
+      }
+      const inserted = await client.query<{ client_order_id: string }>(
+        `INSERT INTO kalshi_regular_order_intents
            (client_order_id, mode, symbol, window_key, ticker, side,
             requested_count, limit_price, reserved_cost, status, created_at)
-         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',NOW()
-           FROM facts
-          WHERE NOT symbol_blocked
-            AND ($10::int IS NULL OR active_count < $10)
-            AND (
-              $11::numeric IS NULL
-              OR $9::numeric IS NULL
-              OR active_cost + $9::numeric <= $11::numeric + 0.01
-            )
+         VALUES ${values.join(",")}
          ON CONFLICT DO NOTHING
-         RETURNING 1
-       )
-       SELECT true AS claimed, NULL::text AS reason FROM inserted
-       UNION ALL
-       SELECT false AS claimed,
-         CASE
-           WHEN symbol_blocked THEN 'unresolved_intent_exists'
-           WHEN $10::int IS NOT NULL AND active_count >= $10 THEN 'window_order_cap_reached'
-           WHEN $11::numeric IS NOT NULL AND $9::numeric IS NOT NULL
-             AND active_cost + $9::numeric > $11::numeric + 0.01
-             THEN 'exposure_cap_reached'
-           ELSE 'reservation_conflict'
-         END AS reason
-       FROM facts
-       WHERE NOT EXISTS (SELECT 1 FROM inserted)
-       LIMIT 1`,
-      [
-        key.clientOrderId,
-        key.mode,
-        key.symbol.toUpperCase(),
-        key.windowKey,
-        key.ticker,
-        key.side,
-        key.requestedCount,
-        key.limitPrice,
-        requestedCost,
-        maxOrders,
-        maxExposure,
-      ],
-    );
+         RETURNING client_order_id`,
+        params,
+      );
+      const insertedIds = new Set(inserted.rows.map((row) => row.client_order_id));
+      for (const key of approved) {
+        results.set(
+          key.clientOrderId,
+          insertedIds.has(key.clientOrderId)
+            ? { claimed: true, reason: null }
+            : { claimed: false, reason: "reservation_conflict" },
+        );
+      }
+    }
     await client.query("COMMIT");
-    return claim.rows[0] ?? { claimed: false, reason: "reservation_conflict" };
+    const claimedCount = Array.from(results.values()).filter((result) => result.claimed).length;
+    logger.info(
+      {
+        mode: first.mode,
+        windowKey: first.windowKey,
+        batchSize: keys.length,
+        claimedCount,
+        poolAcquireMs,
+        transactionMs: Date.now() - claimStartedAt - poolAcquireMs,
+        totalMs: Date.now() - claimStartedAt,
+      },
+      "[kalshi-regular-intent] atomic entry batch committed",
+    );
+    return results;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
     client.release();
   }
+}
+
+async function flushPendingIntentCohort(groupKey: string): Promise<void> {
+  const cohort = pendingIntentCohorts.get(groupKey);
+  if (!cohort) return;
+  pendingIntentCohorts.delete(groupKey);
+  try {
+    const results = await claimRegularOrderIntentBatch(cohort.claims.map((claim) => claim.key));
+    for (const claim of cohort.claims) {
+      claim.resolve(results.get(claim.key.clientOrderId) ?? {
+        claimed: false,
+        reason: "reservation_conflict",
+      });
+    }
+  } catch (error) {
+    for (const claim of cohort.claims) claim.reject(error);
+  }
+}
+
+/**
+ * Same-turn claims for one window are committed in one atomic batch. All
+ * approved callers resume together after COMMIT, so their broker POSTs fan out
+ * concurrently instead of queueing one transaction per symbol.
+ */
+export function claimRegularOrderIntent(
+  key: RegularOrderIntentKey,
+): Promise<ClaimIntentResult> {
+  validateRegularIntentKey(key);
+  return new Promise((resolve, reject) => {
+    const groupKey = claimBatchGroupKey(key);
+    const existing = pendingIntentCohorts.get(groupKey);
+    if (existing) {
+      existing.claims.push({ key, resolve, reject });
+      return;
+    }
+    const cohort: PendingIntentCohort = {
+      claims: [{ key, resolve, reject }],
+      timer: setTimeout(() => {
+        void flushPendingIntentCohort(groupKey);
+      }, INTENT_COHORT_WINDOW_MS),
+    };
+    pendingIntentCohorts.set(groupKey, cohort);
+  });
 }
 
 /**

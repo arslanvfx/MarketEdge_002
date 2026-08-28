@@ -509,7 +509,10 @@ test("regular intent migrations declare claim-predicate indexes", async () => {
   assert.match(source, /ON kalshi_regular_order_intents \(mode, symbol, status, window_key\)/);
   assert.match(source, /regular_intent_active_cost/);
   assert.match(source, /WHERE status IN \('reserved', 'unknown', 'filled'\)/);
-  const claim = source.slice(source.indexOf("export async function claimRegularOrderIntent"), source.indexOf("/**\n * Resolve an intent"));
+  const claim = source.slice(
+    source.indexOf("async function claimRegularOrderIntentBatch"),
+    source.indexOf("async function flushPendingIntentCohort"),
+  );
   assert.match(claim, /migration is not ready; refusing live claim/);
   assert.doesNotMatch(claim, /await ensureMigrated\(\)/);
 });

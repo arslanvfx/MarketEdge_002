@@ -31,6 +31,25 @@ pool.on("error", (err) => {
   console.error("[db-pool] idle client error (non-fatal)", err.message);
 });
 
+// Reserved lane for latency-critical, durable-before-submit trading intents.
+// Analytics, settlement, and dashboard traffic use the shared pool above and
+// therefore cannot consume these connections while an eligible order is being
+// claimed. `min` does not eagerly connect, so startup explicitly warms this pool.
+export const criticalIntentPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 2,
+  min: 1,
+  idleTimeoutMillis: 20000,
+  connectionTimeoutMillis: 2000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 1000,
+  allowExitOnIdle: false,
+});
+
+criticalIntentPool.on("error", (err) => {
+  console.error("[critical-intent-pool] idle client error (non-fatal)", err.message);
+});
+
 let _pingerStarted = false;
 export function startPoolPinger() {
   if (_pingerStarted) return;
@@ -47,6 +66,23 @@ export function startPoolPinger() {
       // non-fatal — pool will self-heal on next real query
     }
     setTimeout(run, 10_000);
+  };
+  setTimeout(run, 5_000);
+}
+
+let _criticalIntentPingerStarted = false;
+export async function startCriticalIntentPoolPinger(): Promise<void> {
+  if (_criticalIntentPingerStarted) return;
+  // Establish the reserved lane before live entry can be enabled.
+  await criticalIntentPool.query("SELECT 1");
+  _criticalIntentPingerStarted = true;
+  const run = async () => {
+    try {
+      await criticalIntentPool.query("SELECT 1");
+    } catch {
+      // Non-fatal here. A claim still fails closed if the lane cannot recover.
+    }
+    setTimeout(run, 5_000);
   };
   setTimeout(run, 5_000);
 }

@@ -26,3 +26,9 @@ description: Safety rules for comparing paper opportunities with live regular-or
 **Why:** Using the same 10-second value for request timeout and snapshot expiry created a deterministic production dead zone: refresh began shortly before expiry but could not finish until several seconds after every live candidate started failing closed.
 
 **How to apply:** Refresh early, retain the last authoritative snapshot for a bounded longer window, fail closed after that bound, and convert per-route holds into conservative local debits on confirmed fills. Release only proven no-submit/zero-fill holds; retain unknown exposure.
+
+**Rule:** Latency-critical live intent claims must use a prewarmed reserved DB lane and one bounded cohort transaction, then release approved broker submissions together.
+
+**Why:** A durable claim on the shared pool can sit behind unrelated analytics writes, while one transaction per symbol serializes simultaneous opportunities until their prices leave range.
+
+**How to apply:** Collect finalized same-window candidates for only a market-negligible interval, enforce duplicate/order/exposure limits once under cross-process locks, commit all intents before POST, then let every approved continuation submit concurrently.

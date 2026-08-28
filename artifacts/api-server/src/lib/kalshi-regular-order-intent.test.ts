@@ -18,6 +18,8 @@ if (RUN_DB_TESTS) {
     try {
       const dbmod = await import("@workspace/db");
       const p = dbmod.pool as { end?: () => Promise<void> } | undefined;
+      const critical = dbmod.criticalIntentPool as { end?: () => Promise<void> } | undefined;
+      if (critical && typeof critical.end === "function") await critical.end();
       if (p && typeof p.end === "function") await p.end();
     } catch { /* best-effort */ }
   });
@@ -226,6 +228,46 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     assert.equal(b.reason, "window_order_cap_reached");
   });
 
+  it("same-turn distinct-symbol claims are committed as one cap-safe batch", async () => {
+    const wk = "DBTEST-BATCH";
+    const results = await Promise.all(
+      ["BTC", "ETH", "SOL", "XRP"].map((symbol, index) =>
+        mod.claimRegularOrderIntent({
+          ...key(`cid-batch-${index}`, wk),
+          symbol,
+          ticker: `KX${symbol}-TEST`,
+          requestedCost: 1,
+          maxOrdersPerWindow: 3,
+          maxTotalExposure: 10,
+        }),
+      ),
+    );
+    assert.equal(results.filter((result) => result.claimed).length, 3);
+    assert.equal(results.filter((result) => result.reason === "window_order_cap_reached").length, 1);
+  });
+
+  it("separate async continuations in one price cycle join the same cap-safe cohort", async () => {
+    const wk = "DBTEST-ASYNC-BATCH";
+    const symbols = ["BTC", "ETH", "SOL", "XRP"];
+    const claims = symbols.map((symbol, index) =>
+      new Promise<mod.ClaimIntentResult>((resolve, reject) => {
+        setTimeout(() => {
+          mod.claimRegularOrderIntent({
+            ...key(`cid-async-batch-${index}`, wk),
+            symbol,
+            ticker: `KX${symbol}-TEST`,
+            requestedCost: 1,
+            maxOrdersPerWindow: 3,
+            maxTotalExposure: 10,
+          }).then(resolve, reject);
+        }, index * 2);
+      }),
+    );
+    const results = await Promise.all(claims);
+    assert.equal(results.filter((result) => result.claimed).length, 3);
+    assert.equal(results.filter((result) => result.reason === "window_order_cap_reached").length, 1);
+  });
+
   async function readIntent(clientOrderId: string): Promise<{
     status: string;
     filled_count: string | null;
@@ -252,8 +294,11 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     const wk = "DBTEST-RECON";
     // Simulate the scoping bug: intent claimed (reserved) but never resolved to
     // filled even though the fill persisted a bet row.
-    assert.equal((await mod.claimRegularOrderIntent(key("cid-recon1", wk))).claimed, true);
-    await insertLiveBet({ symbol: "BTC", windowKey: wk, contractCount: 4, entryPrice: 0.63, offsetMs: 50 });
+    assert.equal((await mod.claimRegularOrderIntent({
+      ...key("cid-recon1", wk),
+      requestedCount: 4,
+    })).claimed, true);
+    await insertLiveBet({ symbol: "BTC", windowKey: wk, contractCount: 4, entryPrice: 0.63, offsetMs: 1_000 });
 
     const res = await mod.reconcileReservedRegularIntents();
     assert.equal(res.reconciled >= 1, true, "at least one reserved intent reconciled");
@@ -275,7 +320,7 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
       windowKey: wk,
       contractCount: 1,
       entryPrice: 0.81,
-      offsetMs: 50,
+      offsetMs: 1_000,
       action: "expired",
     });
 

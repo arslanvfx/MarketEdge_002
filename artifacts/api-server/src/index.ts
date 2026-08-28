@@ -5,7 +5,7 @@ import { startPredictionTracker, fetchCryptoPredictions } from "./lib/crypto";
 import { runThresholdAnalysis, formatThresholdReport } from "./lib/backtest";
 import { runMLBackfillIfNeeded } from "./lib/ml-backfill";
 import { runBotLoopTick, runWindowOpenPrefetch, loadBotConfigFromDB, loadDailyPnlFromDB, loadCoinDailyLossFromDB, loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB, loadWindowBetCountsFromDB, getBotState, runAutoTuneJob, runQuietHoursAutoTune, runSmartHoursCalibration, runSmartHoursCalibrationCatchUpIfNeeded, fixLiveExpiredPnlHistorical, reEvaluateSettledBets } from "./lib/kalshi-bot";
-import { pool, startPoolPinger } from "@workspace/db";
+import { pool, startCriticalIntentPoolPinger, startPoolPinger } from "@workspace/db";
 import { initScalper } from "./lib/kalshi-scalper-service";
 import { initSmartExit } from "./lib/kalshi-smart-exit-service";
 import { initScalperSmartExit } from "./lib/kalshi-scalper-smart-exit-service";
@@ -471,7 +471,7 @@ async function startStockVertical(): Promise<void> {
   logger.info("[stock] vertical started (scanner + bot loops active)");
 }
 
-app.listen(port, (err) => {
+app.listen(port, async (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
@@ -482,6 +482,9 @@ app.listen(port, (err) => {
   // Start the pool keep-alive pinger immediately so idle connections
   // never go stale between the periodic DB activity bursts.
   startPoolPinger();
+  await startCriticalIntentPoolPinger().catch((err) =>
+    logger.warn({ err }, "[kalshi-regular-intent] critical claim lane failed to warm (live entries remain fail-closed)"),
+  );
 
   // Pre-warm the market cache so the first user request is instant.
   fetchAllMarkets()
