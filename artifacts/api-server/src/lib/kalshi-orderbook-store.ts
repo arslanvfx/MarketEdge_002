@@ -9,6 +9,12 @@ export interface ExecutableBook {
   readonly sideCost: number;
   /** Most expensive side cost consumed by this complete-contract quote. */
   readonly marginalLimitCost: number;
+  /**
+   * Cheapest immediately executable cost visible for the selected side.
+   * A marketable IOC can price-improve to this level, so callers that require
+   * a strict lower entry bound must validate it before submitting.
+   */
+  readonly bestExecutableCost: number;
   readonly visibleContracts: number;
   readonly seq: number;
   readonly updatedAt: number;
@@ -248,7 +254,9 @@ export class KalshiOrderbookStore {
     }
     return Object.freeze({
       ticker, side, sideCost: Number((weightedCostUnits / (contracts * 100)).toFixed(8)),
-      marginalLimitCost: Number(marginalLimitCost.toFixed(8)), visibleContracts: contracts,
+      marginalLimitCost: Number(marginalLimitCost.toFixed(8)),
+      bestExecutableCost: Number(levels[0]!.cost.toFixed(8)),
+      visibleContracts: contracts,
       seq: book.seq, updatedAt: book.updatedAt, bookVersion: `${book.sid}:${book.seq}`,
     });
   }

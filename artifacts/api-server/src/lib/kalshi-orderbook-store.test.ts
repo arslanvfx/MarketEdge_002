@@ -31,12 +31,12 @@ test("Kalshi book applies snapshots and complementary executable depth", () => {
   });
   // YES consumes NO bids: 1-.18=.82 before 1-.15=.85.
   assert.deepEqual(store.getExecutable("KXTEST", "yes", 2, .79, .85, 1_001), {
-    ticker: "KXTEST", side: "yes", sideCost: .82, marginalLimitCost: .82, visibleContracts: 2,
+    ticker: "KXTEST", side: "yes", sideCost: .82, marginalLimitCost: .82, bestExecutableCost: .82, visibleContracts: 2,
     seq: 10, updatedAt: 1_000, bookVersion: "7:10",
   });
   // NO consumes YES bids: 1-.20=.80.
   assert.deepEqual(store.getExecutable("KXTEST", "no", 2, .79, .85, 1_001), {
-    ticker: "KXTEST", side: "no", sideCost: .8, marginalLimitCost: .8, visibleContracts: 2,
+    ticker: "KXTEST", side: "no", sideCost: .8, marginalLimitCost: .8, bestExecutableCost: .8, visibleContracts: 2,
     seq: 10, updatedAt: 1_000, bookVersion: "7:10",
   });
 });

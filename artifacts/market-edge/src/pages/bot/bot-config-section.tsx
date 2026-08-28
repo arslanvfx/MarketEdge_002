@@ -107,26 +107,39 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       detail: "Test gateway. Requires a fresh authenticated exact order book and full depth.",
                     },
                   ]).map(gateway => {
-                    const selected = (merged.liveExecutionGateway ?? "legacy") === gateway.id;
+                    const active = (cfg.liveExecutionGateway ?? "legacy") === gateway.id;
+                    const pending = !active && (merged.liveExecutionGateway ?? "legacy") === gateway.id;
                     return (
                       <button
                         key={gateway.id}
                         type="button"
                         onClick={() => setConfigDraft(d => ({ ...d, liveExecutionGateway: gateway.id }))}
                         className={`min-w-0 text-left rounded-xl p-3.5 border transition-all ${
-                          selected
+                          active
                             ? "border-violet-500/60 bg-violet-500/10 ring-1 ring-violet-500/30"
+                            : pending
+                              ? "border-amber-500/60 bg-amber-500/10 ring-1 ring-amber-500/30"
                             : "border-border bg-background/30 hover:border-border/80 hover:bg-muted/30"
                         }`}
                       >
-                        <div className={`text-sm font-semibold ${selected ? "text-violet-300" : "text-foreground"}`}>
-                          {gateway.label}{selected && <span className="ml-1.5 text-[9px] opacity-70">✓ active</span>}
+                        <div className={`text-sm font-semibold ${
+                          active ? "text-violet-300" : pending ? "text-amber-300" : "text-foreground"
+                        }`}>
+                          {gateway.label}
+                          {active && <span className="ml-1.5 text-[9px] opacity-70">✓ active</span>}
+                          {pending && <span className="ml-1.5 text-[9px] opacity-80">pending save</span>}
                         </div>
                         <div className="mt-1 text-[10px] text-muted-foreground/70">{gateway.detail}</div>
                       </button>
                     );
                   })}
                 </div>
+                {(cfg.liveExecutionGateway ?? "legacy") !== (merged.liveExecutionGateway ?? "legacy") && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                    Gateway changes are not active until Save Configuration succeeds. Current active gateway:{" "}
+                    {(cfg.liveExecutionGateway ?? "legacy") === "authenticated_book" ? "Authenticated Book" : "Legacy"}.
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-col gap-2">

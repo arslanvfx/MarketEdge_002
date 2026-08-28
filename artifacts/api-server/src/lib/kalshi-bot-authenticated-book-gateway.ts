@@ -29,6 +29,7 @@ export interface AuthenticatedBookReader {
     ticker: string;
     side: KalshiSide;
     marginalLimitCost: number;
+    bestExecutableCost: number;
     visibleContracts: number;
     bookVersion: string;
   } | null;
@@ -57,11 +58,15 @@ export function quoteAuthenticatedBookExecution(
   ) return null;
   // A full requested-depth quote only. getExecutable may otherwise return a
   // smaller visible quantity, which must never authorize a Bot 1 submission.
+  // Read from zero rather than filtering away favorable levels. A marketable
+  // IOC cannot impose a minimum fill cost: Kalshi may price-improve into any
+  // cheaper resting level. Therefore a cheaper visible level must invalidate
+  // the whole quote instead of being hidden by the reader's floor filter.
   const quote = service.getExecutable(
     input.ticker,
     input.side,
     input.requestedCount,
-    input.sideCostFloor,
+    0,
     input.sideCostCeiling,
   );
   if (
@@ -70,6 +75,10 @@ export function quoteAuthenticatedBookExecution(
     || quote.ticker !== input.ticker
     || quote.side !== input.side
     || quote.visibleContracts < input.requestedCount
+    || !Number.isFinite(quote.bestExecutableCost)
+    || quote.bestExecutableCost + Number.EPSILON < input.sideCostFloor
+    || quote.marginalLimitCost < input.sideCostFloor
+    || quote.marginalLimitCost > input.sideCostCeiling
   ) return null;
 
   // marginalLimitCost is a side cost. Kalshi's order API accepts a YES price:
@@ -97,7 +106,7 @@ export function quoteAuthenticatedBookExecution(
         input.ticker,
         input.side,
         input.requestedCount,
-        input.sideCostFloor,
+        0,
         input.sideCostCeiling,
       );
       return Boolean(
@@ -105,6 +114,10 @@ export function quoteAuthenticatedBookExecution(
         && current.ticker === input.ticker
         && current.side === input.side
         && current.visibleContracts >= input.requestedCount
+        && Number.isFinite(current.bestExecutableCost)
+        && current.bestExecutableCost + Number.EPSILON >= input.sideCostFloor
+        && current.marginalLimitCost >= input.sideCostFloor
+        && current.marginalLimitCost <= input.sideCostCeiling
         && current.bookVersion === immutableVersion
         && current.marginalLimitCost === immutableMarginalCost,
       );

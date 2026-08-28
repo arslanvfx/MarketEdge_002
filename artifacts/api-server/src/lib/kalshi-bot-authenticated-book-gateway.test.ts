@@ -2,8 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { quoteAuthenticatedBookExecution } from "./kalshi-bot-authenticated-book-gateway.ts";
 
-const executable = (side: "yes" | "no", version = "7:9", visibleContracts = 3, marginalLimitCost = .823) =>
-  ({ ticker: "KXBTC", side, sideCost: .8, marginalLimitCost, visibleContracts, seq: 9, updatedAt: Date.now(), bookVersion: version });
+const executable = (
+  side: "yes" | "no",
+  version = "7:9",
+  visibleContracts = 3,
+  marginalLimitCost = .823,
+  bestExecutableCost = .8,
+) => ({
+  ticker: "KXBTC",
+  side,
+  sideCost: .8,
+  marginalLimitCost,
+  bestExecutableCost,
+  visibleContracts,
+  seq: 9,
+  updatedAt: Date.now(),
+  bookVersion: version,
+});
 
 test("authenticated Bot 1 gateway uses requested exact depth and conservative YES limit", () => {
   let current = executable("yes");
@@ -45,11 +60,33 @@ test("authenticated Bot 1 gateway passes the approved side-cost zone to every bo
       isFresh: () => true,
       getExecutable: (_ticker, _side, _count, floor, ceiling) => {
         calls.push([floor, ceiling]);
-        return executable("yes", "3:4", 2, .85);
+        return executable("yes", "3:4", 2, .85, .82);
       },
     },
   );
   assert.ok(gateway);
   assert.equal(gateway.revalidate(), true);
-  assert.deepEqual(calls, [[.81, .86], [.81, .86]]);
+  assert.deepEqual(calls, [[0, .86], [0, .86]]);
+});
+
+test("authenticated Bot 1 gateway rejects favorable levels below the strict entry floor", () => {
+  const gateway = quoteAuthenticatedBookExecution(
+    { ticker: "KXBTC", side: "no", requestedCount: 2, sideCostFloor: .79, sideCostCeiling: .85 },
+    {
+      isFresh: () => true,
+      getExecutable: () => executable("no", "5:6", 2, .84, .71),
+    },
+  );
+  assert.equal(gateway, null);
+});
+
+test("authenticated Bot 1 gateway revalidation rejects a new below-floor level", () => {
+  let current = executable("yes", "8:9", 2, .84, .80);
+  const gateway = quoteAuthenticatedBookExecution(
+    { ticker: "KXBTC", side: "yes", requestedCount: 2, sideCostFloor: .79, sideCostCeiling: .85 },
+    { isFresh: () => true, getExecutable: () => current },
+  );
+  assert.ok(gateway);
+  current = executable("yes", "8:9", 2, .84, .70);
+  assert.equal(gateway.revalidate(), false);
 });
