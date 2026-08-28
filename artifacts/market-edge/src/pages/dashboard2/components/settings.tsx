@@ -217,35 +217,71 @@ export default function SettingsView({ mode }: { mode: 'paper' | 'live' }) {
 
         {/* Guards & Symbols */}
         <div className="flex flex-col gap-6">
-          <div className="bg-card border rounded-xl p-5 shadow-sm space-y-4">
-            <h3 className="text-xs font-bold text-indigo-400 uppercase tracking-widest flex items-center gap-2 pb-2 border-b border-border/50">
-              <Target className="w-4 h-4" /> Market Symbols
-            </h3>
+          <div className="relative overflow-hidden bg-card border border-indigo-500/20 rounded-xl p-5 shadow-[0_12px_36px_rgba(15,23,42,0.24)] space-y-4">
+            <div className="pointer-events-none absolute -right-12 -top-16 h-36 w-36 rounded-full bg-indigo-500/10 blur-3xl" />
+            <div className="relative flex items-start justify-between gap-4 pb-4 border-b border-border/50">
+              <div>
+                <h3 className="text-xs font-bold text-indigo-300 uppercase tracking-widest flex items-center gap-2">
+                  <Target className="w-4 h-4" /> Markets Bot 2 Can Trade
+                </h3>
+                <p className="mt-2 max-w-md text-[11px] leading-relaxed text-muted-foreground">
+                  Select where Bot 2 may open new regular positions. Turning a market off will not close a position already open.
+                </p>
+              </div>
+            </div>
             <Controller
               control={control}
               name="enabledSymbols"
-              render={({ field }) => (
-                <div className="flex gap-2 flex-wrap">
-                  {allSymbols.map(sym => {
-                    const isChecked = field.value?.includes(sym) || false;
-                    return (
-                      <label key={sym} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-mono font-bold cursor-pointer transition-all ${isChecked ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300 shadow-[0_0_10px_rgba(99,102,241,0.1)]' : 'bg-background border-border text-muted-foreground hover:border-muted-foreground/50'}`}>
-                        <input
-                          type="checkbox"
-                          className="hidden"
-                          checked={isChecked}
-                          onChange={(e) => {
-                            const v = e.target.checked;
-                            const current = field.value || [];
-                            field.onChange(v ? [...current, sym] : current.filter(s => s !== sym));
-                          }}
-                        />
-                        {sym}
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
+              render={({ field }) => {
+                const enabledCount = field.value?.length || 0;
+                return (
+                  <div className="relative space-y-3">
+                    <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.16em]">
+                      <span className="text-muted-foreground">Trading universe</span>
+                      <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                        {enabledCount} of {allSymbols.length} enabled
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {allSymbols.map(sym => {
+                        const isChecked = field.value?.includes(sym) || false;
+                        const isLastEnabled = isChecked && enabledCount === 1;
+                        return (
+                          <label
+                            key={sym}
+                            title={isLastEnabled ? "At least one market must remain enabled" : `${isChecked ? "Disable" : "Enable"} ${sym} for new Bot 2 entries`}
+                            className={`group flex min-h-11 items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs font-mono font-bold transition-all ${
+                              isChecked
+                                ? 'cursor-pointer border-indigo-400/45 bg-gradient-to-br from-indigo-500/20 to-cyan-500/10 text-indigo-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_0_18px_rgba(99,102,241,0.08)] hover:border-indigo-300/65'
+                                : 'cursor-pointer border-border bg-background/65 text-muted-foreground hover:border-indigo-500/30 hover:text-foreground'
+                            } ${isLastEnabled ? 'cursor-not-allowed opacity-80' : ''}`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="hidden"
+                              checked={isChecked}
+                              disabled={isLastEnabled}
+                              onChange={(e) => {
+                                const v = e.target.checked;
+                                const current = field.value || [];
+                                field.onChange(v ? [...current, sym] : current.filter(s => s !== sym));
+                              }}
+                            />
+                            <span>{sym}</span>
+                            <span className={`flex items-center gap-1.5 text-[9px] tracking-wider ${isChecked ? 'text-emerald-300' : 'text-muted-foreground/60'}`}>
+                              <span className={`h-1.5 w-1.5 rounded-full ${isChecked ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-muted-foreground/30'}`} />
+                              {isChecked ? 'ON' : 'OFF'}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/70">
+                      Applies only to Bot 2 regular entries. Shared Scalper, Smart Exit, and Bot 1 controls are unaffected.
+                    </p>
+                  </div>
+                );
+              }}
             />
           </div>
 
