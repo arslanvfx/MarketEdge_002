@@ -274,6 +274,31 @@ async function claimRegularOrderIntentBatch(
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
       `kalshi-regular-order-exposure:${first.mode}`,
     ]);
+    // Execution ownership is durable control-plane state, not process memory.
+    // Establish the safe default when absent, then lock and inspect it in the
+    // same transaction as the intent reservation. A malformed/unreadable row
+    // fails closed by denying every new live entry.
+    await client.query(
+      `INSERT INTO bot_config (id, config, updated_at)
+       VALUES ('dashboard2_execution_ownership', '{"owner":"current_bot"}'::jsonb, NOW())
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const ownership = await client.query<{ owner: string | null }>(
+      `SELECT config->>'owner' AS owner
+         FROM bot_config
+        WHERE id = 'dashboard2_execution_ownership'
+        FOR UPDATE`,
+    );
+    if (ownership.rows[0]?.owner !== "current_bot") {
+      for (const key of keys) {
+        results.set(key.clientOrderId, {
+          claimed: false,
+          reason: "execution_owner_not_current_bot",
+        });
+      }
+      await client.query("COMMIT");
+      return results;
+    }
 
     const facts = await client.query<{
       symbol: string;

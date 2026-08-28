@@ -20,6 +20,7 @@ import { initAiSpend } from "./lib/ai-spend";
 import { scheduleAtTopOfEveryUtcHour } from "./lib/kalshi-quiet-hours-scheduler";
 import { reconcileReservedRegularIntents, runRegularOrderIntentMigrations } from "./lib/kalshi-regular-order-intent";
 import { runRegularIntentReconciliationPass } from "./lib/kalshi-regular-order-reconcile";
+import { dashboard2KalshiOrderbookService } from "./lib/kalshi-orderbook-service";
 
 const rawPort = process.env["PORT"];
 
@@ -478,6 +479,9 @@ app.listen(port, async (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  // Observation-only Dashboard 2.0 data service: it owns no order placement
+  // path and is deliberately independent of page visits and bot startup.
+  dashboard2KalshiOrderbookService.start();
 
   // Start the pool keep-alive pinger immediately so idle connections
   // never go stale between the periodic DB activity bursts.

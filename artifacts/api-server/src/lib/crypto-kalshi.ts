@@ -2,8 +2,8 @@
 // crypto-kalshi.ts — Kalshi 15-min target fetching, window context, ML cache
 // ---------------------------------------------------------------------------
 
-import crypto from "crypto";
 import { logger } from "./logger";
+import { hasKalshiCredentials, makeKalshiSignedHeaders } from "./kalshi-auth.ts";
 
 // Map of symbol → Kalshi series ticker for coins that have 15-min markets.
 // KALSHI_SERIES lives in market-defs.ts (pure module) alongside the market
@@ -128,29 +128,12 @@ export async function fetchOrderbookPrices(
   ticker: string,
   signal?: AbortSignal,
 ): Promise<OrderbookPrices | null> {
-  const keyId = process.env["KALSHI_API_KEY_ID"] ?? null;
-  const rawKey = process.env["KALSHI_PRIVATE_KEY"] ?? null;
-  if (!keyId || !rawKey) return null;
-
-  // Reconstruct PEM (mirrors the pattern in kalshi-trader.ts)
-  let pem: string;
-  if (rawKey.includes("-----BEGIN")) {
-    pem = rawKey.includes("\\n") ? rawKey.replace(/\\n/g, "\n") : rawKey;
-  } else {
-    const b64 = rawKey.replace(/\s+/g, "");
-    const lines = b64.match(/.{1,64}/g) ?? [];
-    pem = ["-----BEGIN RSA PRIVATE KEY-----", ...lines, "-----END RSA PRIVATE KEY-----"].join("\n");
-  }
+  if (!hasKalshiCredentials()) return null;
 
   const path = `/markets/${encodeURIComponent(ticker)}/orderbook`;
-  const tsMs = Date.now().toString();
-  const message = tsMs + "GET" + "/trade-api/v2" + path;
-  let signature: string;
+  let headers: Record<string, string>;
   try {
-    const sign = crypto.createSign("SHA256");
-    sign.update(message);
-    sign.end();
-    signature = sign.sign({ key: pem, padding: crypto.constants.RSA_PKCS1_PSS_PADDING }, "base64");
+    headers = makeKalshiSignedHeaders("GET", "/trade-api/v2" + path, false);
   } catch {
     return null;
   }
@@ -158,10 +141,7 @@ export async function fetchOrderbookPrices(
   try {
     const resp = await fetch(`https://api.elections.kalshi.com/trade-api/v2${path}`, {
       headers: {
-        Accept: "application/json",
-        "KALSHI-ACCESS-KEY": keyId,
-        "KALSHI-ACCESS-TIMESTAMP": tsMs,
-        "KALSHI-ACCESS-SIGNATURE": signature,
+        ...headers,
       },
       signal: signal
         ? AbortSignal.any([signal, AbortSignal.timeout(4000)])

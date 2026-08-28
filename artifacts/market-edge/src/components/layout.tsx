@@ -60,6 +60,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const adminNavigation = [
     { name: "Bot Dashboard", href: "/bot", icon: Bot },
+    { name: "Dashboard 2.0", href: "/dashboard-2", icon: Zap },
   ];
 
   return (

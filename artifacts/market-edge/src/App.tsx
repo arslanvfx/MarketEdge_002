@@ -16,6 +16,7 @@ import ComboDetail from "./pages/combo-detail";
 import SmartPicks from "./pages/picks";
 import Predictor from "./pages/predictor";
 import BotDashboard from "./pages/bot-dashboard";
+const Dashboard2 = lazy(() => import("./pages/dashboard2"));
 import { Layout } from "./components/layout";
 import { BuilderProvider } from "./lib/builder-context";
 import { AlertsNotifier } from "./components/alerts-notifier";
@@ -176,6 +177,9 @@ function ClerkProviderWithRoutes() {
                   </Route>
                   <Route path="/bot">
                     <Layout><BotDashboard /></Layout>
+                  </Route>
+                  <Route path="/dashboard-2">
+                    <Layout><Suspense fallback={<StocksFallback />}><Dashboard2 /></Suspense></Layout>
                   </Route>
                   <Route path="/portfolio">
                     <Layout><Portfolio /></Layout>

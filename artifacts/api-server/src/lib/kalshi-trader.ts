@@ -12,8 +12,11 @@
 //   KALSHI-ACCESS-TIMESTAMP — current ms timestamp as string
 //   KALSHI-ACCESS-SIGNATURE — base64(RSA-PSS-SHA256(timestamp + method + path))
 
-import crypto from "crypto";
 import { logger } from "./logger.ts";
+import {
+  hasKalshiCredentials,
+  makeKalshiSignedHeaders,
+} from "./kalshi-auth.ts";
 import {
   formatRegularFixedPointCount,
   parseRegularFixedPointCount,
@@ -32,62 +35,8 @@ export {
 
 const KALSHI_TRADE_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
-function getKeyId(): string | null {
-  return process.env["KALSHI_API_KEY_ID"] ?? null;
-}
-
-function getPrivateKey(): string | null {
-  const raw = process.env["KALSHI_PRIVATE_KEY"] ?? null;
-  if (!raw) return null;
-
-  // If the key already has a PEM header, normalise newlines and return as-is.
-  if (raw.includes("-----BEGIN")) {
-    return raw.includes("\\n") ? raw.replace(/\\n/g, "\n") : raw;
-  }
-
-  // The key is stored as raw base64 without PEM headers (common when pasted
-  // directly from Kalshi's dashboard).  Reconstruct a proper PKCS#1 RSA PEM:
-  //   -----BEGIN RSA PRIVATE KEY-----
-  //   <base64, 64 chars per line>
-  //   -----END RSA PRIVATE KEY-----
-  // Strip any whitespace/newlines from the raw value first.
-  const b64 = raw.replace(/\s+/g, "");
-  const lines = b64.match(/.{1,64}/g) ?? [];
-  return [
-    "-----BEGIN RSA PRIVATE KEY-----",
-    ...lines,
-    "-----END RSA PRIVATE KEY-----",
-  ].join("\n");
-}
-
 function makeSignedHeaders(method: string, path: string): Record<string, string> {
-  const h: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-
-  const keyId = getKeyId();
-  const privateKeyPem = getPrivateKey();
-  if (!keyId || !privateKeyPem) return h;
-
-  const timestampMs = Date.now().toString();
-  // Signature message: timestamp + METHOD + /trade-api/v2 + path
-  // Strip any query string from the path for signing
-  const pathWithoutQuery = path.split("?")[0];
-  const message = timestampMs + method.toUpperCase() + "/trade-api/v2" + pathWithoutQuery;
-
-  const sign = crypto.createSign("SHA256");
-  sign.update(message);
-  sign.end();
-  const signature = sign.sign(
-    { key: privateKeyPem, padding: crypto.constants.RSA_PKCS1_PSS_PADDING },
-    "base64",
-  );
-
-  h["KALSHI-ACCESS-KEY"] = keyId;
-  h["KALSHI-ACCESS-TIMESTAMP"] = timestampMs;
-  h["KALSHI-ACCESS-SIGNATURE"] = signature;
-  return h;
+  return makeKalshiSignedHeaders(method, "/trade-api/v2" + path);
 }
 
 async function kalshiFetch<T>(
@@ -804,7 +753,7 @@ export async function submitKalshiCreateOrderV2(
   body: Record<string, unknown>,
   timeoutMs = 10_000,
 ): Promise<unknown> {
-  if (!getKeyId() || !getPrivateKey()) {
+  if (!hasKalshiCredentials()) {
     throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   }
   return kalshiFetch<unknown>(
@@ -1146,7 +1095,7 @@ export async function resolveRegularOrderExchangeIndex(ticker: string): Promise<
 }
 
 export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
-  if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
+  if (!hasKalshiCredentials()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   const formattedCount = formatRegularFixedPointCount(params.count);
   const requestedUnits = regularCountHundredths(params.count);
   if (formattedCount == null || requestedUnits == null || requestedUnits <= 0n) {
@@ -1316,7 +1265,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
 // NOTE: kalshiFetch is NOT used here because it always calls res.json(), which
 // throws on a 204 No Content response (successful cancel with no body).
 export async function cancelOrder(orderId: string): Promise<boolean> {
-  if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
+  if (!hasKalshiCredentials()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   const path = `/portfolio/orders/${orderId}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10_000);
@@ -1346,7 +1295,7 @@ export async function getOrder(
   orderId: string,
   side: "yes" | "no",
 ): Promise<{ filledCount: number; status: OrderStatus; avgPrice: number | null } | null> {
-  if (!getKeyId() || !getPrivateKey()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
+  if (!hasKalshiCredentials()) throw new Error("KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY not configured");
   const path = `/portfolio/orders/${orderId}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10_000);
@@ -1509,7 +1458,7 @@ export async function placeEntryOrderWithSizeFallback(
 
 // Check if API credentials are configured (doesn't validate them).
 export function isKalshiConfigured(): boolean {
-  return !!(getKeyId() && getPrivateKey());
+  return hasKalshiCredentials();
 }
 
 // ---------------------------------------------------------------------------

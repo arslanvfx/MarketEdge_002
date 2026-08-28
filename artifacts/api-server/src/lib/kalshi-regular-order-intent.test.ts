@@ -41,6 +41,11 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
       await c.query(`DELETE FROM kalshi_regular_order_intents WHERE window_key LIKE 'DBTEST-%'`);
       await c.query(`DELETE FROM kalshi_regular_exit_intents WHERE window_key LIKE 'DBTEST-%'`);
       await c.query(`DELETE FROM kalshi_bot_bets WHERE window_key LIKE 'DBTEST-%'`);
+      await c.query(
+        `INSERT INTO bot_config (id, config, updated_at)
+         VALUES ('dashboard2_execution_ownership', '{"owner":"current_bot"}'::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, updated_at = NOW()`,
+      );
     } finally {
       c.release();
     }
@@ -97,6 +102,33 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     const b = await mod.claimRegularOrderIntent(key("cid-a2", wk));
     assert.equal(b.claimed, false);
     assert.equal(b.reason, "unresolved_intent_exists");
+  });
+
+  it("durable execution ownership atomically gates new live entry claims", async () => {
+    const setOwner = async (owner: "current_bot" | "dashboard2_bot" | "paused") => {
+      const c = await pool.connect();
+      try {
+        await c.query(
+          `UPDATE bot_config SET config = $1::jsonb, updated_at = NOW()
+           WHERE id = 'dashboard2_execution_ownership'`,
+          [JSON.stringify({ owner })],
+        );
+      } finally {
+        c.release();
+      }
+    };
+
+    await setOwner("paused");
+    const paused = await mod.claimRegularOrderIntent(key("cid-owner-paused", "DBTEST-OWNER-PAUSED"));
+    assert.deepEqual(paused, { claimed: false, reason: "execution_owner_not_current_bot" });
+
+    await setOwner("dashboard2_bot");
+    const dashboard2 = await mod.claimRegularOrderIntent(key("cid-owner-d2", "DBTEST-OWNER-D2"));
+    assert.deepEqual(dashboard2, { claimed: false, reason: "execution_owner_not_current_bot" });
+
+    await setOwner("current_bot");
+    const current = await mod.claimRegularOrderIntent(key("cid-owner-current", "DBTEST-OWNER-CURRENT"));
+    assert.deepEqual(current, { claimed: true, reason: null });
   });
 
   it("PARALLEL claims: exactly one wins", async () => {

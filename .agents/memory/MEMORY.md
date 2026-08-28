@@ -142,3 +142,4 @@
 - [Regular placement funnel safety](regular-placement-funnel-safety.md) — paper parity uses identical read-only live predicates; hot-path telemetry must be hard-bounded, idempotent, and non-throwing.
 - [Scalper tail-risk entry floor](scalper-tail-risk-entry-floor.md) — target distance below 0.20% has negative tail-risk economics; keep the hard floor independent of operator drafts.
 - [PostgreSQL parameter arithmetic](postgres-parameter-arithmetic.md) — cast both placeholders in SQL arithmetic; contextual INSERT column types do not resolve ambiguous operators.
+- [Kalshi WebSocket book semantics](kalshi-websocket-book-semantics.md) — sequence belongs to the subscription SID; contract depth/deltas require exact hundredth-unit arithmetic.
