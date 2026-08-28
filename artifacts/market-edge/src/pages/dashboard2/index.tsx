@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@clerk/react";
 import { fetchStatus, fetchDailyPerformance, fetchWhatIfPerformance, fetchPositions, fetchHistory, fetchAudit } from "./api";
 import { Loader2, AlertTriangle } from "lucide-react";
@@ -11,10 +11,44 @@ import { CommandOverview, WhatIfCalculator } from "./components/overview";
 import { CompactLiveTargets, CompactPositions, CompactHistory, CompactAudit } from "./components/dashboard-tables";
 import SettingsView from "./components/settings";
 
+import { BotScalperPanel } from "../bot/bot-scalper-panel";
+import { BotSmartExitPanel } from "../bot/bot-smart-exit-panel";
+import { KalshiLiveTickerPanel } from "../bot/kalshi-live-ticker-panel";
+import { API_BASE } from "../bot/utils";
+import { readApiResponse } from "../bot/api-response";
+
 export default function Dashboard2() {
   const { getToken } = useAuth();
+  const qc = useQueryClient();
   const [activeView, setActiveView] = useState<'dashboard' | 'settings'>('dashboard');
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // Authenticated POST for shared Bot 1 modules
+  async function postAuthenticated(path: string, body: object, strictErrors: boolean) {
+    const token = await getToken();
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    const data = strictErrors ? await readApiResponse(res) : await res.json();
+    if (path.startsWith("/crypto/bot/")) {
+      await qc.invalidateQueries({ queryKey: ["bot-status"] });
+      await qc.invalidateQueries({ queryKey: ["dashboard2-status"] });
+    }
+    return data;
+  }
+
+  async function authPost(path: string, body: object) {
+    return postAuthenticated(path, body, false);
+  }
+
+  async function scalperAuthPost(path: string, body: object) {
+    return postAuthenticated(path, body, true);
+  }
 
   // What-If State
   const [stakeInput, setStakeInput] = useState<string>("100");
@@ -131,6 +165,17 @@ export default function Dashboard2() {
               isError={whatIfError}
               isValid={isValidStake}
             />
+
+            {/* Execution Modules */}
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mt-2">
+              <div className="xl:col-span-2 min-w-0">
+                <BotScalperPanel authPost={scalperAuthPost} />
+              </div>
+              <div className="xl:col-span-1 min-w-0 space-y-6">
+                <KalshiLiveTickerPanel />
+                <BotSmartExitPanel authPost={authPost} />
+              </div>
+            </div>
 
             {/* Dense Data Tables Area */}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-2">
