@@ -2,12 +2,10 @@ export function formatCents(cents: number | string | null | undefined): string {
   if (cents === null || cents === undefined) return "—";
   const num = typeof cents === "string" ? parseFloat(cents) : cents;
   if (isNaN(num)) return "—";
-  return (num / 100).toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  return `${(num * 100).toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 1,
+  })}¢`;
 }
 
 export function formatDollar(dollars: number | string | null | undefined): string {

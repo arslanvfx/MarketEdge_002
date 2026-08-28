@@ -116,6 +116,8 @@ export interface Dashboard2Status {
     spot: number | null;
     distancePct: number | null;
     intendedQuantity: number | null;
+    effectiveBudget: number | null;
+    sizingReason: 'dashboard_budget' | 'canonical_bet_size' | 'per_coin_max_bet' | 'smart_hours_reduced' | 'data_gathering' | null;
     bookVersion: string | null;
   }>;
   recentEvents: Array<{

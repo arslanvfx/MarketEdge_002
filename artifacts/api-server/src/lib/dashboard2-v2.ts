@@ -183,7 +183,7 @@ export async function runDashboard2PaperCandidate(input: { symbol: string; windo
   else if (!input.quote) details = { reason: "no_fresh_executable_depth" };
   else if (input.quote.sideCost < config.sideCostFloor || input.quote.sideCost > config.sideCostCeiling) details = { reason: "price_out_of_range" };
   else {
-    requested = input.authorizedCount ?? Math.min(config.maxContracts, Math.floor(config.maxDollarBudget / input.quote.sideCost));
+    requested = input.authorizedCount ?? Math.floor(config.maxDollarBudget / input.quote.sideCost);
     filled = Math.min(requested, input.quote.visibleContracts); cost = input.quote.sideCost;
     status = filled === 0 ? "zero_fill" : filled < requested ? "partial_fill" : "full_fill";
     details = { reason: null, bookVersion: input.quote.bookVersion, executableDepth: input.quote.visibleContracts,
@@ -400,6 +400,37 @@ export async function dashboard2V2WhatIf(mode: Dashboard2Mode, stake: number, no
 export async function dashboard2V2Audit(limit = 100) {
   await ensureDashboard2V2Tables();
   return (await pool.query("SELECT * FROM dashboard2_v2_audit ORDER BY created_at DESC LIMIT $1", [Math.min(Math.max(Math.floor(limit), 1), 500)])).rows;
+}
+
+export async function dashboard2V2RecentEvents(mode: Dashboard2Mode, limit = 20) {
+  await ensureDashboard2V2Tables();
+  const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 100);
+  const result = await pool.query<{
+    id: string;
+    at: Date;
+    type: string;
+    message: string;
+    severity: "info" | "success" | "warning" | "error";
+  }>(
+    `SELECT id, at, type, message, severity FROM (
+       SELECT id::text, created_at AS at, ('entry.' || status)::text AS type,
+         (UPPER(mode) || ' ' || symbol || ' ' || UPPER(COALESCE(side,'?')) || ' ' ||
+          filled_contracts || '/' || requested_contracts || ' @ ' ||
+          TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM TO_CHAR(COALESCE(entry_cost,0) * 100, 'FM990.0'))) ||
+          'c - ' || REPLACE(status, '_', ' '))::text AS message,
+         (CASE WHEN status IN ('full_fill','partial_fill') THEN 'success'
+               WHEN status IN ('unknown','blocked') THEN 'warning'
+               ELSE 'info' END)::text AS severity
+       FROM dashboard2_v2_ledger WHERE mode=$1
+       UNION ALL
+       SELECT id::text, created_at AS at, action AS type,
+         (UPPER(COALESCE(mode,'system')) || ' - ' || REPLACE(action, '.', ' '))::text AS message,
+         'info'::text AS severity
+       FROM dashboard2_v2_audit WHERE mode IS NULL OR mode=$1
+     ) events ORDER BY at DESC LIMIT $2`,
+    [mode, safeLimit],
+  );
+  return result.rows.map((row) => ({ ...row, at: row.at.toISOString() }));
 }
 
 export type Dashboard2OpenPosition = {

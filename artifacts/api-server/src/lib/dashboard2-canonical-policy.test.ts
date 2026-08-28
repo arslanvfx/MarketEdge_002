@@ -6,7 +6,7 @@ import { applyDashboard2CanonicalPolicy } from "./dashboard2-canonical-policy.ts
 const at = new Date("2025-01-06T12:00:00.000Z"); // Monday, ET
 const decide = (patch: object, mode: "paper" | "live" = "paper", quantity = 10) =>
   applyDashboard2CanonicalPolicy({
-    canonicalConfig: { ...DEFAULT_BOT_CONFIG, ...patch }, symbol: "BTC", mode,
+    canonicalConfig: { ...DEFAULT_BOT_CONFIG, betSize: 10, ...patch }, symbol: "BTC", mode,
     sideCost: .8, dashboardBudget: 10, maxContracts: 10, intendedQuantity: quantity, now: at,
   });
 
@@ -39,9 +39,10 @@ test("Dashboard2 canonical policy caps reduced, data-gathering, overrides, and c
   assert.equal(gathering.cappedQuantity, 2);
   assert.equal(gathering.dataGatheringAmount, 1.7);
   assert.equal(decide({ coinOverrides: { BTC: { maxBetSize: 1.59 } } }).cappedQuantity, 1);
+  assert.equal(decide({ betSize: 2 }).cappedQuantity, 2);
   assert.equal(decide({}, "paper", 10).cappedQuantity, 10);
   assert.equal(applyDashboard2CanonicalPolicy({
-    canonicalConfig: DEFAULT_BOT_CONFIG, symbol: "BTC", mode: "paper", sideCost: .8,
+    canonicalConfig: { ...DEFAULT_BOT_CONFIG, betSize: 10 }, symbol: "BTC", mode: "paper", sideCost: .8,
     dashboardBudget: 10, maxContracts: 2, intendedQuantity: 10, now: at,
   }).cappedQuantity, 2);
 });

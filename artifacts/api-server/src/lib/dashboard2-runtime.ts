@@ -2,13 +2,32 @@ import { CRYPTO_COINS, getCachedPrediction, getKalshiCachedData, predCache } fro
 import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service.ts";
 import { isDashboard2ExecutionOwnerCurrent, readDashboard2ExecutionOwner, type Dashboard2ExecutionOwner } from "./dashboard2-ownership.ts";
 import { evaluateDashboard2SafetyGate } from "./dashboard2-safety-gate.ts";
-import { completeDashboard2PaperExit, dashboard2SafetyAuthorizations, dashboard2V2EntryState, dashboard2V2LiveReadiness, dashboard2V2OpenPositionsForExit, isDashboard2V2ConfigCurrent, readDashboard2V2Config, readDashboard2V2SelectedMode, reconcileDashboard2V2LiveUnknowns, reserveDashboard2V2Entry, reserveDashboard2V2Exit, runDashboard2PaperCandidate, settleDashboard2V2PriorWindows, submitDashboard2LiveExit, submitDashboard2LiveIoc } from "./dashboard2-v2.ts";
+import { completeDashboard2PaperExit, dashboard2SafetyAuthorizations, dashboard2V2EntryState, dashboard2V2LiveReadiness, dashboard2V2OpenPositionsForExit, dashboard2V2RecentEvents, isDashboard2V2ConfigCurrent, readDashboard2V2Config, readDashboard2V2SelectedMode, reconcileDashboard2V2LiveUnknowns, reserveDashboard2V2Entry, reserveDashboard2V2Exit, runDashboard2PaperCandidate, settleDashboard2V2PriorWindows, submitDashboard2LiveExit, submitDashboard2LiveIoc } from "./dashboard2-v2.ts";
 import { getBalance } from "./kalshi-trader.ts";
 import { readCanonicalBotConfig } from "./kalshi-bot-state.ts";
 import { applyDashboard2CanonicalPolicy } from "./dashboard2-canonical-policy.ts";
 
 type ReadinessStatus = "ready" | "warming" | "blocked" | "stale";
 type WindowPhase = "preparing" | "armed" | "eligible" | "blocked";
+type Dashboard2DisplayQuote = {
+  ticker: string;
+  side: "yes" | "no";
+  sideCost: number;
+  marginalLimitCost: number;
+  visibleContracts: number;
+  seq: number;
+  updatedAt: number;
+  bookVersion: string;
+};
+
+type Dashboard2MarketDisplaySnapshot = {
+  windowKey: string;
+  ticker: string | null;
+  target: number | null;
+  quote: Dashboard2DisplayQuote | null;
+};
+
+const lastMarketDisplayBySymbol = new Map<string, Dashboard2MarketDisplaySnapshot>();
 
 /** Scheduler-owned V2 entry and protective-exit execution primitive. */
 const fresh = (at: unknown, now: number, maxAgeMs = 30_000) => typeof at === "number" && now - at >= 0 && now - at <= maxAgeMs;
@@ -23,6 +42,33 @@ function directionAndProximity(symbol: string, target: number | null | undefined
   const spotFresh = Boolean(spot && fresh(predCache.get(symbol)?.at, now));
   const distancePct = target != null && spotPrice != null && spotPrice > 0 ? Math.abs(target - spotPrice) / spotPrice * 100 : null;
   return { spotPrice: spotPrice ?? null, spotFresh, distancePct, direction: spot?.indicators.trend ?? null };
+}
+
+function contractCeilingForDollarStake(config: { maxDollarBudget: number; sideCostFloor: number }): number {
+  if (!Number.isFinite(config.maxDollarBudget) || config.maxDollarBudget <= 0) return 0;
+  if (!Number.isFinite(config.sideCostFloor) || config.sideCostFloor <= 0) return 0;
+  return Math.max(1, Math.ceil(config.maxDollarBudget / config.sideCostFloor));
+}
+
+function distanceFromEntryBand(cost: number, floor: number, ceiling: number): number {
+  return cost < floor ? floor - cost : cost > ceiling ? cost - ceiling : 0;
+}
+
+function decisionReasonLabel(reason: string | null): string {
+  const labels: Record<string, string> = {
+    side_cost_below_floor: "ask is below the entry band",
+    side_cost_above_ceiling: "ask is above the entry band",
+    book_stale: "order book is refreshing; showing the last same-window quote",
+    book_freshness_unknown: "waiting for a fresh order book",
+    side_cost_unknown: "waiting for a live ask",
+    entry_window_not_open: "entry window has not opened",
+    canonical_smart_hours_blocked: "Smart Hours blocked this entry",
+    canonical_smart_hours_forced_paper: "Smart Hours allows paper observation only",
+    canonical_coin_paused: "this market is paused",
+    canonical_budget_below_one_contract: "dollar stake is below one contract",
+    execution_observation_only: "monitoring current candidate",
+  };
+  return reason ? labels[reason] ?? reason.replaceAll("_", " ") : "monitoring";
 }
 
 /** Selected-mode executor. Both modes build precisely the same evidence and
@@ -66,6 +112,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
   const selected = await readDashboard2V2SelectedMode();
   const mode = selected.selectedMode;
   const config = (await readDashboard2V2Config(mode)).config;
+  const dollarDerivedMaxContracts = contractCeilingForDollarStake(config);
   const owner = await readDashboard2ExecutionOwner();
   if (!config.enabled) return;
   if (mode === "live") await reconcileDashboard2V2LiveUnknowns();
@@ -84,7 +131,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     const ticker = target?.ticker;
     const quotes = ticker
       ? (["yes", "no"] as const)
-        .map(side => dashboard2KalshiOrderbookService.getExecutable(ticker, side, config.maxContracts, config.sideCostFloor, config.sideCostCeiling))
+        .map(side => dashboard2KalshiOrderbookService.getExecutable(ticker, side, dollarDerivedMaxContracts, config.sideCostFloor, config.sideCostCeiling))
         .filter((quote): quote is NonNullable<typeof quote> => quote !== null)
         .sort((a, b) => a.sideCost - b.sideCost)
       : [];
@@ -98,10 +145,10 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     // UTC quiet-hours switch. A missing snapshot is deliberately a block.
     const canonicalPreview = applyDashboard2CanonicalPolicy({
       canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
-      dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
-      intendedQuantity: config.maxContracts, now: new Date(now),
+      dashboardBudget: config.maxDollarBudget, maxContracts: dollarDerivedMaxContracts,
+      intendedQuantity: dollarDerivedMaxContracts, now: new Date(now),
     });
-    const policy = { version: `dashboard2-v2-${config.version}`, minEntryMinute: config.minEntryMinute, sideCostFloor: config.sideCostFloor, sideCostCeiling: config.sideCostCeiling, maxContracts: config.maxContracts };
+    const policy = { version: `dashboard2-v2-${config.version}`, minEntryMinute: config.minEntryMinute, sideCostFloor: config.sideCostFloor, sideCostCeiling: config.sideCostCeiling, maxContracts: dollarDerivedMaxContracts };
     const circuitOpen = config.circuitBreaker.enabled && (
        state.dailyPnl <= -config.circuitBreaker.maxDailyLoss ||
        state.consecutiveLosses >= config.circuitBreaker.maxConsecutiveLosses
@@ -120,7 +167,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     const decision = evaluateDashboard2SafetyGate({ expectedIdentity: evidence.identity, evidence, policy, visibleExecutableDepth: quote.visibleContracts, observationOnly: mode === "paper" ? true : !(owner.owner === "dashboard2_bot"), owner: owner.owner });
     const canonicalPolicy = applyDashboard2CanonicalPolicy({
       canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
-      dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
+      dashboardBudget: config.maxDollarBudget, maxContracts: dollarDerivedMaxContracts,
       intendedQuantity: decision.capital.quantity, now: new Date(now),
     });
     if (mode === "paper") {
@@ -136,7 +183,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     // retained across this boundary, so an operator pause/cap wins the race.
     const placementPolicy = applyDashboard2CanonicalPolicy({
       canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
-      dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
+      dashboardBudget: config.maxDollarBudget, maxContracts: dollarDerivedMaxContracts,
       intendedQuantity: canonicalPolicy.cappedQuantity, now: new Date(),
     });
     if (!placementPolicy.allowed) continue;
@@ -145,10 +192,10 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     remainingFunding = Math.max(0, (remainingFunding ?? 0) - placementPolicy.cappedQuantity * config.sideCostCeiling);
     const authorization = dashboard2SafetyAuthorizations.issue({ mode, symbol, ticker: exactTicker, windowKey, side: quote.side, bookVersion: quote.bookVersion }, policy);
     await submitDashboard2LiveIoc({ symbol, windowKey, quote, count: placementPolicy.cappedQuantity, owner: owner.owner, activationReady: true, reservation, preSubmitGuard: () => {
-      const current = dashboard2KalshiOrderbookService.getExecutable(exactTicker, quote.side, config.maxContracts, config.sideCostFloor, config.sideCostCeiling);
+      const current = dashboard2KalshiOrderbookService.getExecutable(exactTicker, quote.side, dollarDerivedMaxContracts, config.sideCostFloor, config.sideCostCeiling);
       const finalPolicy = applyDashboard2CanonicalPolicy({
         canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
-        dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
+        dashboardBudget: config.maxDollarBudget, maxContracts: dollarDerivedMaxContracts,
         intendedQuantity: placementPolicy.cappedQuantity,
       });
       const consumed = dashboard2SafetyAuthorizations.consume(authorization.token, { mode, symbol, ticker: exactTicker, windowKey, side: quote.side, policyVersion: policy.version, bookVersion: quote.bookVersion });
@@ -184,9 +231,10 @@ export async function getDashboard2RuntimeStatus(
   const windowKey = new Date(windowStart).toISOString().slice(0, 16);
   const selected = await readDashboard2V2SelectedMode();
   const selectedConfig = await readDashboard2V2Config(selected.selectedMode);
+  const dollarDerivedMaxContracts = contractCeilingForDollarStake(selectedConfig.config);
   const canonicalConfigAvailable = readCanonicalBotConfig() !== null;
   const liveReadiness = selected.selectedMode === "live" ? await dashboard2V2LiveReadiness() : { activationReady: false, reasons: [] as string[] };
-  const policy = { version: `dashboard2-v2-${selectedConfig.config.version}`, minEntryMinute: selectedConfig.config.minEntryMinute, sideCostFloor: selectedConfig.config.sideCostFloor, sideCostCeiling: selectedConfig.config.sideCostCeiling, maxContracts: selectedConfig.config.maxContracts } as const;
+  const policy = { version: `dashboard2-v2-${selectedConfig.config.version}`, minEntryMinute: selectedConfig.config.minEntryMinute, sideCostFloor: selectedConfig.config.sideCostFloor, sideCostCeiling: selectedConfig.config.sideCostCeiling, maxContracts: dollarDerivedMaxContracts } as const;
 
   const elapsedSeconds = Math.max(0, Math.floor((now - windowStart) / 1_000));
   const entryOpensInSeconds = Math.max(0, policy.minEntryMinute * 60 - elapsedSeconds);
@@ -194,43 +242,59 @@ export async function getDashboard2RuntimeStatus(
     const normalized = symbol.toUpperCase();
     const market = getKalshiCachedData(normalized);
     const signal = directionAndProximity(normalized, market?.value, now);
-    const ticker = market?.ticker;
-    const executable = ticker
+    const previousDisplay = lastMarketDisplayBySymbol.get(normalized);
+    const retainedDisplay = previousDisplay?.windowKey === windowKey ? previousDisplay : null;
+    const ticker = market?.ticker ?? retainedDisplay?.ticker ?? null;
+    const target = market?.value ?? retainedDisplay?.target ?? null;
+    const liveQuotes = ticker
       ? (["yes", "no"] as const)
           .map(side => dashboard2KalshiOrderbookService.getExecutable(
-            ticker, side, policy.maxContracts, policy.sideCostFloor, policy.sideCostCeiling,
+            ticker, side, policy.maxContracts, 0.01, 0.99,
           ))
           .filter((book): book is NonNullable<typeof book> => book !== null)
-          .sort((a, b) => a.sideCost - b.sideCost)[0] ?? null
-      : null;
-    // The book helper has already constrained this side to the inclusive
-    // policy range and capped visible depth. Timing/Safety Gate remain a
-    // separate observation-only concern, so the dashboard can show the
-    // actual qualifying quote before the entry window opens.
-    const eligibleSide = executable;
+          .sort((a, b) =>
+            distanceFromEntryBand(a.sideCost, policy.sideCostFloor, policy.sideCostCeiling)
+            - distanceFromEntryBand(b.sideCost, policy.sideCostFloor, policy.sideCostCeiling)
+          )
+      : [];
+    const freshDisplayQuote = liveQuotes[0] ?? null;
+    const displayQuote = freshDisplayQuote
+      ?? (retainedDisplay?.quote?.ticker === ticker ? retainedDisplay.quote : null);
+    lastMarketDisplayBySymbol.set(normalized, {
+      windowKey,
+      ticker,
+      target,
+      quote: displayQuote,
+    });
+    const quoteInBand = Boolean(
+      displayQuote
+      && displayQuote.sideCost >= policy.sideCostFloor
+      && displayQuote.sideCost <= policy.sideCostCeiling,
+    );
+    const eligibleSide = quoteInBand ? displayQuote : null;
     const bookFresh = Boolean(ticker && dashboard2KalshiOrderbookService.isFresh(ticker));
     const canonicalPolicy = eligibleSide
       ? applyDashboard2CanonicalPolicy({
           canonicalConfig: readCanonicalBotConfig(), symbol: normalized, mode: selected.selectedMode,
           sideCost: eligibleSide.sideCost, dashboardBudget: selectedConfig.config.maxDollarBudget,
-          maxContracts: selectedConfig.config.maxContracts, intendedQuantity: selectedConfig.config.maxContracts,
+          maxContracts: dollarDerivedMaxContracts, intendedQuantity: dollarDerivedMaxContracts,
           now: new Date(now),
         })
       : null;
 
     const safetyDecision = evaluateDashboard2SafetyGate({
       expectedIdentity: {
-        symbol: normalized, ticker: ticker ?? null, windowKey, side: eligibleSide?.side ?? null,
-        bookVersion: eligibleSide?.bookVersion ?? null,
+         symbol: normalized, ticker: ticker ?? null, windowKey, side: displayQuote?.side ?? null,
+         bookVersion: displayQuote?.bookVersion ?? null,
       },
       evidence: {
         identity: {
-          symbol: normalized, ticker: ticker ?? null, windowKey, side: eligibleSide?.side ?? null,
-          bookVersion: eligibleSide?.bookVersion ?? null,
+           symbol: normalized, ticker: ticker ?? null, windowKey, side: displayQuote?.side ?? null,
+           bookVersion: displayQuote?.bookVersion ?? null,
         },
         elapsedMinutes: elapsedSeconds / 60,
-        sideCost: eligibleSide?.sideCost ?? null,
-        sequenceValid: eligibleSide ? true : null,
+         sideCost: displayQuote?.sideCost ?? null,
+         sequenceValid: freshDisplayQuote ? true : displayQuote ? null : null,
         bookFresh: ticker ? bookFresh : null,
         signalPreparationComplete: null,
         // These require legacy state or broad imports; Dashboard 2 observes them
@@ -238,22 +302,26 @@ export async function getDashboard2RuntimeStatus(
         hasDuplicateOrOpenPosition: null, quietHoursAllows: eligibleSide ? canonicalPolicy!.allowed : null, directionEvidencePositive: null,
         targetProximityPositive: null, availableFunding: null, exposureAllowance: null,
       },
-      policy, visibleExecutableDepth: eligibleSide?.visibleContracts ?? null,
+       policy, visibleExecutableDepth: displayQuote?.visibleContracts ?? null,
       observationOnly: true, owner,
     });
-    const reason = canonicalPolicy?.reason ?? safetyDecision.blockingReason ?? "execution_observation_only";
+    const reason = !freshDisplayQuote && displayQuote
+      ? "book_stale"
+      : canonicalPolicy?.reason ?? safetyDecision.blockingReason ?? "execution_observation_only";
 
     return {
       symbol: normalized,
       ticker: ticker ?? null,
-      side: eligibleSide?.side ?? null,
-      sideCost: eligibleSide?.sideCost ?? null,
-      visibleContracts: eligibleSide?.visibleContracts ?? 0,
-      target: market?.value ?? null,
+      side: displayQuote?.side ?? null,
+      sideCost: displayQuote?.sideCost ?? null,
+      visibleContracts: displayQuote?.visibleContracts ?? 0,
+      target,
       spot: signal.spotPrice,
       distancePct: signal.distancePct,
       intendedQuantity: canonicalPolicy?.cappedQuantity ?? 0,
-      bookVersion: eligibleSide?.bookVersion ?? null,
+      effectiveBudget: canonicalPolicy?.effectiveBudget ?? null,
+      sizingReason: canonicalPolicy?.limitingReason ?? null,
+      bookVersion: displayQuote?.bookVersion ?? null,
       bookFresh,
        safety: safetyDecision.shadowQualified ? ("waiting" as const) : ("blocked" as const),
       reason,
@@ -262,6 +330,23 @@ export async function getDashboard2RuntimeStatus(
   });
   const preparedMarketCount = cachedMarkets.filter((market) => market.ticker !== null).length;
   const bookConnection = dashboard2KalshiOrderbookService.getStatus();
+  const persistedEvents = await dashboard2V2RecentEvents(selected.selectedMode, 20);
+  const activeDecisionEvents = cachedMarkets.map((market) => {
+    const hasAsk = market.side !== null && market.sideCost !== null;
+    const inBand = hasAsk
+      && market.sideCost! >= policy.sideCostFloor
+      && market.sideCost! <= policy.sideCostCeiling;
+    const action = inBand && !market.reason?.startsWith("canonical_") ? "WATCH" : "SKIP";
+    const ask = hasAsk ? ` ${market.side!.toUpperCase()} ${(market.sideCost! * 100).toFixed(1)}c` : "";
+    return {
+      id: `decision:${windowKey}:${market.symbol}:${market.side ?? "none"}:${market.reason ?? "none"}`,
+      at: nowIso,
+      type: `decision.${action.toLowerCase()}`,
+      message: `${action} ${market.symbol}${ask} - ${decisionReasonLabel(market.reason)}`,
+      severity: action === "SKIP" ? ("warning" as const) : ("info" as const),
+    };
+  });
+  const recentEvents = [...activeDecisionEvents, ...persistedEvents].slice(0, 32);
   const readiness: Array<{
     id: string;
     label: string;
@@ -356,6 +441,6 @@ export async function getDashboard2RuntimeStatus(
     },
     readiness,
     markets: cachedMarkets.map(({ signalsReady: _signalsReady, preparing: _preparing, ...market }) => market),
-    recentEvents: [],
+    recentEvents,
   };
 }

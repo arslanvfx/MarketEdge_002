@@ -58,14 +58,14 @@ export function TopNav({
           <h1 className="text-lg font-bold tracking-tight text-foreground flex items-center gap-2">
             MarketEdge <span className="text-[#00ffd0]">Console</span>
           </h1>
-          <p className="text-[10px] text-muted-foreground uppercase tracking-widest mt-0.5 font-medium">High-Stakes Prediction Bot</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-widest mt-0.5 font-bold">High-Stakes Prediction Bot</p>
         </div>
 
         {/* Mobile View Switcher - Hidden on desktop */}
         <div className="flex md:hidden items-center bg-background rounded-lg p-1 border">
            <button
              onClick={() => setActiveView('dashboard')}
-             className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
+             className={`px-4 py-2 text-sm font-semibold rounded-md transition-all ${
                activeView === 'dashboard' ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
              }`}
            >
@@ -73,7 +73,7 @@ export function TopNav({
            </button>
            <button
              onClick={() => setActiveView('settings')}
-             className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
+             className={`px-4 py-2 text-sm font-semibold rounded-md transition-all ${
                activeView === 'settings' ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
              }`}
            >
@@ -84,39 +84,39 @@ export function TopNav({
 
       <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:items-center">
         {actionError && (
-          <div className="flex items-center gap-2 rounded-md border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 font-mono text-[10px] text-rose-400">
+          <div className="flex items-center gap-2 rounded-md border border-rose-500/20 bg-rose-500/10 px-3 py-2 font-mono text-xs text-rose-400">
             <span className="truncate max-w-[200px]">{actionError}</span>
             <button onClick={() => setActionError(null)} className="ml-auto hover:text-rose-300 font-sans font-bold">×</button>
           </div>
         )}
 
-        <div className="ml-auto flex w-full flex-wrap items-center justify-end gap-2 md:w-auto md:gap-3">
+        <div className="ml-auto flex w-full flex-wrap items-center justify-end gap-3 md:w-auto md:gap-4">
           {/* View Switcher - Desktop */}
-          <div className="hidden md:flex items-center bg-background rounded-lg p-1 border shrink-0">
+          <div className="hidden md:flex items-center bg-background rounded-lg p-1.5 border shrink-0">
              <button
                onClick={() => setActiveView('dashboard')}
-               className={`px-3 py-1 text-xs font-semibold rounded-md transition-all flex items-center gap-1.5 ${
+               className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all flex items-center gap-2 ${
                  activeView === 'dashboard' ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
                }`}
              >
-               <Terminal className="w-3.5 h-3.5" /> Command
+               <Terminal className="w-4 h-4" /> Command
              </button>
              <button
                onClick={() => setActiveView('settings')}
-               className={`px-3 py-1 text-xs font-semibold rounded-md transition-all flex items-center gap-1.5 ${
+               className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all flex items-center gap-2 ${
                  activeView === 'settings' ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
                }`}
              >
-               <Settings className="w-3.5 h-3.5" /> Settings
+               <Settings className="w-4 h-4" /> Settings
              </button>
           </div>
 
           {/* Mode Toggle */}
-          <div className="flex items-center bg-background rounded-lg p-1 border shrink-0">
+          <div className="flex items-center bg-background rounded-lg p-1.5 border shrink-0">
             <button
               onClick={() => doMode('paper')}
               disabled={isModeChanging || isRunning}
-              className={`px-3 py-1 text-[11px] font-bold tracking-wide uppercase rounded-md transition-all ${
+              className={`px-3 py-1.5 text-xs font-bold tracking-wide uppercase rounded-md transition-all ${
                 !isLive ? "bg-slate-800 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
               } disabled:opacity-50`}
             >
@@ -125,23 +125,23 @@ export function TopNav({
             <button
               onClick={() => doMode('live')}
               disabled={isModeChanging || isRunning}
-              className={`px-3 py-1 text-[11px] font-bold tracking-wide uppercase rounded-md transition-all flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 text-xs font-bold tracking-wide uppercase rounded-md transition-all flex items-center gap-2 ${
                 isLive ? "bg-rose-950 text-rose-400 border border-rose-500/20 shadow-sm" : "text-muted-foreground hover:text-foreground"
               } disabled:opacity-50`}
             >
-              {isLive && <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse shadow-[0_0_5px_rgba(244,63,94,0.5)]" />}
+              {isLive && <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shadow-[0_0_5px_rgba(244,63,94,0.5)]" />}
               Live
             </button>
           </div>
 
           {/* Live authority is intentionally irrelevant while paper mode is selected. */}
           {isLive ? (
-            <div className="flex items-center bg-background rounded-lg p-1 border shrink-0">
-              <span className="text-[9px] uppercase tracking-widest text-muted-foreground px-2 font-bold flex items-center gap-1 opacity-70"><Shield className="w-3 h-3"/> Live Auth:</span>
+            <div className="flex items-center bg-background rounded-lg p-1.5 border shrink-0">
+              <span className="text-[11px] uppercase tracking-widest text-muted-foreground px-2 font-bold flex items-center gap-1.5 opacity-70"><Shield className="w-3.5 h-3.5"/> Live Auth:</span>
               <button
                 onClick={() => doOwner('current_bot')}
                 disabled={isOwnerChanging}
-                className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
+                className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wider rounded-md transition-all ${
                   owner === 'current_bot' ? "bg-slate-800 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
                 } disabled:opacity-50`}
               >
@@ -150,7 +150,7 @@ export function TopNav({
               <button
                 onClick={() => doOwner('dashboard2_bot')}
                 disabled={isOwnerChanging}
-                className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
+                className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wider rounded-md transition-all ${
                   owner === 'dashboard2_bot' ? "bg-cyan-900/40 text-cyan-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
                 } disabled:opacity-50`}
               >
@@ -159,7 +159,7 @@ export function TopNav({
               <button
                 onClick={() => doOwner('paused')}
                 disabled={isOwnerChanging}
-                className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
+                className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wider rounded-md transition-all ${
                   owner === 'paused' ? "bg-amber-900/40 text-amber-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
                 } disabled:opacity-50`}
               >
@@ -167,8 +167,8 @@ export function TopNav({
               </button>
             </div>
           ) : (
-            <div className="flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-cyan-300/80">
-              <Shield className="h-3 w-3" />
+            <div className="flex shrink-0 items-center gap-2 rounded-lg border border-cyan-500/15 bg-cyan-500/5 px-3 py-2.5 text-[11px] font-bold uppercase tracking-widest text-cyan-300/80">
+              <Shield className="h-4 w-4" />
               Paper only · live authority unused
             </div>
           )}
@@ -179,18 +179,18 @@ export function TopNav({
               <Button
                 onClick={() => doPause(mode)}
                 disabled={isPausing}
-                className="bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 hover:text-amber-400 border border-amber-500/20 h-8 px-4 font-mono text-xs uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(245,158,11,0.1)] w-full"
+                className="bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 hover:text-amber-400 border border-amber-500/20 h-9 px-5 font-mono text-xs uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(245,158,11,0.1)] w-full"
               >
-                {isPausing ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-2" /> : <Pause className="w-3.5 h-3.5 mr-2" />}
+                {isPausing ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Pause className="w-4 h-4 mr-2" />}
                 Halt
               </Button>
             ) : (
               <Button
                 onClick={() => doStart(mode)}
                 disabled={isStarting}
-                className="bg-[#00ffd0]/10 text-[#00ffd0] hover:bg-[#00ffd0]/20 hover:text-[#00ffd0] border border-[#00ffd0]/20 h-8 px-4 font-mono text-xs uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(0,255,208,0.15)] w-full"
+                className="bg-[#00ffd0]/10 text-[#00ffd0] hover:bg-[#00ffd0]/20 hover:text-[#00ffd0] border border-[#00ffd0]/20 h-9 px-5 font-mono text-xs uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(0,255,208,0.15)] w-full"
               >
-                {isStarting ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-2" /> : <Play className="w-3.5 h-3.5 mr-2" />}
+                {isStarting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
                 Arm
               </Button>
             )}
