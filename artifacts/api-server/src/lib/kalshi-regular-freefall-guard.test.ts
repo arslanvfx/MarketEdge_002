@@ -4,6 +4,23 @@ import assert from "node:assert/strict";
 import {
   evaluateRegularFreefallPreSubmitGuard,
 } from "./kalshi-regular-freefall-guard.ts";
+test("disabled regular freefall guard allows entry without evaluating evidence", () => {
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    enabled: false,
+    samples: [],
+    side: "yes",
+    nowMs: 10_000,
+    windowStartMs: 0,
+    closeTimeMs: 20_000,
+    targetPrice: 100,
+    hasProduct: false,
+  });
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.reason, null);
+  assert.equal(result.guardResult, null);
+});
+
 
 const NOW = 100_000;
 const TARGET = 99;

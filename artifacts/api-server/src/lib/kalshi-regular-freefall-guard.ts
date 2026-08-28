@@ -11,6 +11,7 @@ export const REGULAR_FREEFALL_ADVERSE_EXCURSION_THRESHOLD_PCT = 0.1;
 export const REGULAR_FREEFALL_ADVERSE_EXCURSION_RECOVERY_SECONDS = 3;
 
 export interface RegularFreefallGuardInput {
+  enabled?: boolean;
   samples: Array<{
     price: number;
     ts: number;
@@ -48,6 +49,16 @@ export function evaluateRegularFreefallPreSubmitGuard(
   const secondsRemaining = Number.isFinite(input.closeTimeMs)
     ? Math.max(0, (input.closeTimeMs - input.nowMs) / 1_000)
     : 0;
+  if (input.enabled === false) {
+    return {
+      allowed: true,
+      reason: null,
+      guardResult: null,
+      sampleCoverageMs: null,
+      deferredUnavailable: false,
+      secondsRemaining,
+    };
+  }
   if (!input.hasProduct) {
     return {
       allowed: false,

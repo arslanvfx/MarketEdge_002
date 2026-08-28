@@ -2601,6 +2601,7 @@ async function _runBotTick(
   );
   const freefallStartedAt = Date.now();
   const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
+    enabled: S.config.convictionDirectionGuardEnabled ?? true,
     samples: convictionPriceTicks.get(sym) ?? [],
     side: direction,
     nowMs: freefallStartedAt,

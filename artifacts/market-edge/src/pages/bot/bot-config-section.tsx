@@ -1027,12 +1027,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       })()}
                     </div>
 
-                    {/* Direction Guard */}
+                    {/* Regular-bet freefall safety gate */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
                       <div className="flex items-center justify-between">
                         <span className="text-[11px] font-medium text-sky-300 flex items-center gap-1.5">
                           <TrendingUp className="w-3 h-3" />
-                          Direction Guard
+                          Freefall Guard Safety Gate
                         </span>
                         <button
                           type="button"
@@ -1045,7 +1045,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Final wrong-side protection rechecks fresh spot samples immediately before reservation. It fails closed on missing or stale evidence, the wrong target side, adverse endpoint movement, consecutive wrong-way movement, reversal/excursion, or rapid movement.
+                        Controls the final Bot 1 regular-bet safety check immediately before submission. When on, it fails closed on missing or stale spot evidence, the wrong target side, adverse endpoint movement, consecutive wrong-way movement, reversal/excursion, or rapid movement. This does not change the separate Scalper freefall guard.
                       </span>
                       {(merged.convictionDirectionGuardEnabled ?? true) && (
                         <div className="flex flex-col gap-2 mt-1">
