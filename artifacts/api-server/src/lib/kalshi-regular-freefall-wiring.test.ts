@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-test("paper and live share one regular freefall decision at pre-submit", () => {
+test("paper and live enforce one regular freefall decision at pre-submit", () => {
   const source = readFileSync(
     new URL("./kalshi-bot-tick.ts", import.meta.url),
     "utf8",
@@ -10,22 +10,23 @@ test("paper and live share one regular freefall decision at pre-submit", () => {
   const decision = source.indexOf(
     "const regularFreefall = evaluateRegularFreefallPreSubmitGuard",
   );
-  const liveBoundary = source.indexOf('if (entryMode === "live")', decision);
+  const blockedBoundary = source.indexOf("if (!regularFreefall.allowed)", decision);
   const intent = source.indexOf("claimRegularOrderIntent", decision);
   assert.ok(decision >= 0);
-  assert.ok(decision < liveBoundary);
-  assert.ok(liveBoundary < intent);
+  assert.ok(decision < blockedBoundary);
+  assert.ok(blockedBoundary < intent);
   assert.match(
-    source.slice(decision, liveBoundary),
+    source.slice(decision, intent),
     /regularFreefallSignals[\s\S]*convictionDirectionGuardBlockedMap\.set/,
   );
-  assert.match(source.slice(decision, liveBoundary), /advisory: entryMode === "paper"/);
-  assert.doesNotMatch(source.slice(decision, liveBoundary), /setTickAbortReason/);
-  assert.match(source.slice(liveBoundary, intent), /setTickAbortReason/);
+  assert.doesNotMatch(source.slice(decision, intent), /advisory: entryMode === "paper"/);
+  assert.match(source.slice(blockedBoundary, intent), /setTickAbortReason/);
+  assert.match(source.slice(blockedBoundary, intent), /persistSkip\(entryMode\)/);
+  assert.match(source.slice(blockedBoundary, intent), /return;/);
   assert.match(source, /regularFreefall: regularFreefallSignals/);
   assert.match(
-    source.slice(liveBoundary, intent),
-    /if \(S\.config\.shadowPaperBets\) persistSkip\("paper"\)/,
+    source.slice(blockedBoundary, intent),
+    /entryMode === "live" && S\.config\.shadowPaperBets/,
   );
 });
 

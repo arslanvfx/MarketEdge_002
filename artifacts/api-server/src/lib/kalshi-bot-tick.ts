@@ -2587,8 +2587,8 @@ async function _runBotTick(
   }
 
   // Evaluate one canonical final decision for both modes at the exact same
-  // pre-submit boundary. Live fails closed; paper records the decision but
-  // remains advisory so it can measure the guard without changing exposure.
+  // pre-submit boundary. Paper must stop whenever live would stop so
+  // development positions represent executable live opportunities.
   const freefallProduct = CRYPTO_COINS.find(
     (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
   );
@@ -2608,7 +2608,7 @@ async function _runBotTick(
     evidenceClass: regularFreefall.allowed
       ? "clear"
       : regularFreefall.guardResult?.evaluable === true ? "adverse" : "unavailable",
-    advisory: entryMode === "paper",
+    advisory: false,
     cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "coinbase",
     reason: regularFreefall.reason,
     guardResult: regularFreefall.guardResult,
@@ -2619,7 +2619,7 @@ async function _runBotTick(
     const evidence = describeRegularFreefallDecision(regularFreefall);
     convictionDirectionGuardBlockedMap.set(sym, {
       direction,
-      advisory: entryMode === "paper",
+      advisory: false,
       gate: regularFreefall.guardResult?.evaluable === false ? "no-data" : "tick",
       evidenceClass: regularFreefallSignals.evidenceClass,
       reason: regularFreefall.reason,
@@ -2627,11 +2627,11 @@ async function _runBotTick(
       fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
       toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
     });
+    regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), evidence);
+    markPlacementTerminal("freefall", evidence);
+    setTickAbortReason(sym, windowKey, evidence);
+    releaseConvictionEntryReservation(evidence);
     if (entryMode === "live") {
-      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), evidence);
-      markPlacementTerminal("freefall", evidence);
-      setTickAbortReason(sym, windowKey, evidence);
-      releaseConvictionEntryReservation(evidence);
       logger.warn(
         {
           sym,
@@ -2644,42 +2644,51 @@ async function _runBotTick(
         },
         "[kalshi-bot] final regular freefall guard blocked order before durable intent",
       );
-      const persistSkip = (mode: BotMode) => {
-        const persistAt = Date.now();
-        const reason = regularFreefall.reason ?? "freefall_blocked_final";
-        if (!shouldPersistRegularFreefallSkip({
-          symbol: sym, windowKey, mode, reason, nowMs: persistAt,
-        })) return;
-        void persistBetRecord({
-          symbol: sym,
+    } else {
+      logger.info(
+        {
+          sym,
           windowKey,
-          ticker: expectedTicker,
           direction,
-          action: "skip",
-          signals: {
-            reason: "conviction_freefall_guard",
-            // Keep the established top-level fields for production analytics
-            // while the structured object carries paper/live parity metadata.
-            guardReason: regularFreefall.reason,
-            guardResult: regularFreefall.guardResult,
-            sampleCoverageMs: regularFreefall.sampleCoverageMs,
-            secondsRemaining: regularFreefall.secondsRemaining,
-            regularFreefall: regularFreefallSignals,
-          },
-          entryPrice: yesPrice,
-          kalshiTarget,
-          mode,
-          insertId: `${sym}:${windowKey}:freefall:${mode}:${persistAt}`,
-        }).catch((err) => logger.warn(
-          { err, sym, windowKey, mode },
-          "[kalshi-bot] freefall guard evidence persist failed",
-        ));
-      };
-      persistSkip("live");
-      if (S.config.shadowPaperBets) persistSkip("paper");
-      return;
+          product: freefallProduct?.product ?? null,
+          reason: regularFreefall.reason,
+          secondsRemaining: regularFreefall.secondsRemaining,
+        },
+        "[kalshi-bot] final regular freefall guard blocked paper entry for live parity",
+      );
     }
-    markPaperLiveIneligible(evidence);
+    const persistSkip = (mode: BotMode) => {
+      const persistAt = Date.now();
+      const reason = regularFreefall.reason ?? "freefall_blocked_final";
+      if (!shouldPersistRegularFreefallSkip({
+        symbol: sym, windowKey, mode, reason, nowMs: persistAt,
+      })) return;
+      void persistBetRecord({
+        symbol: sym,
+        windowKey,
+        ticker: expectedTicker,
+        direction,
+        action: "skip",
+        signals: {
+          reason: "conviction_freefall_guard",
+          guardReason: regularFreefall.reason,
+          guardResult: regularFreefall.guardResult,
+          sampleCoverageMs: regularFreefall.sampleCoverageMs,
+          secondsRemaining: regularFreefall.secondsRemaining,
+          regularFreefall: regularFreefallSignals,
+        },
+        entryPrice: yesPrice,
+        kalshiTarget,
+        mode,
+        insertId: `${sym}:${windowKey}:freefall:${mode}:${persistAt}`,
+      }).catch((err) => logger.warn(
+        { err, sym, windowKey, mode },
+        "[kalshi-bot] freefall guard evidence persist failed",
+      ));
+    };
+    persistSkip(entryMode);
+    if (entryMode === "live" && S.config.shadowPaperBets) persistSkip("paper");
+    return;
   } else {
     convictionDirectionGuardBlockedMap.delete(sym);
   }
