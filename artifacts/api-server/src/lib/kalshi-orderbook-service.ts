@@ -13,6 +13,7 @@ export class KalshiOrderbookService {
   private tickers = new Set<string>();
   private reconnectAttempt = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private connectTimer: NodeJS.Timeout | null = null;
   private cacheTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   private alive = false;
@@ -74,10 +75,7 @@ export class KalshiOrderbookService {
     this.tickers = next;
     // New stream state must be snapshotted. Reconnect is portable across API
     // versions and avoids relying on an unsubscribe command.
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.store.clear();
-      this.socket.close(1000, "ticker set changed");
-    }
+    if (this.socket) this.restartSocket(this.socket, "ticker_set_changed");
   }
 
   private connect(): void {
@@ -93,7 +91,15 @@ export class KalshiOrderbookService {
     try {
       const ws = new WebSocket(WS_URL, { headers });
       this.socket = ws;
+      this.connectTimer = setTimeout(() => {
+        if (this.socket === ws && ws.readyState !== WebSocket.OPEN) {
+          logger.warn("[dashboard2-book] websocket connection timed out; forcing reconnect");
+          this.restartSocket(ws, "connection_timeout");
+        }
+      }, 10_000);
       ws.on("open", () => {
+        if (this.connectTimer) clearTimeout(this.connectTimer);
+        this.connectTimer = null;
         this.reconnectAttempt = 0;
         this.connectedAt = Date.now();
         this.alive = true;
@@ -108,8 +114,11 @@ export class KalshiOrderbookService {
       });
       ws.on("pong", () => { this.alive = true; });
       ws.on("message", data => this.onMessage(data));
-      ws.on("error", err => logger.warn({ err }, "[dashboard2-book] websocket error"));
-      ws.on("close", () => this.onClose(ws));
+      ws.on("error", err => {
+        logger.warn({ err }, "[dashboard2-book] websocket error; forcing reconnect");
+        this.restartSocket(ws, "socket_error");
+      });
+      ws.on("close", (code, reason) => this.onClose(ws, code, reason.toString()));
     } catch (err) {
       logger.warn({ err }, "[dashboard2-book] websocket creation failed");
       this.socket = null;
@@ -150,17 +159,39 @@ export class KalshiOrderbookService {
     if (this.resnapshotPending) return;
     this.resnapshotPending = true;
     logger.warn(context, "[dashboard2-book] resnapshot required; reconnecting fail-closed");
-    this.socket?.close(1012, "resnapshot required");
+    if (this.socket) this.restartSocket(this.socket, "resnapshot_required");
   }
 
-  private onClose(ws: WebSocket): void {
+  private restartSocket(ws: WebSocket, reason: string): void {
     if (this.socket !== ws) return;
     this.socket = null;
     this.connectedAt = null;
     this.resnapshotPending = false;
     this.store.clear();
+    if (this.connectTimer) clearTimeout(this.connectTimer);
     if (this.pingTimer) clearInterval(this.pingTimer);
+    this.connectTimer = null;
     this.pingTimer = null;
+    try {
+      ws.terminate();
+    } catch (err) {
+      logger.warn({ err, reason }, "[dashboard2-book] websocket termination failed");
+    }
+    logger.info({ reason }, "[dashboard2-book] reconnect scheduled");
+    this.scheduleReconnect();
+  }
+
+  private onClose(ws: WebSocket, code: number, reason: string): void {
+    if (this.socket !== ws) return;
+    this.socket = null;
+    this.connectedAt = null;
+    this.resnapshotPending = false;
+    this.store.clear();
+    if (this.connectTimer) clearTimeout(this.connectTimer);
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.connectTimer = null;
+    this.pingTimer = null;
+    logger.warn({ code, reason }, "[dashboard2-book] websocket closed; reconnect scheduled");
     this.scheduleReconnect();
   }
 

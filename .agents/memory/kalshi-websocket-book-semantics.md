@@ -14,3 +14,9 @@ Store `count_fp` and `delta_fp` as exact integer hundredths, and expose only com
 **Why:** Binary floating-point addition/subtraction can leave tiny negative residue after valid decimal deltas, falsely triggering underflow and resnapshot loops.
 
 **How to apply:** Parse fixed-point counts strictly into hundredth units, apply deltas with safe-integer checks, floor aggregate depth to whole contracts, and compute price only across the authorized whole-contract quantity.
+
+Fail-closed resnapshots must force-terminate the old socket before scheduling reconnect.
+
+**Why:** A graceful WebSocket close can remain stuck in `CLOSING`; retaining that socket blocks every reconnect and leaves an autonomous bot with no executable books for hours.
+
+**How to apply:** Clear book state and timers, detach the active socket, terminate it, then schedule a bounded reconnect. Add a connection timeout and log every restart reason.
