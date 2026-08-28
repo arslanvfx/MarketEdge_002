@@ -146,3 +146,4 @@
 - [IOC quote and reconciliation safety](ioc-quote-reconciliation-safety.md) — use marginal depth for limits, weighted prices only for estimates, and never infer unknown fills from ticker/time proximity.
 - [Dashboard 2 shared operations](dashboard2-shared-operations.md) — reuse canonical controls; keep retained quotes display-only and serialize paper safety with reservation.
 - [Bot 1 selectable live gateway](bot1-selectable-live-gateway.md) — legacy stays default; authenticated-book execution is isolated, opt-in, and shares Bot 1 ownership/accounting.
+- [Kalshi HTTP rate-limit control](kalshi-http-rate-limits.md) — coalesce identical reads, pace shared HTTP traffic, and treat any 429 as an origin-wide cooldown while retaining safe cached targets.

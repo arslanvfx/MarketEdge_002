@@ -27,6 +27,51 @@ export const kalshiTargetCache = new Map<string, {
 // 2s so the conviction bot tick (which runs every 2 s) always reads prices that
 // are at most one tick stale, ensuring brief 88–92¢ crossings aren't missed.
 const KALSHI_TARGET_LIB_TTL = 2_000;
+const KALSHI_429_FALLBACK_COOLDOWN_MS = 30_000;
+const kalshiTargetInFlight = new Map<string, Promise<number | null>>();
+const kalshiTargetRateLimitedUntil = new Map<string, number>();
+const kalshiOrderbookInFlight = new Map<string, Promise<OrderbookPrices | null>>();
+let kalshiHttpRateLimitedUntil = 0;
+let kalshiHttpNextRequestAt = 0;
+const KALSHI_HTTP_MIN_SPACING_MS = 300;
+
+async function acquireKalshiHttpRequestSlot(signal?: AbortSignal): Promise<boolean> {
+  if (kalshiHttpRateLimitedUntil > Date.now() || signal?.aborted) return false;
+  const scheduledAt = Math.max(Date.now(), kalshiHttpNextRequestAt);
+  kalshiHttpNextRequestAt = scheduledAt + KALSHI_HTTP_MIN_SPACING_MS;
+  const waitMs = scheduledAt - Date.now();
+  if (waitMs > 0) {
+    await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+  }
+  return !signal?.aborted && kalshiHttpRateLimitedUntil <= Date.now();
+}
+
+function kalshiTargetRequestKey(symbol: string, targetTime?: Date): string {
+  return `${symbol.toUpperCase()}:${targetTime ? targetTime.getTime() : "current"}`;
+}
+
+function cachedTargetForRequest(symbol: string, targetTime?: Date): number | null {
+  const hit = kalshiTargetCache.get(symbol.toUpperCase());
+  if (!hit || hit.value == null) return null;
+  if (!targetTime) return hit.value;
+  if (!hit.closeTime) return null;
+  return Math.abs(new Date(hit.closeTime).getTime() - targetTime.getTime()) < 8 * 60_000
+    ? hit.value
+    : null;
+}
+
+function retryAfterMs(resp: Response): number {
+  const raw = resp.headers.get("retry-after");
+  if (!raw) return KALSHI_429_FALLBACK_COOLDOWN_MS;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(60_000, Math.max(1_000, seconds * 1_000));
+  }
+  const at = Date.parse(raw);
+  return Number.isFinite(at)
+    ? Math.min(60_000, Math.max(1_000, at - Date.now()))
+    : KALSHI_429_FALLBACK_COOLDOWN_MS;
+}
 
 // Tracks when each symbol's new-window Kalshi target was first confirmed.
 export const confirmedTargetStore = new Map<string, { ticker: string; confirmedAt: number; target: number }>();
@@ -124,11 +169,12 @@ export type OrderbookPrices = {
   noDepth: Array<[number, number]>;
 };
 
-export async function fetchOrderbookPrices(
+async function fetchOrderbookPricesImpl(
   ticker: string,
   signal?: AbortSignal,
 ): Promise<OrderbookPrices | null> {
   if (!hasKalshiCredentials()) return null;
+  if (!await acquireKalshiHttpRequestSlot(signal)) return null;
 
   const path = `/markets/${encodeURIComponent(ticker)}/orderbook`;
   let headers: Record<string, string>;
@@ -148,6 +194,12 @@ export async function fetchOrderbookPrices(
         : AbortSignal.timeout(4000),
     });
     if (!resp.ok) {
+      if (resp.status === 429) {
+        kalshiHttpRateLimitedUntil = Math.max(
+          kalshiHttpRateLimitedUntil,
+          Date.now() + retryAfterMs(resp),
+        );
+      }
       logger.warn(
         { ticker, status: resp.status, statusText: resp.statusText },
         "[kalshi] fetchOrderbookPrices: non-OK response",
@@ -233,7 +285,25 @@ export async function fetchOrderbookPrices(
   }
 }
 
-export async function fetchKalshiTarget(
+export function fetchOrderbookPrices(
+  ticker: string,
+  signal?: AbortSignal,
+): Promise<OrderbookPrices | null> {
+  if (kalshiHttpRateLimitedUntil > Date.now()) return Promise.resolve(null);
+  const existing = kalshiOrderbookInFlight.get(ticker);
+  if (existing) return existing;
+
+  const request = fetchOrderbookPricesImpl(ticker, signal)
+    .finally(() => {
+      if (kalshiOrderbookInFlight.get(ticker) === request) {
+        kalshiOrderbookInFlight.delete(ticker);
+      }
+    });
+  kalshiOrderbookInFlight.set(ticker, request);
+  return request;
+}
+
+async function fetchKalshiTargetImpl(
   symbol: string,
   targetTime?: Date,
   forceRefresh = false,
@@ -258,6 +328,9 @@ export async function fetchKalshiTarget(
   }
 
   try {
+    if (!await acquireKalshiHttpRequestSlot(signal)) {
+      return cachedTargetForRequest(sym, targetTime);
+    }
     const resp = await fetch(
       `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=10`,
       {
@@ -268,6 +341,12 @@ export async function fetchKalshiTarget(
       },
     );
     if (!resp.ok) {
+      if (resp.status === 429) {
+        const requestKey = kalshiTargetRequestKey(sym, targetTime);
+        const limitedUntil = Date.now() + retryAfterMs(resp);
+        kalshiTargetRateLimitedUntil.set(requestKey, limitedUntil);
+        kalshiHttpRateLimitedUntil = Math.max(kalshiHttpRateLimitedUntil, limitedUntil);
+      }
       // Log the actual HTTP status so production failures are diagnosable.
       const errBody = await resp.text().catch(() => "");
       logger.warn(
@@ -457,4 +536,34 @@ export async function fetchKalshiTarget(
     );
     return null;
   }
+}
+
+export function fetchKalshiTarget(
+  symbol: string,
+  targetTime?: Date,
+  forceRefresh = false,
+  signal?: AbortSignal,
+): Promise<number | null> {
+  const sym = symbol.toUpperCase();
+  const requestKey = kalshiTargetRequestKey(sym, targetTime);
+  if (kalshiHttpRateLimitedUntil > Date.now()) {
+    return Promise.resolve(cachedTargetForRequest(sym, targetTime));
+  }
+  const limitedUntil = kalshiTargetRateLimitedUntil.get(requestKey) ?? 0;
+  if (limitedUntil > Date.now()) {
+    return Promise.resolve(cachedTargetForRequest(sym, targetTime));
+  }
+  if (limitedUntil > 0) kalshiTargetRateLimitedUntil.delete(requestKey);
+
+  const existing = kalshiTargetInFlight.get(requestKey);
+  if (existing) return existing;
+
+  const request = fetchKalshiTargetImpl(sym, targetTime, forceRefresh, signal)
+    .finally(() => {
+      if (kalshiTargetInFlight.get(requestKey) === request) {
+        kalshiTargetInFlight.delete(requestKey);
+      }
+    });
+  kalshiTargetInFlight.set(requestKey, request);
+  return request;
 }
