@@ -3,11 +3,11 @@ name: Regular placement funnel safety
 description: Safety rules for comparing paper opportunities with live regular-order placement without affecting execution.
 ---
 
-**Rule:** Compare live placements only with paper candidates that pass the same live eligibility predicates. Paper evaluation stays read-only and never claims an intent, but a failed final live guard must terminate the paper candidate instead of creating a synthetic position. Split internal processing time from exchange-response time.
+**Rule:** Compare live placements only with paper candidates that pass the same live eligibility predicates. Paper evaluation must remain advisory and read-only: never claim an intent or imply executable liquidity. Split internal processing time from exchange-response time.
 
 **Why:** Synthetic paper fills do not prove live balance, exposure capacity, intent availability, or exchange liquidity. Comparing all paper fills to live fills overstates a submission problem and hides the actual rejection stage.
 
-**How to apply:** Reuse the live slippage, spend, balance, exposure, final guard, and unresolved-intent checks with the same inputs. Persist rejected paper candidates as skips, not positions. Keep the atomic reservation authoritative and immediately before the exchange POST.
+**How to apply:** Reuse the live slippage, spend, balance, exposure, final guard, and unresolved-intent checks with the same inputs. Keep the atomic reservation authoritative and immediately before the exchange POST.
 
 **Rule:** Observability on an order path must be hard-bounded, exactly-once for terminal outcomes, idempotent after terminalization, and safe to no-op after eviction.
 
@@ -32,9 +32,3 @@ description: Safety rules for comparing paper opportunities with live regular-or
 **Why:** A durable claim on the shared pool can sit behind unrelated analytics writes, while one transaction per symbol serializes simultaneous opportunities until their prices leave range.
 
 **How to apply:** Collect finalized same-window candidates for only a market-negligible interval, enforce duplicate/order/exposure limits once under cross-process locks, commit all intents before POST, then let every approved continuation submit concurrently.
-
-**Rule:** Bot 1 may offer a selectable movement-safety profile, but the strict profile is the default. A relaxed profile may downgrade only ordinary directional confirmation to advisory; unavailable evidence, target crossing, rapid moves, and adverse excursions remain hard stops. Paper and live must resolve the same selected profile.
-
-**Why:** The operator needs a reversible way to admit neutral or mildly unfavorable entries without weakening fail-closed market evidence or making paper/live comparisons invalid.
-
-**How to apply:** Treat the profile as an explicit global operator control, never as a decision-mode preset or automatic mode default. Extreme-only relaxes ordinary movement; Advisory makes the entire direction/freefall guard warning-only, including unavailable evidence and hard movement verdicts. Persist both the raw verdict and resolved classification, and keep every downstream funding, intent, quote, exposure, and reconciliation boundary unchanged.

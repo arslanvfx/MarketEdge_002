@@ -343,12 +343,24 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
         const storedCooldownMs = convictionAbortCooldownMs.get(cooldownKey) ?? CONVICTION_ABORT_COOLDOWN_MS;
         const cooldownActive   = abortedAt != null && Date.now() - abortedAt < storedCooldownMs;
 
-        // Retain an ACTIVE cooldown so authenticated-book deltas cannot bypass
-        // the same intentional rate limit. Once expired, remove the stale
-        // record and allow either trigger source to retry.
-        if (abortedAt != null && !cooldownActive) {
+        // Always clear the abort-cooldown record on zone re-entry so that the
+        // 5-second loop can retry on its next evaluation even if we do not
+        // dispatch here (e.g. because the cooldown is still active).
+        if (abortedAt != null) {
           convictionAbortCooldown.delete(cooldownKey);
-          convictionAbortCooldownMs.delete(cooldownKey);
+          if (cooldownActive) {
+            logger.info(
+              {
+                sym, windowKey,
+                yesAsk: yesAsk != null ? +yesAsk.toFixed(4) : null,
+                noAsk:  noAsk  != null ? +noAsk.toFixed(4)  : null,
+                lockPrice, lockPriceCap,
+                side: yesInZone ? "YES" : "NO",
+                remainingMs: Math.round(storedCooldownMs - (Date.now() - abortedAt)),
+              },
+              "[conviction-poller] zone entry — abort cooldown cleared (was active); loop will retry on next cycle",
+            );
+          }
         }
 
         // ── Pre-warm orderbook + immediate dispatch ───────────────────────────
@@ -465,13 +477,11 @@ export function startConvictionPoller(): void {
   pollerGeneration += 1;
   convictionPriceTicks.clear();
   logger.info("[conviction-poller] starting target poll and dedicated 1 s spot sampler");
-  // Authenticated WebSocket books are the live conviction trigger. Keep a
-  // non-null lifecycle handle for generation guards, but do not force-refresh
-  // every Kalshi market over REST each second: that duplicated the WebSocket
-  // feed, overwhelmed the shared HTTP path, and caused severe native-memory
-  // growth under sustained throttling. Normal window discovery still refreshes
-  // the shared target cache; missing live book data remains fail-closed.
-  pollerHandle = setInterval(() => {}, POLL_INTERVAL_MS);
+  pollerHandle = setInterval(() => {
+    pollOnce().catch((err) =>
+      logger.debug({ err }, "[conviction-poller] poll error (non-fatal)"),
+    );
+  }, POLL_INTERVAL_MS);
   spotSamplerHandle = setInterval(() => {
     sampleSpotsOnce().catch((err) =>
       logger.debug({ err }, "[conviction-poller] spot sample error (non-fatal)"),
@@ -480,6 +490,7 @@ export function startConvictionPoller(): void {
   // Fire immediately so the first bot tick after mode switch has fresh data.
   // Install the handle first: generation guards treat a missing handle as
   // stopped and must not discard this initial cycle.
+  pollOnce().catch(() => {});
   sampleSpotsOnce().catch(() => {});
 }
 

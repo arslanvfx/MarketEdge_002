@@ -94,7 +94,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
               {/* ── Bet Profile ── */}
               <div className="flex flex-col gap-2">
                 <span className="text-xs font-medium text-muted-foreground">Live Execution Gateway</span>
-                <div className="grid grid-cols-1 min-[420px]:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3">
                   {([
                     {
                       id: "legacy" as const,
@@ -138,75 +138,6 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
                     Gateway changes are not active until Save Configuration succeeds. Current active gateway:{" "}
                     {(cfg.liveExecutionGateway ?? "legacy") === "authenticated_book" ? "Authenticated Book" : "Legacy"}.
-                  </div>
-                )}
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <span className="text-xs font-medium text-muted-foreground">Bot 1 Entry Safety</span>
-                <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3">
-                  {([
-                    {
-                      id: "current" as const,
-                      label: "Current safeguards",
-                      detail: "Default. Requires favorable movement confirmation and blocks ordinary adverse drift.",
-                    },
-                    {
-                      id: "extreme_only" as const,
-                      label: "Extreme-only (lax)",
-                      detail: "Allows ordinary flat or mildly adverse movement. Still blocks stale evidence, strike crossing, rapid moves, and adverse excursions.",
-                    },
-                    {
-                      id: "advisory" as const,
-                      label: "Advisory",
-                      detail: "Pre-profile dev behavior. Logs every direction/freefall warning—including stale evidence—but this guard never blocks an entry.",
-                    },
-                  ]).map(profile => {
-                    const active = (cfg.entrySafetyProfile ?? "current") === profile.id;
-                    const pending = !active && (merged.entrySafetyProfile ?? "current") === profile.id;
-                    return (
-                      <button
-                        key={profile.id}
-                        type="button"
-                        onClick={() => setConfigDraft(d => ({ ...d, entrySafetyProfile: profile.id }))}
-                        className={`min-w-0 text-left rounded-xl p-3.5 border transition-all ${
-                          active
-                            ? "border-emerald-500/60 bg-emerald-500/10 ring-1 ring-emerald-500/30"
-                            : pending
-                              ? "border-amber-500/60 bg-amber-500/10 ring-1 ring-amber-500/30"
-                              : "border-border bg-background/30 hover:border-border/80 hover:bg-muted/30"
-                        }`}
-                      >
-                        <div className={`text-sm font-semibold ${
-                          active ? "text-emerald-300" : pending ? "text-amber-300" : "text-foreground"
-                        }`}>
-                          {profile.label}
-                          {active && <span className="ml-1.5 text-[9px] opacity-70">✓ active</span>}
-                          {pending && <span className="ml-1.5 text-[9px] opacity-80">pending save</span>}
-                        </div>
-                        <div className="mt-1 text-[10px] text-muted-foreground/70">{profile.detail}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-                {(cfg.entrySafetyProfile ?? "current") !== (merged.entrySafetyProfile ?? "current") && (
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
-                    Safety profile changes are not active until Save Configuration succeeds. Current active profile:{" "}
-                    {(cfg.entrySafetyProfile ?? "current") === "extreme_only"
-                      ? "Extreme-only (lax)"
-                      : (cfg.entrySafetyProfile ?? "current") === "advisory"
-                        ? "Advisory"
-                        : "Current safeguards"}.
-                  </div>
-                )}
-                {(merged.entrySafetyProfile ?? "current") === "extreme_only" && (
-                  <div className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-[11px] leading-relaxed text-orange-200">
-                    Real-money warning: this profile accepts entries during ordinary adverse drift. Hard market identity, stale-data, strike-crossing, rapid-move, excursion, funding, exposure, and duplicate-order protections remain enforced.
-                  </div>
-                )}
-                {(merged.entrySafetyProfile ?? "current") === "advisory" && (
-                  <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] leading-relaxed text-red-200">
-                    Real-money warning: the entire direction/freefall guard is warning-only in Advisory mode, including stale or missing evidence, strike crossing, rapid movement, and adverse excursions. Smart Hours, funding, exposure, market identity, quote, intent, duplicate-order, and reconciliation protections still apply.
                   </div>
                 )}
               </div>
@@ -952,9 +883,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         value={merged.convictionMaxDailySpend ?? 0}
                         onChange={e => {
                           const v = parseFloat(e.target.value);
-                          if (!Number.isNaN(v) && v >= 0) {
-                            setConfigDraft(d => ({ ...d, convictionMaxDailySpend: v }));
-                          }
+                          setConfigDraft(d => ({ ...d, convictionMaxDailySpend: Number.isNaN(v) || v <= 0 ? undefined : v }));
                         }} />
                       <span className="text-[10px] text-muted-foreground/60">
                         Hard cap on total $ placed as bets today (wins don't reduce this — it only goes up). 0 = no limit.

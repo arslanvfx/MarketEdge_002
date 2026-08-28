@@ -410,7 +410,6 @@ export default function BotDashboard() {
     botSteps?: BotStepEntry[];
     minConfidence?: number;
     decisionMode?: string;
-    entrySafetyProfile?: "current" | "extreme_only" | "advisory";
     coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
     coinTrajectory?: Record<string, import("./bot/types").TrajectoryGateResult>;
     extremeCautionAborted?: string[];
@@ -830,28 +829,6 @@ export default function BotDashboard() {
           mode={activeMode}
           isProduction={status?.isProductionEnv ?? false}
         />
-        <BotConfigSection
-          cfg={cfg}
-          merged={merged}
-          configDraft={configDraft}
-          setConfigDraft={setConfigDraft}
-          saving={saving}
-          saveConfig={saveConfig}
-          persistMsg={persistMsg}
-          persistError={persistError}
-          status={status}
-          activeMode={activeMode}
-          presetsData={presetsData}
-          modeDefaults={modeDefaultsData?.defaults}
-          savingPreset={savingPreset}
-          savePreset={savePreset}
-          presetMsg={presetMsg}
-          backtestData={backtestData}
-          configOpen={configOpen}
-          setConfigOpen={setConfigOpen}
-          authPost={authPost}
-          qc={qc}
-        />
         <ConditionsPanel
           conditions={conditionsData}
           evaluation={evalData?.evaluation ?? []}
@@ -865,7 +842,6 @@ export default function BotDashboard() {
             kalshiTargets={pipelineStatusData.kalshiTargets ?? {}}
             windowKey={pipelineStatusData.currentWindowKey ?? null}
             decisionMode={pipelineStatusData.decisionMode ?? null}
-            entrySafetyProfile={pipelineStatusData.entrySafetyProfile ?? status?.config?.entrySafetyProfile ?? "current"}
             coinStability={pipelineStatusData.coinStability}
             coinTrajectory={pipelineStatusData.coinTrajectory}
             stabilityConfig={{
@@ -906,6 +882,28 @@ export default function BotDashboard() {
         <BotRegularIntentPanel authPost={authPost} getToken={getToken} />
         <BotScalperPanel authPost={scalperAuthPost} />
         <BotSmartExitPanel authPost={authPost} />
+        <BotConfigSection
+          cfg={cfg}
+          merged={merged}
+          configDraft={configDraft}
+          setConfigDraft={setConfigDraft}
+          saving={saving}
+          saveConfig={saveConfig}
+          persistMsg={persistMsg}
+           persistError={persistError}
+          status={status}
+          activeMode={activeMode}
+          presetsData={presetsData}
+          modeDefaults={modeDefaultsData?.defaults}
+          savingPreset={savingPreset}
+          savePreset={savePreset}
+          presetMsg={presetMsg}
+          backtestData={backtestData}
+          configOpen={configOpen}
+          setConfigOpen={setConfigOpen}
+          authPost={authPost}
+          qc={qc}
+        />
         <LogicModePerf
           logicPerfData={logicPerfData}
           backtestData={backtestData}

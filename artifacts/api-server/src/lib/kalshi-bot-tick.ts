@@ -52,13 +52,10 @@ import {
   hasUnresolvedRegularIntent,
 } from "./kalshi-regular-order-intent";
 import { quoteAuthenticatedBookExecution } from "./kalshi-bot-authenticated-book-gateway";
-import { buildKalshi15mTicker } from "./kalshi-15m-ticker";
 import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service";
 import {
   describeRegularFreefallDecision,
   evaluateRegularFreefallPreSubmitGuard,
-  applyOrdinaryMovementSafetyProfile,
-  applyRegularFreefallSafetyProfile,
 } from "./kalshi-regular-freefall-guard";
 import { shouldPersistRegularFreefallSkip } from "./kalshi-freefall-telemetry";
 import { regularPlacementFunnel, type RegularPlacementTerminalOutcome } from "./kalshi-regular-placement-funnel";
@@ -109,10 +106,8 @@ import {
   convictionPriceTicks, shadowQhBypassActive,
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
-  type ConvictionDirectionBlockInfo,
 } from "./kalshi-bot-state";
 import {
-  CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS,
   REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
   regularZeroFillRetryKey,
   regularZeroFillRetryRemainingMs,
@@ -308,15 +303,6 @@ export function refreshTrajectoryForAllCoins(): void {
 // might still recover. Only exit when there is meaningful value to capture.
 const MIN_EXIT_CASHOUT_PER_CONTRACT = 0.15;
 
-type BotTickSource = "standard" | "authenticated_book";
-type PendingBotTick = {
-  kalshiTicker: string | null;
-  kalshiTarget: number | null;
-  yesPrice: number | null;
-  candles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>;
-  source: BotTickSource;
-};
-const pendingBotTicks = new Map<string, PendingBotTick>();
 
 export async function runBotTickForCoin(
   symbol: string,
@@ -324,48 +310,18 @@ export async function runBotTickForCoin(
   kalshiTarget: number | null,
   yesPrice: number | null,
   candles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>,
-  options?: { source?: BotTickSource },
 ): Promise<void> {
   if (!S.config.enabled) return;
 
   const sym = symbol.toUpperCase();
-  const requestedTick: PendingBotTick = {
-    kalshiTicker,
-    kalshiTarget,
-    yesPrice,
-    candles,
-    source: options?.source ?? "standard",
-  };
-  if (tickInFlight.has(sym)) {
-    const queued = pendingBotTicks.get(sym);
-    // A routine scheduler snapshot must never overwrite a newer authenticated
-    // book wake-up that is waiting for the current tick to release the lock.
-    if (queued?.source !== "authenticated_book" || requestedTick.source === "authenticated_book") {
-      pendingBotTicks.set(sym, requestedTick);
-    }
-    return;
-  }
+  if (tickInFlight.has(sym)) return;
   tickInFlight.add(sym);
 
   try {
-    let next: PendingBotTick | undefined = requestedTick;
-    while (next) {
-      pendingBotTicks.delete(sym);
-      try {
-        await _runBotTick(
-          sym,
-          next.kalshiTicker,
-          next.kalshiTarget,
-          next.yesPrice,
-          next.candles,
-        );
-      } catch (err) {
-        logger.warn({ err, sym, source: next.source }, "[kalshi-bot] tick error (non-fatal)");
-      }
-      next = pendingBotTicks.get(sym);
-    }
+    await _runBotTick(sym, kalshiTicker, kalshiTarget, yesPrice, candles);
+  } catch (err) {
+    logger.warn({ err, sym }, "[kalshi-bot] tick error (non-fatal)");
   } finally {
-    pendingBotTicks.delete(sym);
     tickInFlight.delete(sym);
   }
 }
@@ -1021,10 +977,7 @@ async function _runBotTick(
     // Persist at most once per (symbol, window) to avoid flooding the DB
     if (lastDecisionWindowKey.get(sym) !== windowKey) {
       lastDecisionWindowKey.set(sym, windowKey);
-      // Skip-history persistence is telemetry, not an execution prerequisite.
-      // Never hold the per-symbol tick lock behind a DB write: a fresh
-      // authenticated book update may already contain an actionable IOC.
-      void persistBetRecord({
+      await persistBetRecord({
         symbol: sym,
         windowKey,
         ticker: kalshiTicker,
@@ -1033,10 +986,7 @@ async function _runBotTick(
         signals: decision.signals,
         entryPrice: null,
         kalshiTarget,
-      }).catch((err) => logger.warn(
-        { err, sym, windowKey },
-        "[kalshi-bot] skip-history persistence failed (non-blocking)",
-      ));
+      });
     }
     return;
   }
@@ -1920,7 +1870,15 @@ async function _runBotTick(
   // (fetchKalshiTarget matches on close_time; windowKey "2026-07-18T00:15" returned
   // "KXNEAR15M-26JUL172030-30" = 20:30 EDT = 00:30 UTC = window close time).
   // Using the open time gives market_not_found 404 on every order attempt.
-  const expectedTicker = buildKalshi15mTicker(sym, windowKey) ?? "";
+  const _MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const _windowCloseUtc = new Date(new Date(windowKey + ":00Z").getTime() + 15 * 60 * 1000); // close = open + 15 min
+  const _windowCloseEdt = new Date(_windowCloseUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
+  const _tyy  = String(_windowCloseEdt.getUTCFullYear()).slice(-2);
+  const _tmon = _MONTHS[_windowCloseEdt.getUTCMonth()];
+  const _tdd  = String(_windowCloseEdt.getUTCDate()).padStart(2, '0');
+  const _thh  = String(_windowCloseEdt.getUTCHours()).padStart(2, '0');
+  const _tmm  = String(_windowCloseEdt.getUTCMinutes()).padStart(2, '0');
+  const expectedTicker = `KX${sym}15M-${_tyy}${_tmon}${_tdd}${_thh}${_tmm}-${_tmm}`;
 
   if (S.config.decisionMode === "conviction") {
     if (
@@ -1964,27 +1922,12 @@ async function _runBotTick(
     const _obCacheFresh = _cachedOb != null
       && Date.now() - _cachedOb.fetchedAt <= CONVICTION_OB_CACHE_TTL_MS
       && _cachedOb.ticker === expectedTicker;
-    const _wsTop = dashboard2KalshiOrderbookService.getTopOfBook(expectedTicker);
-    const _wsTopFresh = _wsTop != null
-      && _wsTop.ticker === expectedTicker
-      && dashboard2KalshiOrderbookService.isFresh(expectedTicker);
     const obPrices: { yesAsk: number | null; yesBid: number | null } | null =
-      _wsTopFresh && _wsTop
-        ? { yesAsk: _wsTop.yesAsk, yesBid: _wsTop.yesBid }
-        : _obCacheFresh && _cachedOb
+      _obCacheFresh && _cachedOb
         ? { yesAsk: _cachedOb.yesAsk, yesBid: _cachedOb.yesBid }
         : null;
     logger.debug(
-      {
-        sym,
-        windowKey,
-        expectedTicker,
-        cacheTickerWasDifferent: freshData?.ticker !== expectedTicker,
-        orderbookSource: _wsTopFresh ? "authenticated_ws" : _obCacheFresh ? "prepared_cache" : "none",
-        wsBookAgeMs: _wsTop ? Date.now() - _wsTop.updatedAt : null,
-        wsBookVersion: _wsTop?.bookVersion ?? null,
-        obCacheHit: _obCacheFresh,
-      },
+      { sym, windowKey, expectedTicker, cacheTickerWasDifferent: freshData?.ticker !== expectedTicker, obCacheHit: _obCacheFresh },
       "[kalshi-bot] conviction live-price gate: prepared orderbook consumed",
     );
 
@@ -2512,8 +2455,6 @@ async function _runBotTick(
     );
   }
 
-  let relaxedMovementAdvisory: ConvictionDirectionBlockInfo | null = null;
-
   // ── Pipeline direction guard (all non-conviction modes) ──────────────────
   // Conviction mode already has its own guard above (with second-level ticks).
   // For pipeline/ml_gate/classic entries the signals tell you *where price
@@ -2528,51 +2469,23 @@ async function _runBotTick(
     const _pLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
     const _pDir = computeConvictionDirectionGate({ candles, direction, lookback: _pLookback });
     if (_pDir.blocked) {
-      const _pPolicy = applyOrdinaryMovementSafetyProfile(
-        true,
-        S.config.entrySafetyProfile ?? "current",
+      releaseConvictionEntryReservation("pipeline direction guard");
+      logger.warn(
+        {
+          sym, direction, windowKey,
+          decisionMode: S.config.decisionMode,
+          fromPrice:    _pDir.fromPrice,
+          toPrice:      _pDir.toPrice,
+          slopePrice:   _pDir.slopePrice?.toFixed(2),
+          lookback:     _pLookback,
+        },
+        "[kalshi-bot] pipeline direction guard: price moving toward strike — order aborted",
       );
-      if (_pPolicy.advisory) {
-        relaxedMovementAdvisory = {
-          direction,
-          advisory: true,
-          gate: direction === "yes" ? "candle-decline" : "candle-rise",
-          evidenceClass: "adverse",
-          reason: "pipeline_direction_not_confirmed",
-          lookback: _pLookback,
-          fromPrice: _pDir.fromPrice ?? undefined,
-          toPrice: _pDir.toPrice ?? undefined,
-        };
-        convictionDirectionGuardBlockedMap.set(sym, relaxedMovementAdvisory);
-        logger.info(
-          {
-            sym, direction, windowKey,
-            entrySafetyProfile: S.config.entrySafetyProfile ?? "current",
-            fromPrice: _pDir.fromPrice,
-            toPrice: _pDir.toPrice,
-            slopePrice: _pDir.slopePrice,
-          },
-          "[kalshi-bot] selected safety profile made pipeline direction guard advisory",
-        );
-      } else {
-        releaseConvictionEntryReservation("pipeline direction guard");
-        logger.warn(
-          {
-            sym, direction, windowKey,
-            decisionMode: S.config.decisionMode,
-            fromPrice:    _pDir.fromPrice,
-            toPrice:      _pDir.toPrice,
-            slopePrice:   _pDir.slopePrice?.toFixed(2),
-            lookback:     _pLookback,
-          },
-          "[kalshi-bot] pipeline direction guard: price moving toward strike — order aborted",
-        );
-        setTickAbortReason(sym, windowKey,
-          `direction guard: price moving toward strike (slope ${_pDir.slopePrice?.toFixed(2) ?? "?"}/candle) — order aborted`);
-        regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "pipeline direction guard");
-        markPlacementTerminal("direction", "pipeline direction guard");
-        return;
-      }
+      setTickAbortReason(sym, windowKey,
+        `direction guard: price moving toward strike (slope ${_pDir.slopePrice?.toFixed(2) ?? "?"}/candle) — order aborted`);
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), "pipeline direction guard");
+      markPlacementTerminal("direction", "pipeline direction guard");
+      return;
     }
     logger.info(
       {
@@ -2681,8 +2594,8 @@ async function _runBotTick(
   }
 
   // Evaluate one canonical final decision for both modes at the exact same
-  // pre-submit boundary. Paper must stop whenever live would stop so
-  // development positions represent executable live opportunities.
+  // pre-submit boundary. Live fails closed; paper records the decision but
+  // remains advisory so it can measure the guard without changing exposure.
   const freefallProduct = CRYPTO_COINS.find(
     (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
   );
@@ -2697,30 +2610,23 @@ async function _runBotTick(
     hasProduct: freefallProduct != null,
     authoritativeCommodityCadence: freefallProduct?.product.startsWith("PYTH:") ?? false,
   });
-  const regularFreefallPolicy = applyRegularFreefallSafetyProfile(
-    regularFreefall,
-    S.config.entrySafetyProfile ?? "current",
-  );
   const regularFreefallSignals = {
-    allowed: regularFreefallPolicy.allowed,
-    rawAllowed: regularFreefall.allowed,
-    profile: S.config.entrySafetyProfile ?? "current",
-    classification: regularFreefallPolicy.classification,
+    allowed: regularFreefall.allowed,
     evidenceClass: regularFreefall.allowed
       ? "clear"
       : regularFreefall.guardResult?.evaluable === true ? "adverse" : "unavailable",
-    advisory: regularFreefallPolicy.advisory,
+    advisory: entryMode === "paper",
     cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "coinbase",
     reason: regularFreefall.reason,
     guardResult: regularFreefall.guardResult,
     sampleCoverageMs: regularFreefall.sampleCoverageMs,
     secondsRemaining: regularFreefall.secondsRemaining,
   } as const;
-  if (!regularFreefallPolicy.allowed) {
+  if (!regularFreefall.allowed) {
     const evidence = describeRegularFreefallDecision(regularFreefall);
     convictionDirectionGuardBlockedMap.set(sym, {
       direction,
-      advisory: false,
+      advisory: entryMode === "paper",
       gate: regularFreefall.guardResult?.evaluable === false ? "no-data" : "tick",
       evidenceClass: regularFreefallSignals.evidenceClass,
       reason: regularFreefall.reason,
@@ -2728,11 +2634,11 @@ async function _runBotTick(
       fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
       toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
     });
-    regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), evidence);
-    markPlacementTerminal("freefall", evidence);
-    setTickAbortReason(sym, windowKey, evidence);
-    releaseConvictionEntryReservation(evidence);
     if (entryMode === "live") {
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), evidence);
+      markPlacementTerminal("freefall", evidence);
+      setTickAbortReason(sym, windowKey, evidence);
+      releaseConvictionEntryReservation(evidence);
       logger.warn(
         {
           sym,
@@ -2745,90 +2651,53 @@ async function _runBotTick(
         },
         "[kalshi-bot] final regular freefall guard blocked order before durable intent",
       );
-    } else {
-      logger.info(
-        {
-          sym,
+      const persistSkip = (mode: BotMode) => {
+        const persistAt = Date.now();
+        const reason = regularFreefall.reason ?? "freefall_blocked_final";
+        if (!shouldPersistRegularFreefallSkip({
+          symbol: sym, windowKey, mode, reason, nowMs: persistAt,
+        })) return;
+        void persistBetRecord({
+          symbol: sym,
           windowKey,
+          ticker: expectedTicker,
           direction,
-          product: freefallProduct?.product ?? null,
-          reason: regularFreefall.reason,
-          secondsRemaining: regularFreefall.secondsRemaining,
-        },
-        "[kalshi-bot] final regular freefall guard blocked paper entry for live parity",
-      );
+          action: "skip",
+          signals: {
+            reason: "conviction_freefall_guard",
+            // Keep the established top-level fields for production analytics
+            // while the structured object carries paper/live parity metadata.
+            guardReason: regularFreefall.reason,
+            guardResult: regularFreefall.guardResult,
+            sampleCoverageMs: regularFreefall.sampleCoverageMs,
+            secondsRemaining: regularFreefall.secondsRemaining,
+            regularFreefall: regularFreefallSignals,
+          },
+          entryPrice: yesPrice,
+          kalshiTarget,
+          mode,
+          insertId: `${sym}:${windowKey}:freefall:${mode}:${persistAt}`,
+        }).catch((err) => logger.warn(
+          { err, sym, windowKey, mode },
+          "[kalshi-bot] freefall guard evidence persist failed",
+        ));
+      };
+      persistSkip("live");
+      if (S.config.shadowPaperBets) persistSkip("paper");
+      return;
     }
-    const persistSkip = (mode: BotMode) => {
-      const persistAt = Date.now();
-      const reason = regularFreefall.reason ?? "freefall_blocked_final";
-      if (!shouldPersistRegularFreefallSkip({
-        symbol: sym, windowKey, mode, reason, nowMs: persistAt,
-      })) return;
-      void persistBetRecord({
-        symbol: sym,
-        windowKey,
-        ticker: expectedTicker,
-        direction,
-        action: "skip",
-        signals: {
-          reason: "conviction_freefall_guard",
-          guardReason: regularFreefall.reason,
-          guardResult: regularFreefall.guardResult,
-          sampleCoverageMs: regularFreefall.sampleCoverageMs,
-          secondsRemaining: regularFreefall.secondsRemaining,
-          regularFreefall: regularFreefallSignals,
-        },
-        entryPrice: yesPrice,
-        kalshiTarget,
-        mode,
-        insertId: `${sym}:${windowKey}:freefall:${mode}:${persistAt}`,
-      }).catch((err) => logger.warn(
-        { err, sym, windowKey, mode },
-        "[kalshi-bot] freefall guard evidence persist failed",
-      ));
-    };
-    persistSkip(entryMode);
-    if (entryMode === "live" && S.config.shadowPaperBets) persistSkip("paper");
-    return;
-  } else if (regularFreefallPolicy.advisory) {
-    convictionDirectionGuardBlockedMap.set(sym, {
-      direction,
-      advisory: true,
-      gate: "tick",
-      evidenceClass: regularFreefallSignals.evidenceClass,
-      reason: regularFreefall.reason,
-      lookback: regularFreefall.guardResult?.samplesUsed ?? 0,
-      fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
-      toPrice: regularFreefall.guardResult?.latestPrice ?? undefined,
-    });
-    logger.info(
-      {
-        sym,
-        windowKey,
-        direction,
-        entryMode,
-        entrySafetyProfile: S.config.entrySafetyProfile ?? "current",
-        reason: regularFreefall.reason,
-      },
-      "[kalshi-bot] selected safety profile made final movement guard advisory",
-    );
-  } else if (relaxedMovementAdvisory) {
-    convictionDirectionGuardBlockedMap.set(sym, relaxedMovementAdvisory);
+    markPaperLiveIneligible(evidence);
   } else {
     convictionDirectionGuardBlockedMap.delete(sym);
   }
 
   if (entryMode === "live") {
-    // Conviction always uses the authenticated gateway. The explicit setting
-    // remains available for other live decision modes, but a stale persisted
-    // "legacy" value must never silently disable the low-latency conviction path.
+    // The authenticated gateway is intentionally opt-in. Legacy pricing and
+    // submission remain byte-for-byte on the existing path unless selected.
     const authenticatedGatewayZone = S.config.decisionMode === "conviction"
       ? getEffectiveConvictionZone(sym, S.config)
       : { lockPrice: 0, lockPriceCap: 1 };
-    const useAuthenticatedBookGateway =
-      S.config.decisionMode === "conviction"
-      || S.config.liveExecutionGateway === "authenticated_book";
-    const authenticatedBookQuote = useAuthenticatedBookGateway
+    const authenticatedBookQuote = S.config.liveExecutionGateway === "authenticated_book"
       ? quoteAuthenticatedBookExecution({
           ticker: expectedTicker,
           side: direction,
@@ -2837,8 +2706,8 @@ async function _runBotTick(
           sideCostCeiling: authenticatedGatewayZone.lockPriceCap,
         }, dashboard2KalshiOrderbookService)
       : null;
-    if (useAuthenticatedBookGateway && !authenticatedBookQuote) {
-      const reason = "authenticated book gateway requires a fresh exact book with executable depth";
+    if (S.config.liveExecutionGateway === "authenticated_book" && !authenticatedBookQuote) {
+      const reason = "authenticated book gateway requires a fresh exact book with full requested depth";
       releaseConvictionEntryReservation(reason);
       setTickAbortReason(sym, windowKey, `gateway abort: ${reason}`);
       regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);
@@ -2846,10 +2715,6 @@ async function _runBotTick(
       return;
     }
     if (authenticatedBookQuote) {
-      // IOC authorizes only the complete contracts visible at the fixed limit.
-      // Use this capped quantity for every downstream reservation, POST, fill,
-      // exposure, and P&L operation.
-      contractCount = authenticatedBookQuote.requestedCount;
       logger.info(
         {
           sym,
@@ -2935,17 +2800,12 @@ async function _runBotTick(
         requestedCost: worstCaseRouteCost,
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
         maxTotalExposure: S.config.maxTotalExposure,
-        zeroFillRetryCooldownMs: S.config.decisionMode === "conviction"
-          ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS
-          : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
       });
       if (!claim.claimed) {
         if (claim.reason === "authoritative_zero_fill_cooldown") {
           windowZeroFillRetryAfter.set(
             regularZeroFillRetryKey("live", sym, windowKey),
-            Date.now() + (S.config.decisionMode === "conviction"
-              ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS
-              : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS),
+            Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
           );
         }
         regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
@@ -3107,9 +2967,7 @@ async function _runBotTick(
         const retryKey = regularZeroFillRetryKey(entryMode, sym, windowKey);
         windowZeroFillRetryAfter.set(
           retryKey,
-          Date.now() + (S.config.decisionMode === "conviction"
-            ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS
-            : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS),
+          Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
         );
         // Preserve the established key format consumed by the window-level
         // failed-fill guards and attempt counter.
@@ -3140,7 +2998,7 @@ async function _runBotTick(
           // Without this, the coin stays locked for the whole window after one 0-fill.
           releaseConvictionEntryReservation("entry order returned zero fills; retry allowed");
           setTickAbortReason(sym, windowKey,
-            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${(S.config.decisionMode === "conviction" ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS) / 1_000}s cooldown`);
+            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS / 1_000}s cooldown`);
         }
         // Confirmed zero fill (dead) — release the durable reservation so the
         // next tick may re-claim. This is a DEFINITE outcome, safe to release.

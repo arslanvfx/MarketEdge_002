@@ -956,36 +956,6 @@ test("per-market Smart Hours allows the third settled bet to calibrate the cell"
   assert.equal(schedule.silencedByDow?.["1"]?.includes(15), true);
 });
 
-test("per-market Smart Hours strictly follows the selected silence-below threshold", () => {
-  const createdAt = "2026-08-17T15:15:00.000Z"; // Monday ET, UTC hour 15
-  const atThreshold = [
-    makeBet({ createdAt, outcome: "win" }),
-    makeBet({ createdAt, outcome: "win" }),
-    makeBet({ createdAt, outcome: "loss" }),
-    makeBet({ createdAt, outcome: "loss" }),
-  ];
-  const belowThreshold = [
-    makeBet({ createdAt, outcome: "win" }),
-    makeBet({ createdAt, outcome: "loss" }),
-    makeBet({ createdAt, outcome: "loss" }),
-    makeBet({ createdAt, outcome: "loss" }),
-  ];
-
-  const exact = computeSymbolQuietHoursV2(atThreshold, 50);
-  assert.equal(
-    exact.silencedByDow?.["1"]?.includes(15),
-    false,
-    "win rate equal to the selected threshold must remain active",
-  );
-
-  const below = computeSymbolQuietHoursV2(belowThreshold, 50);
-  assert.equal(
-    below.silencedByDow?.["1"]?.includes(15),
-    true,
-    "win rate below the selected threshold must be silenced",
-  );
-});
-
 test("per-market recalibration preserves manual percentage and dollar limits", () => {
   const current = {
     enabled: true,

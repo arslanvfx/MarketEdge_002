@@ -67,16 +67,15 @@ export interface DailyHourlyPnl {
   hours: DailyHourlyPnlBar[];
 }
 
-export async function getDailyHourlyPnl(mode: BotMode, etDate: string): Promise<DailyHourlyPnl> {
-  const result = await pool.query(DAILY_HOURLY_PNL_SQL, [mode, etDate]);
+export async function getDailyHourlyPnl(mode: BotMode): Promise<DailyHourlyPnl> {
+  const result = await pool.query(DAILY_HOURLY_PNL_SQL, [mode]);
 
   // Extract bounds from any row (all rows share the same computed bounds)
   // We need to run a bounds-only query if no rows returned.
   const boundsResult = await pool.query<{ day_start_at: Date; next_reset_at: Date }>(
     `SELECT
-       $1::date::timestamp AT TIME ZONE 'America/New_York' AS day_start_at,
-       ($1::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'America/New_York' AS next_reset_at`,
-    [etDate],
+       date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York' AS day_start_at,
+       (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') + INTERVAL '1 day') AT TIME ZONE 'America/New_York' AS next_reset_at`,
   );
   const bounds = boundsResult.rows[0];
   if (!bounds) throw new Error("Unable to compute daily P&L bounds");

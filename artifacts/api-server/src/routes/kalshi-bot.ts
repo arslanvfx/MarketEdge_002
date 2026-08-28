@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, mergePerMarketConvictionConfig, isValidConvictionZoneBounds, stripEntrySafetyProfileFromModePreset, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, mergePerMarketConvictionConfig, isValidConvictionZoneBounds, type BetProfile } from "../lib/kalshi-bot-engine";
 import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
@@ -208,15 +208,7 @@ async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<B
     const rows = await db.select().from(botConfigTable).where(eq(botConfigTable.id, PRESET_ROW_ID)).limit(1);
     if (rows.length > 0) {
       const cfg = rows[0].config as { presets?: Partial<Record<DecisionMode, Partial<BotConfig>>> } | null;
-      const rawPresets = cfg?.presets ?? {};
-      const safePresets: Partial<Record<DecisionMode, Partial<BotConfig>>> = {};
-      for (const [mode, preset] of Object.entries(rawPresets)) {
-        if (preset) {
-          safePresets[mode as DecisionMode] =
-            stripEntrySafetyProfileFromModePreset(preset);
-        }
-      }
-      return safePresets;
+      return cfg?.presets ?? {};
     }
   } catch { /* non-fatal */ }
   return {};
@@ -224,10 +216,7 @@ async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<B
 
 async function writeModePreset(mode: DecisionMode, config: Partial<BotConfig>): Promise<void> {
   const existing = await readModePresets();
-  const updated = {
-    ...existing,
-    [mode]: stripEntrySafetyProfileFromModePreset(config),
-  };
+  const updated = { ...existing, [mode]: config };
   await db
     .insert(botConfigTable)
     .values({ id: PRESET_ROW_ID, config: { presets: updated } as Record<string, unknown>, updatedAt: new Date() })
@@ -540,7 +529,6 @@ function pipelineStatusHandler(_req: any, res: any) {
       botSteps,
       minConfidence,
       decisionMode,
-      entrySafetyProfile: botState.config.entrySafetyProfile ?? "current",
       coinStability: Object.fromEntries(coinStabilityCache),
       coinTrajectory: Object.fromEntries(coinTrajectoryCache),
       extremeCautionAborted,
@@ -639,28 +627,12 @@ router.get("/crypto/bot/daily-pnl-hourly", async (req, res) => {
       ? requestedMode
       : getBotState().mode;
   try {
-    const todayEt = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "America/New_York",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(new Date());
-    const requestedDate = typeof req.query.date === "string" ? req.query.date : todayEt;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) {
-      return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-    }
-    const selected = new Date(`${requestedDate}T12:00:00-04:00`);
-    const today = new Date(`${todayEt}T12:00:00-04:00`);
-    const ageDays = Math.round((today.getTime() - selected.getTime()) / 86_400_000);
-    if (!Number.isFinite(selected.getTime()) || ageDays < 0 || ageDays > 29) {
-      return res.status(400).json({ error: "date must be within the latest 30 ET days" });
-    }
     res.set({
       "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
       Pragma: "no-cache",
       Expires: "0",
     });
-    res.json(await getDailyHourlyPnl(mode, requestedDate));
+    res.json(await getDailyHourlyPnl(mode));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
@@ -924,10 +896,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     dataGatheringEnabled,
     perMarketConvictionConfig,
     liveExecutionGateway,
-    entrySafetyProfile,
   } = req.body as {
     liveExecutionGateway?: "legacy" | "authenticated_book";
-    entrySafetyProfile?: "current" | "extreme_only" | "advisory";
     betSize?: number;
     dailyLossLimit?: number;
     signalThreshold?: number;
@@ -1042,9 +1012,6 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (liveExecutionGateway === "legacy" || liveExecutionGateway === "authenticated_book") {
     partial.liveExecutionGateway = liveExecutionGateway;
   }
-  if (entrySafetyProfile === "current" || entrySafetyProfile === "extreme_only" || entrySafetyProfile === "advisory") {
-    partial.entrySafetyProfile = entrySafetyProfile;
-  }
   if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 500) partial.betSize = betSize;
   if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;
   if (typeof signalThreshold === "number" && [2, 3, 4].includes(signalThreshold)) {
@@ -1059,9 +1026,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     // explicit overrides from this request on top of that.
     // Priority (highest wins): request body > saved preset > built-in defaults.
     const builtIn = BUILT_IN_MODE_DEFAULTS[decisionMode as DecisionMode];
-    if (builtIn) {
-      Object.assign(partial, stripEntrySafetyProfileFromModePreset(builtIn));
-    }
+    if (builtIn) Object.assign(partial, builtIn);
 
     const presets = await readModePresets();
     const modePreset = presets[decisionMode as DecisionMode];
@@ -1531,7 +1496,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.convictionMinEntryMinutes = Math.round(convictionMinEntryMinutes);
   }
   if (typeof convictionMaxDailySpend === "number" && convictionMaxDailySpend >= 0) {
-    partial.convictionMaxDailySpend = convictionMaxDailySpend;
+    partial.convictionMaxDailySpend = convictionMaxDailySpend > 0 ? convictionMaxDailySpend : undefined;
   }
   // 0 = disabled; > 0 enables boost for that dollar amount
   if (typeof convictionBoostBetSize === "number" && convictionBoostBetSize >= 0) {
@@ -2259,11 +2224,8 @@ router.post("/crypto/bot/config/save-preset", requireAuth, async (_req, res) => 
   try {
     const state = getBotState();
     const mode = state.config.decisionMode;
-    const preset = stripEntrySafetyProfileFromModePreset(
-      state.config as unknown as Partial<BotConfig>,
-    );
-    await writeModePreset(mode, preset);
-    res.json({ ok: true, saved: mode, preset });
+    await writeModePreset(mode, state.config as unknown as Partial<BotConfig>);
+    res.json({ ok: true, saved: mode, preset: state.config });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

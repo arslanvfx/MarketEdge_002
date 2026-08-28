@@ -537,69 +537,6 @@ test("conviction hot path consumes only prepared orderbook and reaches durable c
   assert.doesNotMatch(hotPath, /await fetchOrderbookPrices/);
 });
 
-test("conviction cannot silently fall back to the legacy execution gateway", async () => {
-  const source = await import("node:fs/promises").then((fs) =>
-    fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),
-  );
-  const gatewayStart = source.indexOf("const useAuthenticatedBookGateway");
-  const gatewayEnd = source.indexOf("const durableEntryLimitRaw", gatewayStart);
-  const gatewayPath = source.slice(gatewayStart, gatewayEnd);
-  assert.ok(gatewayStart >= 0 && gatewayEnd > gatewayStart);
-  assert.match(gatewayPath, /S\.config\.decisionMode === "conviction"/);
-  assert.match(gatewayPath, /quoteAuthenticatedBookExecution/);
-  assert.match(gatewayPath, /if \(useAuthenticatedBookGateway && !authenticatedBookQuote\)/);
-});
-
-test("authenticated conviction dispatch uses shared current-window identity without REST-poller dependency", async () => {
-  const source = await import("node:fs/promises").then((fs) =>
-    fs.readFile(new URL("./kalshi-bot-loop.ts", import.meta.url), "utf8"),
-  );
-  const dispatcherStart = source.indexOf("const convictionBookDispatch");
-  const dispatcherEnd = source.indexOf("dashboard2KalshiOrderbookService.onBookUpdate", dispatcherStart);
-  const dispatcher = source.slice(dispatcherStart, dispatcherEnd);
-  assert.ok(dispatcherStart >= 0 && dispatcherEnd > dispatcherStart);
-  assert.match(dispatcher, /S\.config\.decisionMode === "conviction"/);
-  assert.doesNotMatch(dispatcher, /liveExecutionGateway === "authenticated_book"/);
-  assert.match(dispatcher, /getKalshiCachedData\(sym\)/);
-  assert.doesNotMatch(dispatcher, /getConvictionLivePriceSnapshot\(sym\)/);
-});
-
-test("durable intent batching adds no fixed timer delay before broker submission", async () => {
-  const source = await import("node:fs/promises").then((fs) =>
-    fs.readFile(new URL("./kalshi-regular-order-intent.ts", import.meta.url), "utf8"),
-  );
-  const claimStart = source.indexOf("export function claimRegularOrderIntent(");
-  const claimEnd = source.indexOf("/**", claimStart + 10);
-  const claim = source.slice(claimStart, claimEnd);
-  assert.match(claim, /queueMicrotask/);
-  assert.doesNotMatch(claim, /setTimeout/);
-});
-
-test("SKIP telemetry cannot hold the per-symbol lock ahead of a fresh book update", async () => {
-  const source = await import("node:fs/promises").then((fs) =>
-    fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),
-  );
-  const skipStart = source.indexOf('if (decision.action === "SKIP")');
-  const skipEnd = source.indexOf("// ── Per-coin streak pause", skipStart);
-  const skipPath = source.slice(skipStart, skipEnd);
-  assert.ok(skipStart >= 0 && skipEnd > skipStart);
-  assert.match(skipPath, /void persistBetRecord/);
-  assert.doesNotMatch(skipPath, /await persistBetRecord/);
-});
-
-test("authenticated book ticks are queued behind an active scheduler tick instead of dropped", async () => {
-  const source = await import("node:fs/promises").then((fs) =>
-    fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),
-  );
-  const start = source.indexOf("export async function runBotTickForCoin");
-  const end = source.indexOf("async function _runBotTick", start);
-  const wrapper = source.slice(start, end);
-  assert.match(wrapper, /pendingBotTicks\.set\(sym, requestedTick\)/);
-  assert.match(wrapper, /queued\?\.source !== "authenticated_book"/);
-  assert.match(wrapper, /next = pendingBotTicks\.get\(sym\)/);
-  assert.doesNotMatch(wrapper, /if \(tickInFlight\.has\(sym\)\) return/);
-});
-
 test("regular conviction submits one IOC at the exact verified quote", async () => {
   const source = await import("node:fs/promises").then((fs) =>
     fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),

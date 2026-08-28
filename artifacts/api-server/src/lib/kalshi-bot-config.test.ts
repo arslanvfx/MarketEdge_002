@@ -23,11 +23,8 @@ import assert from "node:assert/strict";
 
 import {
   DEFAULT_BOT_CONFIG,
-  normalizeEntrySafetyProfile,
-  stripEntrySafetyProfileFromModePreset,
   type BotConfig,
   type DecisionMode,
-  type EntrySafetyProfile,
 } from "./kalshi-bot-engine-core.ts";
 
 // ---------------------------------------------------------------------------
@@ -42,11 +39,7 @@ function jsonRoundtrip<T>(value: T): T {
 // Helper: simulate what loadBotConfigFromDB does when a row is found.
 function applyStoredConfig(stored: Record<string, unknown>): BotConfig {
   const saved = stored as Partial<BotConfig>;
-  return {
-    ...DEFAULT_BOT_CONFIG,
-    ...saved,
-    entrySafetyProfile: normalizeEntrySafetyProfile(saved.entrySafetyProfile),
-  };
+  return { ...DEFAULT_BOT_CONFIG, ...saved };
 }
 
 // ---------------------------------------------------------------------------
@@ -60,51 +53,6 @@ test("DEFAULT_BOT_CONFIG.decisionMode is 'classic'", () => {
 test("existing persisted configurations fall back to the legacy live execution gateway", () => {
   const restored = { ...DEFAULT_BOT_CONFIG, betSize: 2 };
   assert.equal(restored.liveExecutionGateway, "legacy");
-});
-
-test("existing persisted configurations fall back to current entry safeguards", () => {
-  const restored = applyStoredConfig({ betSize: 2 });
-  assert.equal(restored.entrySafetyProfile, "current");
-});
-
-test("extreme-only entry safeguards survive JSON roundtrip", () => {
-  const original: BotConfig = {
-    ...DEFAULT_BOT_CONFIG,
-    entrySafetyProfile: "extreme_only",
-  };
-  const restored = applyStoredConfig(
-    jsonRoundtrip(original) as unknown as Record<string, unknown>,
-  );
-  assert.equal(
-    restored.entrySafetyProfile,
-    "extreme_only" satisfies EntrySafetyProfile,
-  );
-});
-
-test("malformed entry safeguards normalize fail-safe to current", () => {
-  assert.equal(normalizeEntrySafetyProfile(undefined), "current");
-  assert.equal(normalizeEntrySafetyProfile(""), "current");
-  assert.equal(normalizeEntrySafetyProfile("lax"), "current");
-  assert.equal(normalizeEntrySafetyProfile("extreme_only"), "extreme_only");
-  assert.equal(normalizeEntrySafetyProfile("advisory"), "advisory");
-});
-
-test("decision-mode presets cannot store or reactivate an entry safety profile", () => {
-  const preset = stripEntrySafetyProfileFromModePreset({
-    decisionMode: "conviction",
-    entrySafetyProfile: "extreme_only",
-    minConfidence: 72,
-  });
-  assert.equal("entrySafetyProfile" in preset, false);
-  assert.equal(preset.decisionMode, "conviction");
-  assert.equal(preset.minConfidence, 72);
-
-  const active: BotConfig = {
-    ...DEFAULT_BOT_CONFIG,
-    entrySafetyProfile: "current",
-  };
-  const switched = { ...active, ...preset };
-  assert.equal(switched.entrySafetyProfile, "current");
 });
 
 test("ml_gate survives JSON roundtrip + DEFAULT_BOT_CONFIG spread", () => {

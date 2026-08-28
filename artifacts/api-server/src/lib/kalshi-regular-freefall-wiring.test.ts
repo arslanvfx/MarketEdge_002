@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-test("paper and live enforce one profile-aware regular freefall decision at pre-submit", () => {
+test("paper and live share one regular freefall decision at pre-submit", () => {
   const source = readFileSync(
     new URL("./kalshi-bot-tick.ts", import.meta.url),
     "utf8",
@@ -10,54 +10,32 @@ test("paper and live enforce one profile-aware regular freefall decision at pre-
   const decision = source.indexOf(
     "const regularFreefall = evaluateRegularFreefallPreSubmitGuard",
   );
-  const blockedBoundary = source.indexOf("if (!regularFreefallPolicy.allowed)", decision);
+  const liveBoundary = source.indexOf('if (entryMode === "live")', decision);
   const intent = source.indexOf("claimRegularOrderIntent", decision);
   assert.ok(decision >= 0);
-  assert.ok(decision < blockedBoundary);
-  assert.ok(blockedBoundary < intent);
+  assert.ok(decision < liveBoundary);
+  assert.ok(liveBoundary < intent);
   assert.match(
-    source.slice(decision, intent),
-    /applyRegularFreefallSafetyProfile[\s\S]*regularFreefallSignals[\s\S]*convictionDirectionGuardBlockedMap\.set/,
+    source.slice(decision, liveBoundary),
+    /regularFreefallSignals[\s\S]*convictionDirectionGuardBlockedMap\.set/,
   );
-  assert.match(source.slice(decision, intent), /profile: S\.config\.entrySafetyProfile/);
-  assert.doesNotMatch(source.slice(decision, intent), /advisory: entryMode === "paper"/);
-  assert.match(source.slice(blockedBoundary, intent), /setTickAbortReason/);
-  assert.match(source.slice(blockedBoundary, intent), /persistSkip\(entryMode\)/);
-  assert.match(source.slice(blockedBoundary, intent), /return;/);
+  assert.match(source.slice(decision, liveBoundary), /advisory: entryMode === "paper"/);
+  assert.doesNotMatch(source.slice(decision, liveBoundary), /setTickAbortReason/);
+  assert.match(source.slice(liveBoundary, intent), /setTickAbortReason/);
   assert.match(source, /regularFreefall: regularFreefallSignals/);
   assert.match(
-    source.slice(blockedBoundary, intent),
-    /entryMode === "live" && S\.config\.shadowPaperBets/,
+    source.slice(liveBoundary, intent),
+    /if \(S\.config\.shadowPaperBets\) persistSkip\("paper"\)/,
   );
 });
 
-test("dashboard exposes selected profile and relaxed regular-mode guard status", () => {
+test("dashboard distinguishes paper advisory and exposes regular-mode guard status", () => {
   const source = readFileSync(
     new URL("../../../market-edge/src/pages/bot/coin-signal-board.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /Advisory safety.*movement guard warning/);
-  assert.match(source, /Safety:/);
-  assert.match(source, /\? "Relaxed"/);
+  assert.match(source, /Paper advisory: a live entry would be blocked/);
+  assert.match(source, /\? "Would block live"/);
   assert.match(source, />Live guard</);
   assert.match(source, /status-regular-guard-/);
-});
-
-test("decision-mode presets cannot silently activate extreme-only", () => {
-  const source = readFileSync(
-    new URL("../routes/kalshi-bot.ts", import.meta.url),
-    "utf8",
-  );
-  assert.match(
-    source,
-    /safePresets\[mode as DecisionMode\][\s\S]*stripEntrySafetyProfileFromModePreset\(preset\)/,
-  );
-  assert.match(
-    source,
-    /\[mode\]: stripEntrySafetyProfileFromModePreset\(config\)/,
-  );
-  assert.match(
-    source,
-    /Object\.assign\(partial, stripEntrySafetyProfileFromModePreset\(builtIn\)\)/,
-  );
 });

@@ -14,7 +14,6 @@ import {
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, applyProximityCalibrationMigration, buildStreakSnapshot, restoreStreakState,
   applyQuietHoursAutoTuneDeltas,
-  normalizeEntrySafetyProfile,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry, type QuietHoursAutoTuneDelta, type QuietHoursV2,
 } from "./kalshi-bot-engine";
@@ -92,11 +91,7 @@ export async function loadBotConfigFromDB(): Promise<void> {
       .limit(1);
     if (rows.length > 0 && rows[0].config) {
       const saved = rows[0].config as Partial<BotConfig> & { mode?: BotMode };
-      S.config = {
-        ...DEFAULT_BOT_CONFIG,
-        ...saved,
-        entrySafetyProfile: normalizeEntrySafetyProfile(saved.entrySafetyProfile),
-      };
+      S.config = { ...DEFAULT_BOT_CONFIG, ...saved };
       if (saved.mode === "paper" || saved.mode === "live") {
         // applyStartupModeRestore: extracted to engine-core for unit-testability.
         const { effective, didDowngrade } = applyStartupModeRestore(saved.mode, process.env.NODE_ENV);
@@ -1157,13 +1152,8 @@ async function _runSmartHoursCalibrationInner(opts?: {
     && result.calibratedSymbols.length > 0
     && S.config.quietHoursMode === "per_market"
     && S.config.quietHoursV2?.enabled !== true;
-  const selectedThreshold = opts?.thresholdOverride;
-  const shouldPersistThreshold =
-    typeof selectedThreshold === "number"
-    && Number.isFinite(selectedThreshold)
-    && S.config.quietHoursV2?.autoTuneThreshold !== selectedThreshold;
   const configPatch = {
-    ...(shouldActivateMaster || shouldPersistThreshold
+    ...(shouldActivateMaster
       ? {
           quietHoursV2: {
             ...(S.config.quietHoursV2 ?? {
@@ -1171,8 +1161,7 @@ async function _runSmartHoursCalibrationInner(opts?: {
               silencedUtcHours: [],
               reducedBetUtcHours: {},
             }),
-            enabled: shouldActivateMaster ? true : (S.config.quietHoursV2?.enabled ?? false),
-            ...(shouldPersistThreshold ? { autoTuneThreshold: selectedThreshold } : {}),
+            enabled: true,
           },
         }
       : {}),

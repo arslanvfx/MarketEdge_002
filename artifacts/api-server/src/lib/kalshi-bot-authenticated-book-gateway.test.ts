@@ -20,7 +20,7 @@ const executable = (
   bookVersion: version,
 });
 
-test("authenticated Bot 1 gateway uses a conservative YES limit and revalidates current safety", () => {
+test("authenticated Bot 1 gateway uses requested exact depth and conservative YES limit", () => {
   let current = executable("yes");
   const gateway = quoteAuthenticatedBookExecution(
     { ticker: "KXBTC", side: "yes", requestedCount: 3, sideCostFloor: .79, sideCostCeiling: .87 },
@@ -31,7 +31,7 @@ test("authenticated Bot 1 gateway uses a conservative YES limit and revalidates 
   assert.equal(gateway.worstCaseCost, 2.49);
   assert.equal(gateway.revalidate(), true);
   current = executable("yes", "7:10");
-  assert.equal(gateway.revalidate(), true, "a safe book update must not cancel an urgent IOC");
+  assert.equal(gateway.revalidate(), false, "a changed book version invalidates the immutable quote");
 });
 
 test("authenticated Bot 1 gateway converts a NO side ceiling to Kalshi YES price", () => {
@@ -44,14 +44,12 @@ test("authenticated Bot 1 gateway converts a NO side ceiling to Kalshi YES price
   assert.equal(gateway.worstCaseCost, 1.66);
 });
 
-test("authenticated Bot 1 gateway permits IOC partial fills when at least one contract is visible", () => {
+test("authenticated Bot 1 gateway fails closed without full requested depth", () => {
   const gateway = quoteAuthenticatedBookExecution(
     { ticker: "KXBTC", side: "yes", requestedCount: 3, sideCostFloor: .79, sideCostCeiling: .87 },
     { isFresh: () => true, getExecutable: () => executable("yes", "1:1", 2) },
   );
-  assert.ok(gateway);
-  assert.equal(gateway.requestedCount, 2);
-  assert.equal(gateway.worstCaseCost, 1.66);
+  assert.equal(gateway, null);
 });
 
 test("authenticated Bot 1 gateway passes the approved side-cost zone to every book read", () => {
@@ -68,7 +66,7 @@ test("authenticated Bot 1 gateway passes the approved side-cost zone to every bo
   );
   assert.ok(gateway);
   assert.equal(gateway.revalidate(), true);
-  assert.deepEqual(calls, [[0, .86], [0, .85]]);
+  assert.deepEqual(calls, [[0, .86], [0, .86]]);
 });
 
 test("authenticated Bot 1 gateway rejects favorable levels below the strict entry floor", () => {
@@ -90,20 +88,5 @@ test("authenticated Bot 1 gateway revalidation rejects a new below-floor level",
   );
   assert.ok(gateway);
   current = executable("yes", "8:9", 2, .84, .70);
-  assert.equal(gateway.revalidate(), false);
-});
-
-test("authenticated Bot 1 gateway revalidation rejects a move above the fixed IOC limit", () => {
-  let current = executable("yes", "9:10", 2, .82, .80);
-  const gateway = quoteAuthenticatedBookExecution(
-    { ticker: "KXBTC", side: "yes", requestedCount: 2, sideCostFloor: .79, sideCostCeiling: .87 },
-    {
-      isFresh: () => true,
-      getExecutable: (_ticker, _side, _count, _floor, ceiling) =>
-        current.marginalLimitCost <= ceiling ? current : null,
-    },
-  );
-  assert.ok(gateway);
-  current = executable("yes", "9:11", 2, .83, .80);
   assert.equal(gateway.revalidate(), false);
 });

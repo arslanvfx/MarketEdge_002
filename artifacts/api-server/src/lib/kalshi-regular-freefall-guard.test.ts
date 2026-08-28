@@ -2,8 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  applyOrdinaryMovementSafetyProfile,
-  applyRegularFreefallSafetyProfile,
   evaluateRegularFreefallPreSubmitGuard,
 } from "./kalshi-regular-freefall-guard.ts";
 
@@ -130,82 +128,6 @@ test("endpoint reversal and recent adverse excursion both veto conviction", () =
   assert.equal(endpoint.allowed, false);
   assert.equal(endpoint.reason, "freefall_favorable_trend_not_confirmed_yes");
   assert.ok((endpoint.guardResult?.endpointAdverseMovePct ?? 0) > 0);
-});
-
-test("current profile keeps ordinary favorable-trend confirmation strict", () => {
-  const raw = evaluate("yes", [100, 100.05, 100, 100.1, 100.05, 100.04]);
-  const resolved = applyRegularFreefallSafetyProfile(raw, "current");
-  assert.equal(raw.reason, "freefall_favorable_trend_not_confirmed_yes");
-  assert.deepEqual(resolved, {
-    allowed: false,
-    advisory: false,
-    classification: "ordinary_movement",
-  });
-});
-
-test("extreme-only relaxes ordinary direction and favorable-trend failures", () => {
-  const flat = evaluate("yes", [100, 100.05, 100, 100.1, 100.05, 100.04]);
-  const consecutive = evaluate("yes", [100.1, 100.09, 100.08, 100.07, 100.06, 100.05]);
-
-  for (const raw of [flat, consecutive]) {
-    assert.deepEqual(applyRegularFreefallSafetyProfile(raw, "extreme_only"), {
-      allowed: true,
-      advisory: true,
-      classification: "ordinary_movement",
-    });
-  }
-  assert.deepEqual(applyOrdinaryMovementSafetyProfile(true, "extreme_only"), {
-    allowed: true,
-    advisory: true,
-    classification: "ordinary_movement",
-  });
-  assert.equal(applyOrdinaryMovementSafetyProfile(true, "current").allowed, false);
-});
-
-test("extreme-only still blocks unavailable, target-crossing, rapid, and excursion evidence", () => {
-  const stale = evaluateRegularFreefallPreSubmitGuard({
-    samples: [100, 100.1, 100.2, 100.3, 100.4, 100.5].map((price, index) => ({
-      price,
-      ts: NOW - 10_000 + index * 1_000,
-    })),
-    side: "yes",
-    nowMs: NOW,
-    windowStartMs: 0,
-    closeTimeMs: NOW + 300_000,
-    targetPrice: TARGET,
-    hasProduct: true,
-  });
-  const wrongSide = evaluate("yes", [99.2, 98.9, 99, 99.1, 99.2, 99.3]);
-  const rapid = evaluate("yes", [100, 100.1, 100.2, 100.4, 100.6, 100.8]);
-  const excursion = evaluate("yes", [100, 100.2, 100.4, 100.2, 100.3, 100.3]);
-
-  for (const raw of [stale, wrongSide, rapid, excursion]) {
-    assert.deepEqual(applyRegularFreefallSafetyProfile(raw, "extreme_only"), {
-      allowed: false,
-      advisory: false,
-      classification: "hard_boundary",
-    });
-  }
-});
-
-test("advisory profile allows every direction/freefall guard verdict as warning-only", () => {
-  const stale = evaluateRegularFreefallPreSubmitGuard({
-    samples: [100, 100.1].map((price, index) => ({ price, ts: NOW - 10_000 + index * 1_000 })),
-    side: "yes",
-    nowMs: NOW,
-    windowStartMs: 0,
-    closeTimeMs: NOW + 300_000,
-    targetPrice: TARGET,
-    hasProduct: true,
-  });
-  const wrongSide = evaluate("yes", [99.2, 98.9, 99, 99.1, 99.2, 99.3]);
-  for (const raw of [stale, wrongSide]) {
-    const resolved = applyRegularFreefallSafetyProfile(raw, "advisory");
-    assert.equal(resolved.allowed, true);
-    assert.equal(resolved.advisory, true);
-    assert.equal(resolved.classification, "hard_boundary");
-  }
-  assert.equal(applyOrdinaryMovementSafetyProfile(true, "advisory").allowed, true);
 });
 
 test("samples before the lifecycle boundary cannot establish conviction", () => {

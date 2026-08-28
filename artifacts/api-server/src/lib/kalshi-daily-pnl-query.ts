@@ -55,13 +55,15 @@ export const DAILY_TRADING_PNL_SQL = `
  * has at least one settled bet, with regular and scalper P&L aggregated
  * separately so the frontend can display combined and split views.
  *
- * $1 = mode, $2 = ET calendar date (YYYY-MM-DD)
+ * $1 = mode
  */
 export const DAILY_HOURLY_PNL_SQL = `
   WITH bounds AS (
     SELECT
-      $2::date::timestamp AT TIME ZONE 'America/New_York' AS day_start_at,
-      ($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'America/New_York' AS next_reset_at
+      date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')
+        AT TIME ZONE 'America/New_York' AS day_start_at,
+      (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') + INTERVAL '1 day')
+        AT TIME ZONE 'America/New_York' AS next_reset_at
   ),
   regular_hourly AS (
     SELECT
