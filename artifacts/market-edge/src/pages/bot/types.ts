@@ -57,6 +57,7 @@ export interface QuietHoursAnalysis {
 }
 
 export interface BotConfig {
+  liveExecutionGateway?: "legacy" | "authenticated_book";
   betSize: number;
   dailyLossLimit: number;
   signalThreshold: number;

@@ -1294,6 +1294,11 @@ export function applyPlacementTimeReducedPct(
 }
 
 export interface BotConfig {
+  /**
+   * Bot 1 live order transport. The authenticated orderbook path is opt-in;
+   * legacy remains the proven default for existing persisted configurations.
+   */
+  liveExecutionGateway?: "legacy" | "authenticated_book";
   betSize: number;           // $ per bet (default 0.50)
   dailyLossLimit: number;    // $ max daily loss (default 20)
   signalThreshold: number;   // kept for config compat — not used for entry gating (see core-pair gate)
@@ -1708,6 +1713,7 @@ export function applyStartupModeRestore(
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
+  liveExecutionGateway: "legacy",
   betSize: 1.00,
   dailyLossLimit: 20,
   signalThreshold: 2,    // legacy field — core-pair gate now governs entry

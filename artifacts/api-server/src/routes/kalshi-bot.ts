@@ -895,7 +895,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     perSymbolQuietHours,
     dataGatheringEnabled,
     perMarketConvictionConfig,
+    liveExecutionGateway,
   } = req.body as {
+    liveExecutionGateway?: "legacy" | "authenticated_book";
     betSize?: number;
     dailyLossLimit?: number;
     signalThreshold?: number;
@@ -1007,6 +1009,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   };
 
   const partial: Parameters<typeof updateBotConfig>[0] = {};
+  if (liveExecutionGateway === "legacy" || liveExecutionGateway === "authenticated_book") {
+    partial.liveExecutionGateway = liveExecutionGateway;
+  }
   if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 500) partial.betSize = betSize;
   if (typeof dailyLossLimit === "number" && dailyLossLimit > 0) partial.dailyLossLimit = dailyLossLimit;
   if (typeof signalThreshold === "number" && [2, 3, 4].includes(signalThreshold)) {

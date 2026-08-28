@@ -51,6 +51,8 @@ import {
   claimRegularOrderIntent, resolveRegularOrderIntent, markRegularOrderIntentUnknown,
   hasUnresolvedRegularIntent,
 } from "./kalshi-regular-order-intent";
+import { quoteAuthenticatedBookExecution } from "./kalshi-bot-authenticated-book-gateway";
+import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service";
 import {
   describeRegularFreefallDecision,
   evaluateRegularFreefallPreSubmitGuard,
@@ -2690,17 +2692,56 @@ async function _runBotTick(
   }
 
   if (entryMode === "live") {
+    // The authenticated gateway is intentionally opt-in. Legacy pricing and
+    // submission remain byte-for-byte on the existing path unless selected.
+    const authenticatedGatewayZone = S.config.decisionMode === "conviction"
+      ? getEffectiveConvictionZone(sym, S.config)
+      : { lockPrice: 0, lockPriceCap: 1 };
+    const authenticatedBookQuote = S.config.liveExecutionGateway === "authenticated_book"
+      ? quoteAuthenticatedBookExecution({
+          ticker: expectedTicker,
+          side: direction,
+          requestedCount: contractCount,
+          sideCostFloor: authenticatedGatewayZone.lockPrice,
+          sideCostCeiling: authenticatedGatewayZone.lockPriceCap,
+        }, dashboard2KalshiOrderbookService)
+      : null;
+    if (S.config.liveExecutionGateway === "authenticated_book" && !authenticatedBookQuote) {
+      const reason = "authenticated book gateway requires a fresh exact book with full requested depth";
+      releaseConvictionEntryReservation(reason);
+      setTickAbortReason(sym, windowKey, `gateway abort: ${reason}`);
+      regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);
+      markPlacementTerminal("definite_error", reason);
+      return;
+    }
+    if (authenticatedBookQuote) {
+      logger.info(
+        {
+          sym,
+          windowKey,
+          ticker: authenticatedBookQuote.ticker,
+          side: authenticatedBookQuote.side,
+          requestedCount: authenticatedBookQuote.requestedCount,
+          limitPrice: authenticatedBookQuote.limitPrice,
+          worstCaseCost: authenticatedBookQuote.worstCaseCost,
+          bookVersion: authenticatedBookQuote.bookVersion,
+        },
+        "[kalshi-bot] authenticated book gateway quoted exact IOC",
+      );
+    }
     // Persist and submit precisely this cent-grid YES-side limit. Route cash is
     // reserved against the true worst case, not the earlier quote estimate.
-    const durableEntryLimitRaw = orderLimitPrice ?? computeMarketableLimitPrice(
+    const durableEntryLimitRaw = authenticatedBookQuote?.limitPrice ?? orderLimitPrice ?? computeMarketableLimitPrice(
       direction === "yes" ? "bid" : "ask",
       yesPrice,
       S.config.minReturnMultiple,
     );
-    const durableEntryLimitPrice = direction === "yes"
-      ? Math.floor(durableEntryLimitRaw * 100) / 100
-      : Math.ceil(durableEntryLimitRaw * 100) / 100;
-    const worstCaseRouteCost = computeRegularWorstCaseRouteCost(
+    const durableEntryLimitPrice = authenticatedBookQuote
+      ? authenticatedBookQuote.limitPrice
+      : direction === "yes"
+        ? Math.floor(durableEntryLimitRaw * 100) / 100
+        : Math.ceil(durableEntryLimitRaw * 100) / 100;
+    const worstCaseRouteCost = authenticatedBookQuote?.worstCaseCost ?? computeRegularWorstCaseRouteCost(
       direction,
       durableEntryLimitPrice,
       contractCount,
@@ -2890,7 +2931,8 @@ async function _runBotTick(
             const currentQh = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
             return currentQh.action !== "block"
               && !currentQh.forcedPaper
-              && hasAuthorizedRegularRouteFundingHold(expectedTicker, _intentReservationId);
+              && hasAuthorizedRegularRouteFundingHold(expectedTicker, _intentReservationId)
+              && (authenticatedBookQuote?.revalidate() ?? true);
           },
         },
         undefined,

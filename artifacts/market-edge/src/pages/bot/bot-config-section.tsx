@@ -93,6 +93,43 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
               {/* ── Bet Profile ── */}
               <div className="flex flex-col gap-2">
+                <span className="text-xs font-medium text-muted-foreground">Live Execution Gateway</span>
+                <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3">
+                  {([
+                    {
+                      id: "legacy" as const,
+                      label: "Legacy",
+                      detail: "Current proven path. This remains the default.",
+                    },
+                    {
+                      id: "authenticated_book" as const,
+                      label: "Authenticated Book",
+                      detail: "Test gateway. Requires a fresh authenticated exact order book and full depth.",
+                    },
+                  ]).map(gateway => {
+                    const selected = (merged.liveExecutionGateway ?? "legacy") === gateway.id;
+                    return (
+                      <button
+                        key={gateway.id}
+                        type="button"
+                        onClick={() => setConfigDraft(d => ({ ...d, liveExecutionGateway: gateway.id }))}
+                        className={`min-w-0 text-left rounded-xl p-3.5 border transition-all ${
+                          selected
+                            ? "border-violet-500/60 bg-violet-500/10 ring-1 ring-violet-500/30"
+                            : "border-border bg-background/30 hover:border-border/80 hover:bg-muted/30"
+                        }`}
+                      >
+                        <div className={`text-sm font-semibold ${selected ? "text-violet-300" : "text-foreground"}`}>
+                          {gateway.label}{selected && <span className="ml-1.5 text-[9px] opacity-70">✓ active</span>}
+                        </div>
+                        <div className="mt-1 text-[10px] text-muted-foreground/70">{gateway.detail}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2">
                 <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
                   <Zap className="w-3 h-3" />
                   Bet Profile
