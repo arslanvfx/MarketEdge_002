@@ -131,6 +131,8 @@ export function SmartQuietHoursControls({
           <PerSymbolQuietHoursPanel
             perSymbolQuietHours={visiblePerSymbolQuietHours}
             masterEnabled={merged.quietHoursV2?.enabled ?? false}
+            symbolSmartHoursModes={status?.symbolSmartHoursModes}
+            initialThreshold={merged.quietHoursV2?.autoTuneThreshold ?? 85}
             onChange={(symbol, schedule) => setDraft(current => ({
               ...current,
               perSymbolQuietHours: {

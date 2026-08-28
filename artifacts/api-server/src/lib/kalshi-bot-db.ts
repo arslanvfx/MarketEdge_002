@@ -1157,8 +1157,13 @@ async function _runSmartHoursCalibrationInner(opts?: {
     && result.calibratedSymbols.length > 0
     && S.config.quietHoursMode === "per_market"
     && S.config.quietHoursV2?.enabled !== true;
+  const selectedThreshold = opts?.thresholdOverride;
+  const shouldPersistThreshold =
+    typeof selectedThreshold === "number"
+    && Number.isFinite(selectedThreshold)
+    && S.config.quietHoursV2?.autoTuneThreshold !== selectedThreshold;
   const configPatch = {
-    ...(shouldActivateMaster
+    ...(shouldActivateMaster || shouldPersistThreshold
       ? {
           quietHoursV2: {
             ...(S.config.quietHoursV2 ?? {
@@ -1166,7 +1171,8 @@ async function _runSmartHoursCalibrationInner(opts?: {
               silencedUtcHours: [],
               reducedBetUtcHours: {},
             }),
-            enabled: true,
+            enabled: shouldActivateMaster ? true : (S.config.quietHoursV2?.enabled ?? false),
+            ...(shouldPersistThreshold ? { autoTuneThreshold: selectedThreshold } : {}),
           },
         }
       : {}),

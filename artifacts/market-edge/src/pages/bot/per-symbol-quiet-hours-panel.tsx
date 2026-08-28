@@ -1,6 +1,6 @@
 import React from "react";
 import { Activity, DollarSign, RefreshCw, Zap } from "lucide-react";
-import type { QuietHoursV2 } from "./types";
+import type { QuietHoursV2, SymbolSmartHoursMode } from "./types";
 import { QuietHoursGrid } from "./quiet-hours-grid";
 import { REGULAR_BOT_SYMBOLS } from "./regular-symbols";
 
@@ -37,6 +37,8 @@ export function mergePerSymbolQuietHoursForDisplay(server: Record<string, QuietH
 export interface PerSymbolQuietHoursPanelProps {
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   masterEnabled: boolean;
+  symbolSmartHoursModes?: Record<string, SymbolSmartHoursMode>;
+  initialThreshold?: number;
   onChange: (symbol: string, value: QuietHoursV2) => void;
   onCalibrationApplied?: () => void;
   onImmediateSaveError?: (message: string) => void;
@@ -46,20 +48,62 @@ export interface PerSymbolQuietHoursPanelProps {
 }
 
 export function PerSymbolQuietHoursPanel({
-  perSymbolQuietHours, masterEnabled, onChange, onCalibrationApplied, onImmediateSaveError, authPost,
+  perSymbolQuietHours, masterEnabled, symbolSmartHoursModes, initialThreshold = 85,
+  onChange, onCalibrationApplied, onImmediateSaveError, authPost,
   dgCap: dgCapProp = 1, dgEnabled: dgEnabledProp = true,
 }: PerSymbolQuietHoursPanelProps) {
   const [selectedSymbol, setSelectedSymbol] = React.useState<string>(REGULAR_BOT_SYMBOLS[0]);
   const [calibrating, setCalibrating] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
   const [messageOk, setMessageOk] = React.useState(true);
-  const [threshold, setThreshold] = React.useState(85);
+  const [threshold, setThreshold] = React.useState(initialThreshold);
   const [dgCap, setDgCap] = React.useState(dgCapProp);
   const [dgEnabled, setDgEnabled] = React.useState(dgEnabledProp);
   const schedulesRef = React.useRef(perSymbolQuietHours);
   React.useEffect(() => { schedulesRef.current = perSymbolQuietHours; }, [perSymbolQuietHours]);
   React.useEffect(() => { setDgCap(dgCapProp); }, [dgCapProp]);
   React.useEffect(() => { setDgEnabled(dgEnabledProp); }, [dgEnabledProp]);
+  React.useEffect(() => { setThreshold(initialThreshold); }, [initialThreshold]);
+
+  const modeForSymbol = React.useCallback((symbol: string): SymbolSmartHoursMode | "off" => {
+    if (!masterEnabled) return "off";
+    const serverMode = symbolSmartHoursModes?.[symbol];
+    if (serverMode) return serverMode;
+    const candidate = perSymbolQuietHours[symbol];
+    if (!candidate?.enabled) return "no-schedule";
+    const now = new Date();
+    const dow = String(getEtDowClient(now));
+    const hour = now.getUTCHours();
+    const silenced = candidate.silencedByDow
+      ? (candidate.silencedByDow[dow] ?? []).includes(hour)
+      : (candidate.silencedUtcHours ?? []).includes(hour);
+    if (silenced) return "silenced";
+    const reducedPct = candidate.reducedByDow
+      ? candidate.reducedByDow[dow]?.[String(hour)]
+      : candidate.reducedBetUtcHours?.[String(hour)];
+    return typeof reducedPct === "number" && reducedPct > 0 ? "reduced" : "active";
+  }, [masterEnabled, perSymbolQuietHours, symbolSmartHoursModes]);
+
+  const tabClasses = (symbol: string) => {
+    const selected = selectedSymbol === symbol;
+    const mode = modeForSymbol(symbol);
+    const byMode = {
+      active: "border-emerald-500/50 bg-emerald-500/15 text-emerald-300",
+      silenced: "border-red-500/50 bg-red-500/15 text-red-300",
+      reduced: "border-amber-500/50 bg-amber-500/15 text-amber-300",
+      "no-schedule": "border-slate-600/60 bg-slate-800/60 text-slate-400",
+      off: "border-border bg-secondary/50 text-muted-foreground",
+    }[mode];
+    return `${byMode} ${selected ? "ring-1 ring-current shadow-sm" : "opacity-80 hover:opacity-100"} rounded-md border px-2.5 py-1 text-xs transition-all`;
+  };
+
+  const modeLabel = (symbol: string) => ({
+    active: "entries active",
+    silenced: "entries blocked",
+    reduced: "reduced entry",
+    "no-schedule": "no schedule",
+    off: "enforcement off",
+  }[modeForSymbol(symbol)]);
 
   const post = async (body: object) => {
     try { await authPost("/crypto/bot/config", body); }
@@ -108,9 +152,9 @@ export function PerSymbolQuietHoursPanel({
       </div>
     </div>
     <div className="flex flex-wrap items-center gap-1.5">
-      {REGULAR_BOT_SYMBOLS.map(symbol => <button type="button" key={symbol} onClick={() => setSelectedSymbol(symbol)} className={`rounded-md border px-2.5 py-1 text-xs ${selectedSymbol === symbol ? "border-primary/50 bg-primary/15 text-primary" : "border-border bg-secondary/50 text-muted-foreground"}`}>{symbol}</button>)}
+      {REGULAR_BOT_SYMBOLS.map(symbol => <button type="button" key={symbol} onClick={() => setSelectedSymbol(symbol)} className={tabClasses(symbol)} title={`${symbol}: ${modeLabel(symbol)}`}>{symbol}</button>)}
     </div>
-    <div className="rounded-lg border border-border/50 bg-secondary/20 p-2 text-[11px] text-muted-foreground"><Activity className="mr-1 inline h-3 w-3 text-cyan-400" /> Market Status Right Now · {masterEnabled ? "Smart Hours enforcement is on" : "Smart Hours enforcement is off"}</div>
+    <div className="rounded-lg border border-border/50 bg-secondary/20 p-2 text-[11px] text-muted-foreground"><Activity className="mr-1 inline h-3 w-3 text-cyan-400" /> Market Status Right Now · {masterEnabled ? <><span className="text-emerald-300">green active</span> · <span className="text-red-300">red blocked</span> · <span className="text-amber-300">amber reduced</span> · gray no schedule</> : "Smart Hours enforcement is off"}</div>
     <QuietHoursGrid key={selectedSymbol} value={schedule} onChange={value => onChange(selectedSymbol, value)} symbolFilter={selectedSymbol} dgCap={dgCap} onSave={value => { onChange(selectedSymbol, value); void post({ perSymbolQuietHours: { ...schedulesRef.current, [selectedSymbol]: value } }); }} />
   </div>;
 }
