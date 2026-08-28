@@ -553,7 +553,13 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
 
   const { data: statusData } = useQuery<ScalperStatus>({
     queryKey: ["bot-scalper-status", scalperMode],
-    queryFn: () => fetch(`${API_BASE}/crypto/scalper/status?mode=${scalperMode}`).then(r => r.json()),
+    queryFn: async () => {
+      const response = await fetch(`${API_BASE}/crypto/scalper/status?mode=${scalperMode}`);
+      if (!response.ok) {
+        throw new Error(`Unable to load Scalper status (HTTP ${response.status})`);
+      }
+      return response.json() as Promise<ScalperStatus>;
+    },
     enabled: Boolean(cfg),
     refetchInterval: 2_000,
   });
@@ -1135,7 +1141,7 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
             <div className="flex min-w-0 flex-col items-start sm:items-end">
               <span className="text-muted-foreground/50 uppercase tracking-widest">Open / Cap</span>
               <span data-testid="text-scalper-open-cap" className="whitespace-nowrap text-foreground">
-                {fmt$(statusData.openSpend)} / {fmt$(statusData.config.openCapDollars)}
+                {fmt$(statusData.openSpend)} / {fmt$(merged.openCapDollars)}
               </span>
             </div>
             <div className="flex min-w-0 flex-col items-start sm:items-end">
