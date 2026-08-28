@@ -34,12 +34,19 @@ const kalshiOrderbookInFlight = new Map<string, Promise<OrderbookPrices | null>>
 let kalshiHttpRateLimitedUntil = 0;
 let kalshiHttpNextRequestAt = 0;
 const KALSHI_HTTP_MIN_SPACING_MS = 300;
+const KALSHI_HTTP_MAX_QUEUE_DELAY_MS = 900;
 
 async function acquireKalshiHttpRequestSlot(signal?: AbortSignal): Promise<boolean> {
   if (kalshiHttpRateLimitedUntil > Date.now() || signal?.aborted) return false;
-  const scheduledAt = Math.max(Date.now(), kalshiHttpNextRequestAt);
+  const now = Date.now();
+  const scheduledAt = Math.max(now, kalshiHttpNextRequestAt);
+  // This lane receives best-effort refreshes from several pollers. Never let
+  // demand above the Kalshi request budget accumulate an unbounded chain of
+  // timers/promises — callers can safely use a matching cached target or fail
+  // closed until a later poll.
+  if (scheduledAt - now > KALSHI_HTTP_MAX_QUEUE_DELAY_MS) return false;
   kalshiHttpNextRequestAt = scheduledAt + KALSHI_HTTP_MIN_SPACING_MS;
-  const waitMs = scheduledAt - Date.now();
+  const waitMs = scheduledAt - now;
   if (waitMs > 0) {
     await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
   }
@@ -194,6 +201,9 @@ async function fetchOrderbookPricesImpl(
         : AbortSignal.timeout(4000),
     });
     if (!resp.ok) {
+      // Always drain non-success bodies so Undici can promptly reuse or release
+      // the underlying connection instead of retaining unread response state.
+      void resp.arrayBuffer().catch(() => {});
       if (resp.status === 429) {
         kalshiHttpRateLimitedUntil = Math.max(
           kalshiHttpRateLimitedUntil,

@@ -465,11 +465,13 @@ export function startConvictionPoller(): void {
   pollerGeneration += 1;
   convictionPriceTicks.clear();
   logger.info("[conviction-poller] starting target poll and dedicated 1 s spot sampler");
-  pollerHandle = setInterval(() => {
-    pollOnce().catch((err) =>
-      logger.debug({ err }, "[conviction-poller] poll error (non-fatal)"),
-    );
-  }, POLL_INTERVAL_MS);
+  // Authenticated WebSocket books are the live conviction trigger. Keep a
+  // non-null lifecycle handle for generation guards, but do not force-refresh
+  // every Kalshi market over REST each second: that duplicated the WebSocket
+  // feed, overwhelmed the shared HTTP path, and caused severe native-memory
+  // growth under sustained throttling. Normal window discovery still refreshes
+  // the shared target cache; missing live book data remains fail-closed.
+  pollerHandle = setInterval(() => {}, POLL_INTERVAL_MS);
   spotSamplerHandle = setInterval(() => {
     sampleSpotsOnce().catch((err) =>
       logger.debug({ err }, "[conviction-poller] spot sample error (non-fatal)"),
@@ -478,7 +480,6 @@ export function startConvictionPoller(): void {
   // Fire immediately so the first bot tick after mode switch has fresh data.
   // Install the handle first: generation guards treat a missing handle as
   // stopped and must not discard this initial cycle.
-  pollOnce().catch(() => {});
   sampleSpotsOnce().catch(() => {});
 }
 
