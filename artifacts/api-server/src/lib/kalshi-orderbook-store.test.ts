@@ -21,12 +21,12 @@ test("Kalshi book applies snapshots and complementary executable depth", () => {
   assert.equal(store.apply(snapshot(), 1_000), true);
   // YES consumes NO bids: 1-.18=.82 before 1-.15=.85.
   assert.deepEqual(store.getExecutable("KXTEST", "yes", 2, .79, .85, 1_001), {
-    ticker: "KXTEST", side: "yes", sideCost: .82, visibleContracts: 2,
+    ticker: "KXTEST", side: "yes", sideCost: .82, marginalLimitCost: .82, visibleContracts: 2,
     seq: 10, updatedAt: 1_000, bookVersion: "7:10",
   });
   // NO consumes YES bids: 1-.20=.80.
   assert.deepEqual(store.getExecutable("KXTEST", "no", 2, .79, .85, 1_001), {
-    ticker: "KXTEST", side: "no", sideCost: .8, visibleContracts: 2,
+    ticker: "KXTEST", side: "no", sideCost: .8, marginalLimitCost: .8, visibleContracts: 2,
     seq: 10, updatedAt: 1_000, bookVersion: "7:10",
   });
 });
@@ -127,4 +127,49 @@ test("Kalshi book accepts omitted empty sides without inventing executable depth
   assert.equal(store.isFresh("KXEMPTY", 2_001), true);
   assert.equal(store.getExecutable("KXEMPTY", "yes", 2, .79, .85, 2_001), null);
   assert.equal(store.getExecutable("KXEMPTY", "no", 2, .79, .85, 2_001)?.visibleContracts, 2);
+});
+
+test("Kalshi executable sell reads direct bids highest first at exact depth", () => {
+  const store = new KalshiOrderbookStore();
+  assert.equal(store.apply({
+    type: "orderbook_snapshot", sid: 11, seq: 1,
+    msg: {
+      market_ticker: "KXSELL",
+      yes_dollars_fp: [["0.31", "0.99"], ["0.30", "1.01"]],
+      no_dollars_fp: [["0.49", "0.75"], ["0.41", "1.25"]],
+    },
+  }, 1_000), true);
+  assert.deepEqual(store.getExecutableSell("KXSELL", "yes", 2, 1_001), {
+    ticker: "KXSELL", side: "yes", sideProceeds: 0.30495, marginalLimitProceeds: 0.30,
+    visibleContracts: 2, seq: 1, updatedAt: 1_000, bookVersion: "11:1",
+  });
+  assert.deepEqual(store.getExecutableSell("KXSELL", "no", 2, 1_001), {
+    ticker: "KXSELL", side: "no", sideProceeds: 0.44, marginalLimitProceeds: 0.41,
+    visibleContracts: 2, seq: 1, updatedAt: 1_000, bookVersion: "11:1",
+  });
+  assert.equal(store.getExecutableSell("KXSELL", "yes", 2, 7_000), null);
+  store.invalidate("KXSELL");
+  assert.equal(store.getExecutableSell("KXSELL", "no", 1, 1_002), null);
+});
+
+test("Kalshi entry quote retains weighted cost and marginal depth cost for both sides", () => {
+  const store = new KalshiOrderbookStore();
+  assert.equal(store.apply({
+    type: "orderbook_snapshot", sid: 12, seq: 1,
+    msg: {
+      market_ticker: "KXENTRY",
+      // YES consumes NO: costs .80 for .75 then .84 for 1.25.
+      no_dollars_fp: [["0.20", "0.75"], ["0.16", "1.25"]],
+      // NO consumes YES: costs .79 for .50 then .83 for 1.50.
+      yes_dollars_fp: [["0.17", "1.50"], ["0.21", "0.50"]],
+    },
+  }, 1_000), true);
+  const yes = store.getExecutable("KXENTRY", "yes", 2, .79, .85, 1_001);
+  assert.equal(yes?.visibleContracts, 2);
+  assert.equal(yes?.sideCost, .825);
+  assert.equal(yes?.marginalLimitCost, .84);
+  const no = store.getExecutable("KXENTRY", "no", 2, .79, .85, 1_001);
+  assert.equal(no?.visibleContracts, 2);
+  assert.equal(no?.sideCost, .82);
+  assert.equal(no?.marginalLimitCost, .83);
 });

@@ -11,6 +11,17 @@ export {
 } from "./dashboard2-ownership-contract.ts";
 
 const ROW_ID = "dashboard2_execution_ownership";
+let cachedOwner: Dashboard2ExecutionOwner | null = null;
+
+/**
+ * Synchronous ownership fence for the exact broker pre-submit boundary.
+ * All application ownership reads and writes refresh this cache, while the
+ * durable unresolved-intent lock prevents a committed switch during a
+ * reserved Dashboard 2.0 submission.
+ */
+export function isDashboard2ExecutionOwnerCurrent(expected: Dashboard2ExecutionOwner): boolean {
+  return cachedOwner === expected;
+}
 
 export async function readDashboard2ExecutionOwner(): Promise<{
   owner: Dashboard2ExecutionOwner;
@@ -40,6 +51,7 @@ export async function readDashboard2ExecutionOwner(): Promise<{
   if (!(updatedAt instanceof Date)) {
     throw new Error("Dashboard 2.0 execution ownership timestamp is unavailable");
   }
+  cachedOwner = owner;
   return { owner, updatedAt: updatedAt.toISOString() };
 }
 
@@ -72,7 +84,11 @@ export async function changeDashboard2ExecutionOwner(
            (SELECT COUNT(*) FROM kalshi_regular_order_intents
              WHERE mode = 'live' AND status IN ('reserved','unknown')) +
            (SELECT COUNT(*) FROM kalshi_regular_exit_intents
-             WHERE mode = 'live' AND status IN ('reserved','unknown'))
+             WHERE mode = 'live' AND status IN ('reserved','unknown')) +
+           (SELECT COUNT(*) FROM dashboard2_v2_ledger
+              WHERE mode = 'live' AND status IN ('reserved','unknown')) +
+            (SELECT COUNT(*) FROM dashboard2_v2_exit_intents
+              WHERE mode = 'live' AND status IN ('reserved','unknown'))
          )::text AS count`,
       );
       if (Number(unresolved.rows[0]?.count ?? 0) > 0) {
@@ -91,6 +107,7 @@ export async function changeDashboard2ExecutionOwner(
       const updatedAt = write.rows[0]?.updated_at;
       if (!(updatedAt instanceof Date)) throw new Error("Dashboard 2.0 ownership write was not confirmed");
       await client.query("COMMIT");
+      cachedOwner = requestedOwner;
       logger.info(
         { previousOwner: rawCurrent, owner: requestedOwner, actorId },
         "[dashboard2] execution ownership updated",
@@ -98,6 +115,7 @@ export async function changeDashboard2ExecutionOwner(
       return { owner: requestedOwner, changed: true, updatedAt: updatedAt.toISOString() };
     }
     await client.query("COMMIT");
+    cachedOwner = requestedOwner;
     logger.info(
       { previousOwner: rawCurrent, owner: requestedOwner, actorId },
       "[dashboard2] execution ownership updated",

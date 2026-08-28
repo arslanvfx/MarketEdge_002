@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 @layer theme, base, clerk, components, utilities;
 @import "tailwindcss";
@@ -114,6 +114,22 @@
 
   --destructive: 348 83% 47%;
   --destructive-foreground: 213 31% 91%;
+}
+
+.dashboard2-theme {
+  --background: 224 40% 4%;
+  --border: 216 34% 15%;
+  --input: 216 34% 15%;
+  --ring: 168 100% 50%;
+  --card: 224 35% 8%;
+  --card-border: 216 34% 16%;
+  --popover: 224 40% 5%;
+  --popover-border: 216 34% 16%;
+  --primary: 168 100% 50%;
+  --primary-foreground: 224 40% 4%;
+  --muted: 217 33% 13%;
+  --accent: 217 33% 15%;
+  --radius: 0.375rem;
 }
 
 @layer base {

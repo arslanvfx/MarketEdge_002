@@ -2,7 +2,7 @@ import WebSocket from "ws";
 import { CRYPTO_COINS, getKalshiCachedData } from "./crypto.ts";
 import { hasKalshiCredentials, makeKalshiSignedHeaders } from "./kalshi-auth.ts";
 import { logger } from "./logger.ts";
-import { KalshiOrderbookStore, type ExecutableBook, type KalshiSide } from "./kalshi-orderbook-store.ts";
+import { KalshiOrderbookStore, type ExecutableBook, type ExecutableSellBook, type KalshiSide } from "./kalshi-orderbook-store.ts";
 
 const WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2";
 const WS_SIGNING_PATH = "/trade-api/ws/v2";
@@ -35,6 +35,10 @@ export class KalshiOrderbookService {
 
   getExecutable(ticker: string, side: KalshiSide, maxContracts: number, floor: number, ceiling: number): ExecutableBook | null {
     return this.store.getExecutable(ticker, side, maxContracts, floor, ceiling);
+  }
+
+  getExecutableSell(ticker: string, side: KalshiSide, maxContracts: number): ExecutableSellBook | null {
+    return this.store.getExecutableSell(ticker, side, maxContracts);
   }
 
   isFresh(ticker: string): boolean {

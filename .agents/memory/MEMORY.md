@@ -143,3 +143,4 @@
 - [Scalper tail-risk entry floor](scalper-tail-risk-entry-floor.md) — target distance below 0.20% has negative tail-risk economics; keep the hard floor independent of operator drafts.
 - [PostgreSQL parameter arithmetic](postgres-parameter-arithmetic.md) — cast both placeholders in SQL arithmetic; contextual INSERT column types do not resolve ambiguous operators.
 - [Kalshi WebSocket book semantics](kalshi-websocket-book-semantics.md) — sequence belongs to the subscription SID; contract depth/deltas require exact hundredth-unit arithmetic.
+- [IOC quote and reconciliation safety](ioc-quote-reconciliation-safety.md) — use marginal depth for limits, weighted prices only for estimates, and never infer unknown fills from ticker/time proximity.

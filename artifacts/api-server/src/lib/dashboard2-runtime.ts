@@ -1,13 +1,141 @@
-import { CRYPTO_COINS, getKalshiCachedData } from "./crypto.ts";
-import { getBotState, getWindowEvaluation } from "./kalshi-bot.ts";
-import { getAllPipelineResults, getInFlightDetails } from "./kalshi-bot-pipeline.ts";
-import { createDashboard2Policy } from "./dashboard2-policy.ts";
+import { CRYPTO_COINS, getCachedPrediction, getKalshiCachedData, predCache } from "./crypto.ts";
 import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service.ts";
-import type { Dashboard2ExecutionOwner } from "./dashboard2-ownership.ts";
+import { isDashboard2ExecutionOwnerCurrent, readDashboard2ExecutionOwner, type Dashboard2ExecutionOwner } from "./dashboard2-ownership.ts";
 import { evaluateDashboard2SafetyGate } from "./dashboard2-safety-gate.ts";
+import { completeDashboard2PaperExit, dashboard2SafetyAuthorizations, dashboard2V2EntryState, dashboard2V2LiveReadiness, dashboard2V2OpenPositionsForExit, isDashboard2V2ConfigCurrent, readDashboard2V2Config, readDashboard2V2SelectedMode, reconcileDashboard2V2LiveUnknowns, reserveDashboard2V2Entry, reserveDashboard2V2Exit, runDashboard2PaperCandidate, settleDashboard2V2PriorWindows, submitDashboard2LiveExit, submitDashboard2LiveIoc } from "./dashboard2-v2.ts";
+import { getBalance } from "./kalshi-trader.ts";
 
 type ReadinessStatus = "ready" | "warming" | "blocked" | "stale";
 type WindowPhase = "preparing" | "armed" | "eligible" | "blocked";
+
+/** Scheduler-owned V2 entry and protective-exit execution primitive. */
+const fresh = (at: unknown, now: number, maxAgeMs = 30_000) => typeof at === "number" && now - at >= 0 && now - at <= maxAgeMs;
+export function dashboard2QuietHoursAllows(config: { enabled: boolean; startUtc: number; endUtc: number }, now: number): boolean {
+  if (!config.enabled) return true;
+  const h = new Date(now).getUTCHours();
+  return config.startUtc === config.endUtc ? false : config.startUtc < config.endUtc ? !(h >= config.startUtc && h < config.endUtc) : !(h >= config.startUtc || h < config.endUtc);
+}
+function directionAndProximity(symbol: string, target: number | null | undefined, now: number) {
+  const spot = getCachedPrediction(symbol);
+  const spotPrice = spot?.price;
+  const spotFresh = Boolean(spot && fresh(predCache.get(symbol)?.at, now));
+  const distancePct = target != null && spotPrice != null && spotPrice > 0 ? Math.abs(target - spotPrice) / spotPrice * 100 : null;
+  return { spotPrice: spotPrice ?? null, spotFresh, distancePct, direction: spot?.indicators.trend ?? null };
+}
+
+/** Selected-mode executor. Both modes build precisely the same evidence and
+ * only diverge after the pure safety decision has authorized a quantity. */
+export async function runDashboard2Orchestrator(now = Date.now()): Promise<void> {
+  // Settlement progresses even while entries are paused or after a restart.
+  await settleDashboard2V2PriorWindows();
+  const windowStart = Math.floor(now / (15 * 60_000)) * (15 * 60_000);
+  const windowKey = new Date(windowStart).toISOString().slice(0, 16);
+  const elapsedMinutes = (now - windowStart) / 60_000;
+  // Dashboard2 owns the complete lifecycle of its positions. Entry ownership
+  // and the selected mode never disable protective exits.
+  const exitConfigs = {
+    paper: (await readDashboard2V2Config("paper")).config,
+    live: (await readDashboard2V2Config("live")).config,
+  };
+  for (const position of await dashboard2V2OpenPositionsForExit()) {
+    const exitConfig = exitConfigs[position.mode];
+    if (!exitConfig.stopLoss.enabled || elapsedMinutes < exitConfig.stopLoss.activationMinute) continue;
+    const remaining = position.filledContracts - position.exitedContracts;
+    const quote = dashboard2KalshiOrderbookService.getExecutableSell(position.ticker, position.side, remaining);
+    if (!quote || quote.sideProceeds > exitConfig.stopLoss.floor) continue;
+    const count = Math.min(remaining, quote.visibleContracts);
+    const reservation = await reserveDashboard2V2Exit(position, quote, count);
+    if (!reservation) continue;
+    if (position.mode === "paper") {
+      await completeDashboard2PaperExit(reservation.id, quote, count);
+    } else {
+      await submitDashboard2LiveExit({
+        position, quote, count, reservation,
+        preSubmitGuard: () => {
+          const current = dashboard2KalshiOrderbookService.getExecutableSell(position.ticker, position.side, remaining);
+          return isDashboard2V2ConfigCurrent("live", exitConfig) &&
+            current?.bookVersion === quote.bookVersion &&
+            current.sideProceeds === quote.sideProceeds &&
+            current.visibleContracts >= count;
+        },
+      });
+    }
+  }
+  const selected = await readDashboard2V2SelectedMode();
+  const mode = selected.selectedMode;
+  const config = (await readDashboard2V2Config(mode)).config;
+  const owner = await readDashboard2ExecutionOwner();
+  if (!config.enabled) return;
+  if (mode === "live") await reconcileDashboard2V2LiveUnknowns();
+  const liveReadiness = mode === "live" ? await dashboard2V2LiveReadiness() : null;
+  if (mode === "live" && (!liveReadiness?.activationReady || owner.owner !== "dashboard2_bot")) return;
+  let remainingFunding = mode === "live"
+    ? await getBalance()
+        .then((balance) => Math.max(0, Math.min(config.maxDollarBudget, balance.availableBalance - config.minAccountBalance)))
+        .catch(() => null)
+    : config.maxDollarBudget;
+  // Do not consume the unique per-window ledger key before entry is legal.
+  // A pre-entry observation is not an execution attempt.
+  for (const { symbol } of CRYPTO_COINS) {
+    if (!config.enabledSymbols.includes(symbol.toUpperCase())) continue;
+    const target = getKalshiCachedData(symbol);
+    const ticker = target?.ticker;
+    const quotes = ticker
+      ? (["yes", "no"] as const)
+        .map(side => dashboard2KalshiOrderbookService.getExecutable(ticker, side, config.maxContracts, config.sideCostFloor, config.sideCostCeiling))
+        .filter((quote): quote is NonNullable<typeof quote> => quote !== null)
+        .sort((a, b) => a.sideCost - b.sideCost)
+      : [];
+    const quote = quotes[0];
+    if (!quote) continue; // never consume a window before exact executable depth
+    const exactTicker = quote.ticker;
+    const state = await dashboard2V2EntryState(mode, symbol, windowKey);
+    const signal = directionAndProximity(symbol, target?.value, now);
+    const funding = remainingFunding;
+    const policy = { version: `dashboard2-v2-${config.version}`, minEntryMinute: config.minEntryMinute, sideCostFloor: config.sideCostFloor, sideCostCeiling: config.sideCostCeiling, maxContracts: config.maxContracts };
+    const circuitOpen = config.circuitBreaker.enabled && (
+       state.dailyPnl <= -config.circuitBreaker.maxDailyLoss ||
+       state.consecutiveLosses >= config.circuitBreaker.maxConsecutiveLosses
+    );
+    const evidence = {
+      identity: { symbol, ticker: exactTicker, windowKey, side: quote.side, bookVersion: quote.bookVersion }, elapsedMinutes, sideCost: quote.sideCost,
+      sequenceValid: true, bookFresh: dashboard2KalshiOrderbookService.isFresh(exactTicker), signalPreparationComplete: fresh(target?.at, now) && signal.spotFresh,
+      hasDuplicateOrOpenPosition: state.conflict || state.positions >= config.maxConcurrentPositions,
+      quietHoursAllows: dashboard2QuietHoursAllows(config.quietHours, now) && !circuitOpen,
+      directionEvidencePositive: !config.directionGuard.enabled || (quote.side === "yes" ? signal.direction === "up" : signal.direction === "down"),
+      targetProximityPositive: !config.proximityGuard.enabled || (signal.distancePct != null && signal.distancePct >= config.proximityGuard.minPct),
+      availableFunding: funding, exposureAllowance: state.exposure >= config.maxTotalExposure ? 0 : Math.floor((config.maxTotalExposure - state.exposure) / config.sideCostCeiling),
+    };
+    // Paper is intentionally an observation authorization: it never acquires
+    // broker capability and therefore does not require the live owner.
+    const decision = evaluateDashboard2SafetyGate({ expectedIdentity: evidence.identity, evidence, policy, visibleExecutableDepth: quote.visibleContracts, observationOnly: mode === "paper" ? true : !(owner.owner === "dashboard2_bot"), owner: owner.owner });
+    if (mode === "paper") {
+      if (!decision.shadowQualified) continue;
+      const claim = await runDashboard2PaperCandidate({ symbol, windowKey, elapsedMinutes, quote, config, authorizedCount: decision.capital.quantity });
+      if (claim !== "blocked" && claim !== "duplicate") {
+        remainingFunding = Math.max(0, (remainingFunding ?? 0) - decision.capital.quantity * config.sideCostCeiling);
+      }
+      continue;
+    }
+    if (!decision.executionAuthorized) continue;
+    const reservation = await reserveDashboard2V2Entry({ mode: "live", symbol, windowKey, quote, requestedContracts: decision.capital.quantity, config });
+    if (!reservation) continue;
+    remainingFunding = Math.max(0, (remainingFunding ?? 0) - decision.capital.quantity * config.sideCostCeiling);
+    const authorization = dashboard2SafetyAuthorizations.issue({ mode, symbol, ticker: exactTicker, windowKey, side: quote.side, bookVersion: quote.bookVersion }, policy);
+    await submitDashboard2LiveIoc({ symbol, windowKey, quote, count: decision.capital.quantity, owner: owner.owner, activationReady: true, reservation, preSubmitGuard: () => {
+      const current = dashboard2KalshiOrderbookService.getExecutable(exactTicker, quote.side, config.maxContracts, config.sideCostFloor, config.sideCostCeiling);
+      const consumed = dashboard2SafetyAuthorizations.consume(authorization.token, { mode, symbol, ticker: exactTicker, windowKey, side: quote.side, policyVersion: policy.version, bookVersion: quote.bookVersion });
+      return consumed.accepted &&
+        isDashboard2ExecutionOwnerCurrent("dashboard2_bot") &&
+        isDashboard2V2ConfigCurrent("live", config) &&
+        current?.bookVersion === quote.bookVersion &&
+         current.sideCost === quote.sideCost &&
+         current.marginalLimitCost === quote.marginalLimitCost &&
+         current.visibleContracts >= decision.capital.quantity;
+    }});
+  }
+}
+export const runDashboard2PaperOrchestrator = runDashboard2Orchestrator;
 
 function asIsoString(value: unknown, fallback: string): string {
   if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
@@ -17,7 +145,7 @@ function asIsoString(value: unknown, fallback: string): string {
   return fallback;
 }
 
-export function getDashboard2RuntimeStatus(
+export async function getDashboard2RuntimeStatus(
   owner: Dashboard2ExecutionOwner,
   ownershipUpdatedAt = new Date().toISOString(),
 ) {
@@ -25,27 +153,17 @@ export function getDashboard2RuntimeStatus(
   const nowIso = new Date(now).toISOString();
   const windowStart = Math.floor(now / (15 * 60_000)) * (15 * 60_000);
   const windowKey = new Date(windowStart).toISOString().slice(0, 16);
-  const bot = getBotState();
-  const policy = createDashboard2Policy(bot.config.maxBetSize);
-  const results = getAllPipelineResults().filter((result) => result.windowKey === windowKey);
-  const resultBySymbol = new Map(results.map((result) => [result.sym.toUpperCase(), result]));
-  const inFlight = new Set(
-    getInFlightDetails()
-      .filter((entry) => entry.windowKey === windowKey)
-      .map((entry) => entry.sym.toUpperCase()),
-  );
-  const evaluations = new Map(
-    getWindowEvaluation()
-      .filter((entry) => entry.windowKey === windowKey)
-      .map((entry) => [entry.symbol.toUpperCase(), entry]),
-  );
+  const selected = await readDashboard2V2SelectedMode();
+  const selectedConfig = await readDashboard2V2Config(selected.selectedMode);
+  const liveReadiness = selected.selectedMode === "live" ? await dashboard2V2LiveReadiness() : { activationReady: false, reasons: [] as string[] };
+  const policy = { version: `dashboard2-v2-${selectedConfig.config.version}`, minEntryMinute: selectedConfig.config.minEntryMinute, sideCostFloor: selectedConfig.config.sideCostFloor, sideCostCeiling: selectedConfig.config.sideCostCeiling, maxContracts: selectedConfig.config.maxContracts } as const;
 
   const elapsedSeconds = Math.max(0, Math.floor((now - windowStart) / 1_000));
   const entryOpensInSeconds = Math.max(0, policy.minEntryMinute * 60 - elapsedSeconds);
   const cachedMarkets = CRYPTO_COINS.map(({ symbol }) => {
     const normalized = symbol.toUpperCase();
-    const pipeline = resultBySymbol.get(normalized);
     const market = getKalshiCachedData(normalized);
+    const signal = directionAndProximity(normalized, market?.value, now);
     const ticker = market?.ticker;
     const executable = ticker
       ? (["yes", "no"] as const)
@@ -76,9 +194,7 @@ export function getDashboard2RuntimeStatus(
         sideCost: eligibleSide?.sideCost ?? null,
         sequenceValid: eligibleSide ? true : null,
         bookFresh: ticker ? bookFresh : null,
-        signalPreparationComplete: pipeline
-          ? pipeline.statAbove !== null && pipeline.claudeAbove !== null && pipeline.mlAbove !== null
-          : null,
+        signalPreparationComplete: null,
         // These require legacy state or broad imports; Dashboard 2 observes them
         // as unknown rather than reading or mutating execution state.
         hasDuplicateOrOpenPosition: null, quietHoursAllows: null, directionEvidencePositive: null,
@@ -95,20 +211,18 @@ export function getDashboard2RuntimeStatus(
       side: eligibleSide?.side ?? null,
       sideCost: eligibleSide?.sideCost ?? null,
       visibleContracts: eligibleSide?.visibleContracts ?? 0,
+      target: market?.value ?? null,
+      spot: signal.spotPrice,
+      distancePct: signal.distancePct,
+      intendedQuantity: 0,
+      bookVersion: eligibleSide?.bookVersion ?? null,
       bookFresh,
        safety: safetyDecision.shadowQualified ? ("waiting" as const) : ("blocked" as const),
       reason,
-      signalsReady: Boolean(
-        pipeline &&
-          pipeline.statAbove !== null &&
-          pipeline.claudeAbove !== null &&
-          pipeline.mlAbove !== null,
-      ),
-      preparing: inFlight.has(normalized),
+      signalsReady: false, preparing: false,
     };
   });
   const preparedMarketCount = cachedMarkets.filter((market) => market.ticker !== null).length;
-  const signalsReadyCount = cachedMarkets.filter((market) => market.signalsReady).length;
   const bookConnection = dashboard2KalshiOrderbookService.getStatus();
   const readiness: Array<{
     id: string;
@@ -127,9 +241,9 @@ export function getDashboard2RuntimeStatus(
     {
       id: "strategy-preparation",
       label: "Strategy preparation",
-      status: signalsReadyCount > 0 ? "ready" : results.length > 0 ? "warming" : "stale",
-      detail: `${signalsReadyCount}/${cachedMarkets.length} signal sets complete; ${inFlight.size} in flight`,
-      updatedAt: results.length > 0 ? nowIso : null,
+       status: "stale",
+       detail: "V2 safety evidence is scheduler-owned and is not read from legacy bot state",
+       updatedAt: null,
     },
     {
       id: "entry-timing",
@@ -156,14 +270,14 @@ export function getDashboard2RuntimeStatus(
       id: "safety-gate",
       label: "Safety Gate",
       status: "blocked",
-      detail: "Authorization contracts are installed; live evaluation remains observation-only",
+       detail: selected.selectedMode === "live" ? (liveReadiness.activationReady ? "Live Safety Gate is ready" : liveReadiness.reasons.join(", ")) : "Paper Safety Gate evaluates selected-mode evidence",
       updatedAt: nowIso,
     },
     {
       id: "buy-executor",
       label: "Buy executor",
       status: "blocked",
-      detail: "No Dashboard 2.0 broker submission authority exists",
+       detail: selected.selectedMode === "live" ? "IOC executor is guarded by one-use authorization" : "Paper ledger executor",
       updatedAt: null,
     },
   ];
@@ -179,9 +293,12 @@ export function getDashboard2RuntimeStatus(
   return {
     system: {
       executionOwner: owner,
-      observationOnly: true,
+       observationOnly: selected.selectedMode !== "live" || owner !== "dashboard2_bot" || !liveReadiness.activationReady,
       updatedAt: ownershipUpdatedAt,
       bookConnection,
+      selectedMode: selected.selectedMode,
+      running: selectedConfig.config.enabled,
+       readiness: liveReadiness,
     },
     policy,
     window: {
@@ -192,23 +309,6 @@ export function getDashboard2RuntimeStatus(
     },
     readiness,
     markets: cachedMarkets.map(({ signalsReady: _signalsReady, preparing: _preparing, ...market }) => market),
-    recentEvents: Array.from(evaluations.values())
-      .sort(
-        (a, b) =>
-          asIsoString(b.evaluatedAt, nowIso).localeCompare(asIsoString(a.evaluatedAt, nowIso)),
-      )
-      .slice(0, 20)
-      .map((evaluation, index) => ({
-        id: `${evaluation.symbol}-${asIsoString(evaluation.evaluatedAt, nowIso)}-${index}`,
-        at: asIsoString(evaluation.evaluatedAt, nowIso),
-        type: "window_evaluation",
-        message: `${evaluation.symbol}: ${evaluation.action} — ${evaluation.reason}`,
-        severity:
-          evaluation.action === "BET_YES" || evaluation.action === "BET_NO"
-            ? ("success" as const)
-            : evaluation.action === "SKIP"
-              ? ("warning" as const)
-              : ("info" as const),
-      })),
+    recentEvents: [],
   };
 }

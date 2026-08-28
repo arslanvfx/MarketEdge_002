@@ -7,6 +7,21 @@ export interface ExecutableBook {
   readonly ticker: string;
   readonly side: KalshiSide;
   readonly sideCost: number;
+  /** Most expensive side cost consumed by this complete-contract quote. */
+  readonly marginalLimitCost: number;
+  readonly visibleContracts: number;
+  readonly seq: number;
+  readonly updatedAt: number;
+  readonly bookVersion: string;
+}
+
+export interface ExecutableSellBook {
+  readonly ticker: string;
+  readonly side: KalshiSide;
+  /** Average proceeds per contract over visibleContracts, highest bids first. */
+  readonly sideProceeds: number;
+  /** Lowest direct bid consumed by this complete-contract quote. */
+  readonly marginalLimitProceeds: number;
   readonly visibleContracts: number;
   readonly seq: number;
   readonly updatedAt: number;
@@ -188,15 +203,57 @@ export class KalshiOrderbookStore {
     if (contracts <= 0) return null;
     let remainingUnits = contracts * 100;
     let weightedCostUnits = 0;
+    let marginalLimitCost = 0;
     for (const level of levels) {
       const takeUnits = Math.min(remainingUnits, level.units);
       weightedCostUnits += takeUnits * level.cost;
+      if (takeUnits > 0) marginalLimitCost = level.cost;
       remainingUnits -= takeUnits;
       if (remainingUnits <= 0) break;
     }
     return Object.freeze({
-      ticker, side, sideCost: Number((weightedCostUnits / (contracts * 100)).toFixed(8)), visibleContracts: contracts,
+      ticker, side, sideCost: Number((weightedCostUnits / (contracts * 100)).toFixed(8)),
+      marginalLimitCost: Number(marginalLimitCost.toFixed(8)), visibleContracts: contracts,
       seq: book.seq, updatedAt: book.updatedAt, bookVersion: `${book.sid}:${book.seq}`,
+    });
+  }
+
+  /** Immutable direct-bid liquidation view for an already-held side. */
+  getExecutableSell(
+    ticker: string,
+    side: KalshiSide,
+    maxContracts: number,
+    now = Date.now(),
+  ): ExecutableSellBook | null {
+    const book = this.books.get(ticker);
+    if (!book || book.gapped || now - book.updatedAt > this.staleAfterMs ||
+        !Number.isInteger(maxContracts) || maxContracts < 1) return null;
+    const levels = [...book[side].entries()]
+      .filter(([, units]) => units > 0)
+      .sort(([a], [b]) => b - a);
+    let availableUnits = 0;
+    for (const [, units] of levels) {
+      availableUnits += units;
+      if (!Number.isSafeInteger(availableUnits)) return null;
+    }
+    const contracts = Math.min(maxContracts, Math.floor(availableUnits / 100));
+    if (contracts <= 0) return null;
+    let remainingUnits = contracts * 100;
+    let weightedProceedsUnits = 0;
+    let marginalLimitProceeds = 0;
+    for (const [price, units] of levels) {
+      const takeUnits = Math.min(remainingUnits, units);
+      weightedProceedsUnits += takeUnits * price;
+      if (takeUnits > 0) marginalLimitProceeds = price;
+      remainingUnits -= takeUnits;
+      if (remainingUnits === 0) break;
+    }
+    return Object.freeze({
+      ticker, side,
+      sideProceeds: Number((weightedProceedsUnits / (contracts * 100)).toFixed(8)),
+      marginalLimitProceeds,
+      visibleContracts: contracts, seq: book.seq, updatedAt: book.updatedAt,
+      bookVersion: `${book.sid}:${book.seq}`,
     });
   }
 

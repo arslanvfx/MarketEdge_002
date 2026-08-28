@@ -21,6 +21,8 @@ import { scheduleAtTopOfEveryUtcHour } from "./lib/kalshi-quiet-hours-scheduler"
 import { reconcileReservedRegularIntents, runRegularOrderIntentMigrations } from "./lib/kalshi-regular-order-intent";
 import { runRegularIntentReconciliationPass } from "./lib/kalshi-regular-order-reconcile";
 import { dashboard2KalshiOrderbookService } from "./lib/kalshi-orderbook-service";
+import { ensureDashboard2V2Tables } from "./lib/dashboard2-v2";
+import { runDashboard2Orchestrator } from "./lib/dashboard2-runtime";
 
 const rawPort = process.env["PORT"];
 
@@ -482,6 +484,21 @@ app.listen(port, async (err) => {
   // Observation-only Dashboard 2.0 data service: it owns no order placement
   // path and is deliberately independent of page visits and bot startup.
   dashboard2KalshiOrderbookService.start();
+  // V2 is scheduler-owned: page views never execute candidates. The durable
+  // migration is awaited before the first pass; overlapping passes are skipped.
+  await ensureDashboard2V2Tables().catch((err) =>
+    logger.error({ err }, "[dashboard2-v2] migration failed; scheduler remains fail-closed"),
+  );
+  let dashboard2TickRunning = false;
+  const dashboard2Tick = async () => {
+    if (dashboard2TickRunning) return;
+    dashboard2TickRunning = true;
+    try { await runDashboard2Orchestrator(); }
+    catch (err) { logger.error({ err }, "[dashboard2-v2] scheduler pass failed"); }
+    finally { dashboard2TickRunning = false; }
+  };
+  void dashboard2Tick();
+  setInterval(() => void dashboard2Tick(), 2_000);
 
   // Start the pool keep-alive pinger immediately so idle connections
   // never go stale between the periodic DB activity bursts.
