@@ -32,6 +32,7 @@ const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "
 
 interface BotScalperPanelProps {
   authPost: (path: string, body: object) => Promise<unknown>;
+  hideContrarianSpike?: boolean;
 }
 
 interface ScalperCapability {
@@ -491,7 +492,7 @@ function ContrarianGuardOutcomeStudy({
   );
 }
 
-export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
+export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotScalperPanelProps) {
   const { getToken, isLoaded: authLoaded, userId } = useAuth();
   const qc = useQueryClient();
   const [configDraft, setConfigDraft] = useState<Partial<ScalperConfig>>({});
@@ -2765,7 +2766,7 @@ export function BotScalperPanel({ authPost }: BotScalperPanelProps) {
         </div>
       </div>
     </div>
-    <ContrarianSpikePanel authPost={authPost} />
+    {!hideContrarianSpike && <ContrarianSpikePanel authPost={authPost} />}
     </div>
   );
 }

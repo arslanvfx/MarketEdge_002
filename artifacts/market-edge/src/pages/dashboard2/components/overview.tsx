@@ -4,7 +4,21 @@ import { formatTime, formatDollar } from "../utils";
 import { Clock, Server, Activity, TrendingUp, TrendingDown, Percent, Info, ShieldCheck, Loader2, AlertTriangle } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Cell, ReferenceLine } from "recharts";
 
-export function CommandOverview({ status, daily, mode }: { status: Dashboard2Status, daily?: DailyPerformance, mode: 'paper' | 'live' }) {
+export function CommandOverview({
+  status,
+  daily,
+  mode,
+  afterKpis,
+  hourlyFooter,
+  beforeTelemetry,
+}: {
+  status: Dashboard2Status,
+  daily?: DailyPerformance,
+  mode: 'paper' | 'live',
+  afterKpis?: React.ReactNode,
+  hourlyFooter?: React.ReactNode,
+  beforeTelemetry?: React.ReactNode,
+}) {
   const pnlNum = typeof daily?.summary.todayPnl === 'string' ? parseFloat(daily?.summary.todayPnl) : (daily?.summary.todayPnl || 0);
   const pnlColor = pnlNum >= 0 ? "text-[#00ffd0]" : "text-rose-500";
   const pnlBg = pnlNum >= 0 ? "bg-[#00ffd0]/10 border-[#00ffd0]/20" : "bg-rose-500/10 border-rose-500/20";
@@ -88,11 +102,14 @@ export function CommandOverview({ status, daily, mode }: { status: Dashboard2Sta
         </div>
       </div>
 
+      {afterKpis}
+
       {/* Main Chart & Side Info Area */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
         {/* Hourly Chart Section */}
-        <div className="lg:col-span-2 bg-card border rounded-xl p-5 shadow-sm flex flex-col">
+        <div className="lg:col-span-2 flex min-w-0 flex-col gap-6">
+        <div className="bg-card border rounded-xl p-5 shadow-sm flex flex-col">
           <div className="flex items-center justify-between mb-6">
             <div>
               <h2 className="text-sm font-semibold text-foreground tracking-wide">Today's P&L by Hour</h2>
@@ -155,6 +172,8 @@ export function CommandOverview({ status, daily, mode }: { status: Dashboard2Sta
              )}
           </div>
         </div>
+        {hourlyFooter}
+        </div>
 
         {/* Telemetry & System Status Sidebar */}
         <div className="lg:col-span-1 flex flex-col gap-4">
@@ -189,6 +208,8 @@ export function CommandOverview({ status, daily, mode }: { status: Dashboard2Sta
                 </div>
              </div>
           </div>
+
+          {beforeTelemetry}
 
           {/* Quick Telemetry Stream */}
            <div className="bg-card border rounded-xl p-5 shadow-sm flex flex-col flex-1 min-h-[200px] max-h-[300px]">

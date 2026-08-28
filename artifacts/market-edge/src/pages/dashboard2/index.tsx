@@ -156,38 +156,39 @@ export default function Dashboard2() {
               status={status}
               daily={daily}
               mode={mode}
+              afterKpis={<CompactPositions positions={positions} />}
+              beforeTelemetry={<KalshiLiveTickerPanel />}
+              hourlyFooter={(
+                <WhatIfCalculator
+                  data={whatIf}
+                  stake={stakeInput}
+                  setStake={setStakeInput}
+                  isLoading={whatIfLoading}
+                  isError={whatIfError}
+                  isValid={isValidStake}
+                />
+              )}
             />
 
-            <WhatIfCalculator
-              data={whatIf}
-              stake={stakeInput}
-              setStake={setStakeInput}
-              isLoading={whatIfLoading}
-              isError={whatIfError}
-              isValid={isValidStake}
-            />
+            {/* Immediate execution state */}
+            <div className="mt-2">
+              <CompactLiveTargets markets={status.markets} />
+            </div>
 
             {/* Execution Modules */}
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mt-2">
               <div className="xl:col-span-2 min-w-0">
-                <BotScalperPanel authPost={scalperAuthPost} />
+                <BotScalperPanel authPost={scalperAuthPost} hideContrarianSpike />
               </div>
-              <div className="xl:col-span-1 min-w-0 space-y-6">
-                <KalshiLiveTickerPanel />
+              <div className="xl:col-span-1 min-w-0">
                 <BotSmartExitPanel authPost={authPost} />
               </div>
             </div>
 
             {/* Dense Data Tables Area */}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-2">
-               <div className="space-y-6">
-                 <CompactLiveTargets markets={status.markets} />
-                 <CompactPositions positions={positions} />
-               </div>
-               <div className="space-y-6">
-                 <CompactHistory history={history} />
-                 <CompactAudit readiness={status.readiness} audit={audit} />
-               </div>
+              <CompactHistory history={history} />
+              <CompactAudit readiness={status.readiness} audit={audit} />
             </div>
 
             <SharedBotIntelligence mode={mode} />
