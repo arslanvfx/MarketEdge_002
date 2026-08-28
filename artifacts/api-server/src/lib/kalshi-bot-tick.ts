@@ -2491,7 +2491,7 @@ async function _runBotTick(
             toPrice: _pDir.toPrice,
             slopePrice: _pDir.slopePrice,
           },
-          "[kalshi-bot] extreme-only profile relaxed ordinary pipeline direction guard",
+          "[kalshi-bot] selected safety profile made pipeline direction guard advisory",
         );
       } else {
         releaseConvictionEntryReservation("pipeline direction guard");
@@ -2734,7 +2734,7 @@ async function _runBotTick(
       direction,
       advisory: true,
       gate: "tick",
-      evidenceClass: "adverse",
+      evidenceClass: regularFreefallSignals.evidenceClass,
       reason: regularFreefall.reason,
       lookback: regularFreefall.guardResult?.samplesUsed ?? 0,
       fromPrice: regularFreefall.guardResult?.evaluatedSamples[0]?.price,
@@ -2749,7 +2749,7 @@ async function _runBotTick(
         entrySafetyProfile: S.config.entrySafetyProfile ?? "current",
         reason: regularFreefall.reason,
       },
-      "[kalshi-bot] extreme-only profile relaxed ordinary final movement guard",
+      "[kalshi-bot] selected safety profile made final movement guard advisory",
     );
   } else if (relaxedMovementAdvisory) {
     convictionDirectionGuardBlockedMap.set(sym, relaxedMovementAdvisory);

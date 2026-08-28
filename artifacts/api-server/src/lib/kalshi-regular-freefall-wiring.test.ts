@@ -36,7 +36,7 @@ test("dashboard exposes selected profile and relaxed regular-mode guard status",
     new URL("../../../market-edge/src/pages/bot/coin-signal-board.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /Extreme-only advisory: ordinary movement guard relaxed/);
+  assert.match(source, /Advisory safety.*movement guard warning/);
   assert.match(source, /Safety:/);
   assert.match(source, /\? "Relaxed"/);
   assert.match(source, />Live guard</);

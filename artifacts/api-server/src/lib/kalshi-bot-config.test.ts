@@ -86,6 +86,7 @@ test("malformed entry safeguards normalize fail-safe to current", () => {
   assert.equal(normalizeEntrySafetyProfile(""), "current");
   assert.equal(normalizeEntrySafetyProfile("lax"), "current");
   assert.equal(normalizeEntrySafetyProfile("extreme_only"), "extreme_only");
+  assert.equal(normalizeEntrySafetyProfile("advisory"), "advisory");
 });
 
 test("decision-mode presets cannot store or reactivate an entry safety profile", () => {

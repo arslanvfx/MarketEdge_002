@@ -1293,10 +1293,10 @@ export function applyPlacementTimeReducedPct(
   return Math.floor(contractCount * (final_ / applied));
 }
 
-export type EntrySafetyProfile = "current" | "extreme_only";
+export type EntrySafetyProfile = "current" | "extreme_only" | "advisory";
 
 export function normalizeEntrySafetyProfile(value: unknown): EntrySafetyProfile {
-  return value === "extreme_only" ? "extreme_only" : "current";
+  return value === "extreme_only" || value === "advisory" ? value : "current";
 }
 
 /** Entry safety is an operator-global control, never a decision-mode preset. */
@@ -1315,7 +1315,7 @@ export interface BotConfig {
   liveExecutionGateway?: "legacy" | "authenticated_book";
   /**
    * Bot 1 entry-movement policy. Missing or malformed persisted values resolve
-   * to "current"; "extreme_only" must always be selected explicitly.
+   * to "current"; relaxed profiles must always be selected explicitly.
    */
   entrySafetyProfile?: EntrySafetyProfile;
   betSize: number;           // $ per bet (default 0.50)

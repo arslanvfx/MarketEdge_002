@@ -410,7 +410,7 @@ export default function BotDashboard() {
     botSteps?: BotStepEntry[];
     minConfidence?: number;
     decisionMode?: string;
-    entrySafetyProfile?: "current" | "extreme_only";
+    entrySafetyProfile?: "current" | "extreme_only" | "advisory";
     coinStability?: Record<string, import("./bot/types").CoinStabilityResult>;
     coinTrajectory?: Record<string, import("./bot/types").TrajectoryGateResult>;
     extremeCautionAborted?: string[];

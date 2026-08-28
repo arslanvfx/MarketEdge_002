@@ -37,4 +37,4 @@ description: Safety rules for comparing paper opportunities with live regular-or
 
 **Why:** The operator needs a reversible way to admit neutral or mildly unfavorable entries without weakening fail-closed market evidence or making paper/live comparisons invalid.
 
-**How to apply:** Treat the profile as an explicit global operator control, never as a decision-mode preset or automatic mode default. Persist both the raw guard verdict and the profile-resolved classification, and keep every downstream funding, intent, quote, exposure, and reconciliation boundary unchanged.
+**How to apply:** Treat the profile as an explicit global operator control, never as a decision-mode preset or automatic mode default. Extreme-only relaxes ordinary movement; Advisory makes the entire direction/freefall guard warning-only, including unavailable evidence and hard movement verdicts. Persist both the raw verdict and resolved classification, and keep every downstream funding, intent, quote, exposure, and reconciliation boundary unchanged.

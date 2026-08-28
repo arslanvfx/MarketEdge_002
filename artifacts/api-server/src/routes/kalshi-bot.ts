@@ -927,7 +927,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     entrySafetyProfile,
   } = req.body as {
     liveExecutionGateway?: "legacy" | "authenticated_book";
-    entrySafetyProfile?: "current" | "extreme_only";
+    entrySafetyProfile?: "current" | "extreme_only" | "advisory";
     betSize?: number;
     dailyLossLimit?: number;
     signalThreshold?: number;
@@ -1042,7 +1042,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (liveExecutionGateway === "legacy" || liveExecutionGateway === "authenticated_book") {
     partial.liveExecutionGateway = liveExecutionGateway;
   }
-  if (entrySafetyProfile === "current" || entrySafetyProfile === "extreme_only") {
+  if (entrySafetyProfile === "current" || entrySafetyProfile === "extreme_only" || entrySafetyProfile === "advisory") {
     partial.entrySafetyProfile = entrySafetyProfile;
   }
   if (typeof betSize === "number" && betSize >= 0.5 && betSize <= 500) partial.betSize = betSize;

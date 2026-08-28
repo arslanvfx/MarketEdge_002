@@ -94,7 +94,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
               {/* ── Bet Profile ── */}
               <div className="flex flex-col gap-2">
                 <span className="text-xs font-medium text-muted-foreground">Live Execution Gateway</span>
-                <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 min-[420px]:grid-cols-3 gap-3">
                   {([
                     {
                       id: "legacy" as const,
@@ -156,6 +156,11 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       label: "Extreme-only (lax)",
                       detail: "Allows ordinary flat or mildly adverse movement. Still blocks stale evidence, strike crossing, rapid moves, and adverse excursions.",
                     },
+                    {
+                      id: "advisory" as const,
+                      label: "Advisory",
+                      detail: "Pre-profile dev behavior. Logs every direction/freefall warning—including stale evidence—but this guard never blocks an entry.",
+                    },
                   ]).map(profile => {
                     const active = (cfg.entrySafetyProfile ?? "current") === profile.id;
                     const pending = !active && (merged.entrySafetyProfile ?? "current") === profile.id;
@@ -187,12 +192,21 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 {(cfg.entrySafetyProfile ?? "current") !== (merged.entrySafetyProfile ?? "current") && (
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
                     Safety profile changes are not active until Save Configuration succeeds. Current active profile:{" "}
-                    {(cfg.entrySafetyProfile ?? "current") === "extreme_only" ? "Extreme-only (lax)" : "Current safeguards"}.
+                    {(cfg.entrySafetyProfile ?? "current") === "extreme_only"
+                      ? "Extreme-only (lax)"
+                      : (cfg.entrySafetyProfile ?? "current") === "advisory"
+                        ? "Advisory"
+                        : "Current safeguards"}.
                   </div>
                 )}
                 {(merged.entrySafetyProfile ?? "current") === "extreme_only" && (
                   <div className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-[11px] leading-relaxed text-orange-200">
                     Real-money warning: this profile accepts entries during ordinary adverse drift. Hard market identity, stale-data, strike-crossing, rapid-move, excursion, funding, exposure, and duplicate-order protections remain enforced.
+                  </div>
+                )}
+                {(merged.entrySafetyProfile ?? "current") === "advisory" && (
+                  <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] leading-relaxed text-red-200">
+                    Real-money warning: the entire direction/freefall guard is warning-only in Advisory mode, including stale or missing evidence, strike crossing, rapid movement, and adverse excursions. Smart Hours, funding, exposure, market identity, quote, intent, duplicate-order, and reconciliation protections still apply.
                   </div>
                 )}
               </div>

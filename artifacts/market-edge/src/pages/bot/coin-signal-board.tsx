@@ -22,7 +22,7 @@ interface CoinSignalBoardProps {
   kalshiTargets: Record<string, number | null>;
   windowKey?: string | null;
   decisionMode?: string | null;
-  entrySafetyProfile?: "current" | "extreme_only";
+  entrySafetyProfile?: "current" | "extreme_only" | "advisory";
   coinStability?: Record<string, CoinStabilityResult>;
   coinTrajectory?: Record<string, TrajectoryGateResult>;
   stabilityConfig?: StabilityThresholds | null;
@@ -112,11 +112,11 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
         <Activity className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Live Signals</h2>
         <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
-          entrySafetyProfile === "extreme_only"
+          entrySafetyProfile !== "current"
             ? "bg-orange-500/10 text-orange-300 border-orange-500/25"
             : "bg-emerald-500/10 text-emerald-300 border-emerald-500/25"
         }`}>
-          Safety: {entrySafetyProfile === "extreme_only" ? "Extreme-only" : "Current"}
+          Safety: {entrySafetyProfile === "extreme_only" ? "Extreme-only" : entrySafetyProfile === "advisory" ? "Advisory" : "Current"}
         </span>
         {windowKey && (
           <span className="max-w-full text-xs leading-tight px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
@@ -171,7 +171,7 @@ export function CoinSignalBoard({ liveSignals, kalshiTargets, windowKey, decisio
                                : "bg-orange-500/15 text-orange-300 border-orange-500/25"
                          }`}
                           title={guard.advisory
-                            ? `Extreme-only advisory: ordinary movement guard relaxed${guard.reason ? ` (${guard.reason})` : ""}; paper and live entries proceed`
+                            ? `${entrySafetyProfile === "advisory" ? "Advisory safety" : "Extreme-only"}: movement guard warning${guard.reason ? ` (${guard.reason})` : ""}; paper and live entries proceed`
                            : guard.evidenceClass === "unavailable"
                              ? `Guard unavailable${guard.reason ? ` (${guard.reason})` : ""}; live entry blocked fail-closed`
                              : `Momentum blocked${guard.reason ? ` (${guard.reason})` : ""}`}
@@ -208,7 +208,7 @@ interface MarketConditionsBoardProps {
   extremeCautionAborted?: string[];
   convictionDirectionBlocked?: Record<string, { direction: "yes" | "no"; advisory?: boolean; gate: "tick" | "candle-decline" | "candle-rise" | "no-data"; evidenceClass?: "unavailable" | "adverse" | "clear"; reason?: string | null; slopePct?: number; effectiveThreshold?: number; lookback?: number; fromPrice?: number; toPrice?: number }>;
   activeScheduleBracket?: { minutesElapsed: number; betAmount: number } | null;
-  entrySafetyProfile?: "current" | "extreme_only";
+  entrySafetyProfile?: "current" | "extreme_only" | "advisory";
 }
 
 function useNow(intervalMs: number): number {
@@ -250,11 +250,11 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
         <TrendingUp className="w-4 h-4 text-violet-400" />
         <h2 className="font-semibold text-sm text-foreground">Market Conditions</h2>
         <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
-          entrySafetyProfile === "extreme_only"
+          entrySafetyProfile !== "current"
             ? "bg-orange-500/10 text-orange-300 border-orange-500/25"
             : "bg-emerald-500/10 text-emerald-300 border-emerald-500/25"
         }`}>
-          Safety: {entrySafetyProfile === "extreme_only" ? "Extreme-only" : "Current"}
+          Safety: {entrySafetyProfile === "extreme_only" ? "Extreme-only" : entrySafetyProfile === "advisory" ? "Advisory" : "Current"}
         </span>
         {windowKey && (
           <span className="max-w-full text-xs leading-tight px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/25 font-mono">
@@ -343,7 +343,7 @@ function MarketConditionsBoard({ syms, pinnedStrikes, liveSignals, coinStability
 
                         let tooltipText: string;
                         if (advisory) {
-                          tooltipText = `Extreme-only advisory: ordinary movement guard relaxed${reason ? ` (${reason})` : ""}; paper and live entries proceed`;
+                          tooltipText = `${entrySafetyProfile === "advisory" ? "Advisory safety" : "Extreme-only"}: movement guard warning${reason ? ` (${reason})` : ""}; paper and live entries proceed`;
                         } else if (isNoDataGate) {
                           tooltipText = `Guard unavailable${reason ? ` (${reason})` : ""} — entry blocked until authoritative price evidence recovers (fail-closed safety)`;
                         } else if (isTickGate) {

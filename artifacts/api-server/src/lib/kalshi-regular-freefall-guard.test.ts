@@ -188,6 +188,26 @@ test("extreme-only still blocks unavailable, target-crossing, rapid, and excursi
   }
 });
 
+test("advisory profile allows every direction/freefall guard verdict as warning-only", () => {
+  const stale = evaluateRegularFreefallPreSubmitGuard({
+    samples: [100, 100.1].map((price, index) => ({ price, ts: NOW - 10_000 + index * 1_000 })),
+    side: "yes",
+    nowMs: NOW,
+    windowStartMs: 0,
+    closeTimeMs: NOW + 300_000,
+    targetPrice: TARGET,
+    hasProduct: true,
+  });
+  const wrongSide = evaluate("yes", [99.2, 98.9, 99, 99.1, 99.2, 99.3]);
+  for (const raw of [stale, wrongSide]) {
+    const resolved = applyRegularFreefallSafetyProfile(raw, "advisory");
+    assert.equal(resolved.allowed, true);
+    assert.equal(resolved.advisory, true);
+    assert.equal(resolved.classification, "hard_boundary");
+  }
+  assert.equal(applyOrdinaryMovementSafetyProfile(true, "advisory").allowed, true);
+});
+
 test("samples before the lifecycle boundary cannot establish conviction", () => {
   const result = evaluateRegularFreefallPreSubmitGuard({
     samples: samples([100, 100.1, 100.2, 100.3, 100.4, 100.5]),
