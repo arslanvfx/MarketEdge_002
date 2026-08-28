@@ -16,6 +16,7 @@ import { BotSmartExitPanel } from "../bot/bot-smart-exit-panel";
 import { KalshiLiveTickerPanel } from "../bot/kalshi-live-ticker-panel";
 import { API_BASE } from "../bot/utils";
 import { readApiResponse } from "../bot/api-response";
+import { SharedBotIntelligence } from "../bot/shared-intelligence";
 
 export default function Dashboard2() {
   const { getToken } = useAuth();
@@ -145,7 +146,7 @@ export default function Dashboard2() {
         setActiveView={setActiveView}
       />
 
-      <div className="flex-1 overflow-y-auto custom-scrollbar">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar">
         {activeView === 'settings' ? (
           <SettingsView mode={mode} />
         ) : (
@@ -188,6 +189,8 @@ export default function Dashboard2() {
                  <CompactAudit readiness={status.readiness} audit={audit} />
                </div>
             </div>
+
+            <SharedBotIntelligence mode={mode} />
 
           </div>
         )}

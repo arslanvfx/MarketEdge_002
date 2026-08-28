@@ -28,11 +28,12 @@ interface TransactionLogProps {
   histSourceFilter: "all" | "bot" | "manual" | "scalper" | "skips";
   setHistSourceFilter: React.Dispatch<React.SetStateAction<"all" | "bot" | "manual" | "scalper" | "skips">>;
   activeMode: "paper" | "live";
+  modeLocked?: boolean;
   loading?: boolean;
   error?: boolean;
 }
 
-export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPages, totalBets, historyMode, setHistoryMode, histSourceFilter, setHistSourceFilter, activeMode, loading = false, error = false }: TransactionLogProps) {
+export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPages, totalBets, historyMode, setHistoryMode, histSourceFilter, setHistSourceFilter, activeMode, modeLocked = false, loading = false, error = false }: TransactionLogProps) {
   const clampedHistPage = Math.min(histPage, Math.max(0, totalHistPages - 1));
   const regularRecordsById = React.useMemo(
     () => new Map(
@@ -63,17 +64,23 @@ export function TransactionLog({ pagedBets, histPage, setHistPage, totalHistPage
             <h2 className="font-semibold text-sm">Transaction History</h2>
             {/* Paper / Live tab — independent of the bot's active mode so the user
                 can always browse either log regardless of which mode the bot is in. */}
-            <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
-              {(["paper", "live"] as const).map(m => (
-                <button
-                  key={m}
-                  onClick={() => { setHistoryMode(m); setHistPage(0); }}
-                  className={`px-2.5 py-1 transition-colors capitalize ${historyMode === m ? (m === "live" ? "bg-red-500/20 text-red-300" : "bg-yellow-500/15 text-yellow-300") : "text-muted-foreground hover:text-foreground"}`}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
+            {modeLocked ? (
+              <span className={`text-[10px] font-semibold px-2 py-1 rounded capitalize ${historyMode === "live" ? "bg-red-500/20 text-red-300" : "bg-yellow-500/15 text-yellow-300"}`}>
+                {historyMode}
+              </span>
+            ) : (
+              <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
+                {(["paper", "live"] as const).map(m => (
+                  <button
+                    key={m}
+                    onClick={() => { setHistoryMode(m); setHistPage(0); }}
+                    className={`px-2.5 py-1 transition-colors capitalize ${historyMode === m ? (m === "live" ? "bg-red-500/20 text-red-300" : "bg-yellow-500/15 text-yellow-300") : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            )}
             {/* Source filter — All / Bot / Manual / Scalper / Skips */}
             <div className="flex items-center rounded-md border border-border overflow-hidden text-xs font-medium ml-1">
               {(["all", "bot", "manual", "scalper", "skips"] as const).map(s => (
