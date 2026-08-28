@@ -1,13 +1,11 @@
-import React, { useState } from "react";
+import React from "react";
 import { Dashboard2Status, LedgerRow, AuditRow, ReadinessReason } from "../types";
 import { formatCents, formatDollar, formatDateTime } from "../utils";
-import { Target, ChevronDown, ChevronUp, AlertCircle, ShieldCheck, Activity, ShieldAlert, CheckCircle2, Loader2, XCircle, Clock, History } from "lucide-react";
+import { Target, AlertCircle, ShieldCheck, Activity, ShieldAlert, CheckCircle2, Loader2, XCircle, Clock, History } from "lucide-react";
 
 export function CompactLiveTargets({ markets }: { markets: Dashboard2Status['markets'] }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-
   return (
-    <div className="bg-card border rounded-xl flex flex-col overflow-hidden shadow-sm">
+    <div className="bg-card border rounded-xl flex flex-col shadow-sm">
       <div className="p-4 border-b bg-background/30 flex justify-between items-center shrink-0">
         <h2 className="text-xs uppercase tracking-widest text-muted-foreground font-semibold flex items-center gap-2">
           <Target className="w-4 h-4 text-cyan-400" /> Live Targets
@@ -23,81 +21,42 @@ export function CompactLiveTargets({ markets }: { markets: Dashboard2Status['mar
             No active targets in current window.
           </div>
         )}
-        {markets.map((m) => {
-          const isExp = expanded === m.symbol;
-          return (
-            <div key={m.symbol} className="flex flex-col">
-              <div
-                className="p-4 hover:bg-muted/30 transition-colors cursor-pointer group flex items-center justify-between"
-                onClick={() => setExpanded(isExp ? null : m.symbol)}
-              >
-                <div className="flex items-center gap-3">
-                  <div className="text-muted-foreground group-hover:text-foreground transition-colors">
-                    {isExp ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  </div>
-                  <div>
-                    <div className="text-foreground font-bold font-mono text-sm">{m.symbol}</div>
-                    {m.ticker && <div className="text-[11px] text-muted-foreground mt-0.5 truncate max-w-[150px] font-sans">{m.ticker}</div>}
-                  </div>
-                </div>
-                <div className="flex flex-col items-end gap-1.5">
-                  <div className="flex items-center gap-1.5">
-                    {m.side === 'yes' && <span className="text-[11px] font-bold text-[#00ffd0] bg-[#00ffd0]/10 px-1.5 py-0.5 rounded">YES</span>}
-                    {m.side === 'no' && <span className="text-[11px] font-bold text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded">NO</span>}
-                    {!m.side && <span className="text-[11px] font-bold text-muted-foreground">—</span>}
-                    <span className="text-cyan-400 font-mono text-sm font-bold">
-                      {formatCents(m.sideCost)}
-                    </span>
-                  </div>
-                   {!m.bookFresh && m.sideCost !== null && (
-                     <span className="text-[10px] font-bold tracking-wider text-amber-400">REFRESHING · LAST QUOTE</span>
-                   )}
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-mono ${m.bookFresh ? "text-foreground" : "text-muted-foreground"}`}>
-                      {m.visibleContracts} avail
-                    </span>
-                    {m.safety === 'approved' && <ShieldCheck className="w-3.5 h-3.5 text-[#00ffd0]" />}
-                    {m.safety === 'waiting' && <Activity className="w-3.5 h-3.5 text-amber-400 animate-pulse" />}
-                    {m.safety === 'blocked' && <AlertCircle className="w-3.5 h-3.5 text-rose-400" />}
-                  </div>
-                </div>
+        {markets.map((m) => (
+          <div key={m.symbol} className="p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="font-mono text-sm font-bold text-foreground">{m.symbol}</div>
+              <div className="flex items-center gap-2">
+                {m.side === 'yes' && <span className="text-[11px] font-bold text-[#00ffd0] bg-[#00ffd0]/10 px-1.5 py-0.5 rounded">YES</span>}
+                {m.side === 'no' && <span className="text-[11px] font-bold text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded">NO</span>}
+                <span className="w-14 text-right text-cyan-400 font-mono text-sm font-bold tabular-nums">{formatCents(m.sideCost)}</span>
               </div>
-              {isExp && (
-                <div className="bg-background/40 p-4 border-t border-border/50 text-xs">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <span className="block text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Reason</span>
-                      <span className="text-foreground font-medium">{m.reason || "—"}</span>
-                    </div>
-                    <div>
-                      <span className="block text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Target</span>
-                      <span className="font-mono text-foreground">{m.target ? m.target.toFixed(2) : "—"}</span>
-                    </div>
-                    <div>
-                      <span className="block text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Sizing Limit</span>
-                      <span className="font-mono text-foreground">{m.sizingReason?.replaceAll("_", " ") || "—"}{m.effectiveBudget !== null ? ` · ${formatDollar(m.effectiveBudget)}` : ""}</span>
-                    </div>
-                  </div>
-                </div>
-              )}
             </div>
-          );
-        })}
+            <div className="grid grid-cols-3 gap-3 text-xs">
+              <div><span className="block text-muted-foreground">Target</span><span className="font-mono tabular-nums">{m.target !== null ? m.target.toFixed(2) : "—"}</span></div>
+              <div><span className="block text-muted-foreground">Planned</span><span className="font-mono tabular-nums">{m.intendedQuantity !== null && m.intendedQuantity > 0 ? formatDollar(m.intendedQuantity * (m.sideCost ?? 0)) : "—"}</span></div>
+              <div><span className="block text-muted-foreground">Available</span><span className="font-mono tabular-nums">{m.visibleContracts}</span></div>
+            </div>
+            <div className="min-h-8 text-xs text-muted-foreground">
+              {!m.bookFresh && m.sideCost !== null && <span className="mr-2 font-bold text-amber-400">REFRESHING · LAST QUOTE</span>}
+              {m.reason?.replaceAll("_", " ") || "Monitoring"}
+            </div>
+          </div>
+        ))}
       </div>
 
-      <div className="hidden md:block overflow-x-auto overflow-y-auto max-h-[500px] custom-scrollbar">
-        <table className="w-full text-left border-collapse min-w-[500px]">
-          <thead className="bg-background/80 border-b sticky top-0 z-10">
+      <div className="hidden md:block">
+        <table className="w-full table-fixed text-left border-collapse">
+          <thead className="bg-background/80 border-b">
             <tr className="text-xs uppercase tracking-wider text-muted-foreground">
-              <th className="px-4 py-3 font-semibold w-8"></th>
-              <th className="px-4 py-3 font-semibold">Symbol</th>
-              <th className="px-4 py-3 font-semibold text-right">Candidate / Ask</th>
-              <th className="px-4 py-3 font-semibold text-right">Planned</th>
-              <th className="px-4 py-3 font-semibold text-right">Avail</th>
-              <th className="px-4 py-3 font-semibold text-center">Safe</th>
+              <th className="w-[11%] px-4 py-3 font-semibold">Market</th>
+              <th className="w-[18%] px-3 py-3 font-semibold text-right">Candidate / Ask</th>
+              <th className="w-[15%] px-3 py-3 font-semibold text-right">Target</th>
+              <th className="w-[14%] px-3 py-3 font-semibold text-right">Planned</th>
+              <th className="w-[10%] px-3 py-3 font-semibold text-right">Avail</th>
+              <th className="w-[32%] px-4 py-3 font-semibold">Current reason</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-border/50 font-mono text-sm">
+          <tbody className="divide-y divide-border/50 text-sm">
             {markets.length === 0 && (
               <tr>
                  <td colSpan={6} className="p-8 text-center text-xs text-muted-foreground font-sans">
@@ -105,83 +64,42 @@ export function CompactLiveTargets({ markets }: { markets: Dashboard2Status['mar
                 </td>
               </tr>
             )}
-            {markets.map((m) => {
-              const isExp = expanded === m.symbol;
-              return (
-                <React.Fragment key={m.symbol}>
-                  <tr
-                    className="hover:bg-muted/30 transition-colors cursor-pointer group"
-                    onClick={() => setExpanded(isExp ? null : m.symbol)}
-                  >
-                    <td className="px-4 py-3 text-muted-foreground group-hover:text-foreground transition-colors">
-                      {isExp ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="text-foreground font-bold truncate max-w-[200px]">{m.symbol}</div>
-                    </td>
-                    <td className="px-4 py-3 text-right">
+            {markets.map((m) => (
+                  <tr key={m.symbol} className="h-[58px] hover:bg-muted/20 transition-colors">
+                    <td className="px-4 py-3 font-mono font-bold text-foreground">{m.symbol}</td>
+                    <td className="px-3 py-3 text-right font-mono tabular-nums">
                       <div className="flex items-center justify-end gap-2">
                         {m.side === 'yes' && <span className="text-[11px] font-bold text-[#00ffd0] bg-[#00ffd0]/10 px-1.5 py-0.5 rounded">YES</span>}
                         {m.side === 'no' && <span className="text-[11px] font-bold text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded">NO</span>}
                         {!m.side && <span className="text-[11px] font-bold text-muted-foreground">—</span>}
-                        <span className="text-cyan-400 w-12 text-right">
+                        <span className="text-cyan-400 w-14 text-right">
                           {formatCents(m.sideCost)}
                         </span>
                       </div>
-                     {!m.bookFresh && m.sideCost !== null && (
-                       <div className="mt-1 text-[10px] font-sans font-bold tracking-wider text-amber-400">
-                         REFRESHING · LAST QUOTE
-                       </div>
-                     )}
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-3 py-3 text-right font-mono tabular-nums">{m.target !== null ? m.target.toFixed(2) : "—"}</td>
+                    <td className="px-3 py-3 text-right font-mono tabular-nums">
                       {m.intendedQuantity !== null && m.sideCost !== null && m.intendedQuantity > 0 ? (
-                        <>
-                          <div className="text-foreground">{m.intendedQuantity} c</div>
-                          <div className="text-[11px] text-muted-foreground">{formatDollar(m.intendedQuantity * m.sideCost)}</div>
-                        </>
+                        <div className="text-foreground">{formatDollar(m.intendedQuantity * m.sideCost)}</div>
                       ) : "—"}
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-3 py-3 text-right font-mono tabular-nums">
                       <span className={`${m.bookFresh ? "text-foreground" : "text-muted-foreground"}`}>
                         {m.visibleContracts}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-center">
-                      <div className="flex justify-center">
-                        {m.safety === 'approved' && <ShieldCheck className="w-4 h-4 text-[#00ffd0]" />}
-                        {m.safety === 'waiting' && <Activity className="w-4 h-4 text-amber-400 animate-pulse" />}
-                        {m.safety === 'blocked' && <AlertCircle className="w-4 h-4 text-rose-400" />}
+                    <td className="px-4 py-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        {m.safety === 'approved' && <ShieldCheck className="h-4 w-4 shrink-0 text-[#00ffd0]" />}
+                        {m.safety === 'waiting' && <Activity className="h-4 w-4 shrink-0 text-amber-400" />}
+                        {m.safety === 'blocked' && <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />}
+                        <span className={`truncate text-xs ${!m.bookFresh && m.sideCost !== null ? "text-amber-400" : "text-muted-foreground"}`}>
+                          {!m.bookFresh && m.sideCost !== null ? "Refreshing · last quote" : m.reason?.replaceAll("_", " ") || "Monitoring"}
+                        </span>
                       </div>
                     </td>
                   </tr>
-                  {isExp && (
-                    <tr className="bg-background/40 border-b border-border/80">
-                        <td colSpan={6} className="px-4 py-4">
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pl-8 font-sans">
-                          <div>
-                            <span className="block text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Reason</span>
-                            <span className="text-xs text-foreground font-medium">{m.reason || "—"}</span>
-                          </div>
-                          <div>
-                            <span className="block text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Target</span>
-                            <span className="font-mono text-xs text-foreground">{m.target ? m.target.toFixed(2) : "—"}</span>
-                          </div>
-                          <div>
-                            <span className="block text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Distance %</span>
-                            <span className="font-mono text-xs text-foreground">{m.distancePct !== null ? `${m.distancePct.toFixed(2)}%` : "—"}</span>
-                          </div>
-                          <div>
-                            <span className="block text-[11px] uppercase tracking-wider text-muted-foreground mb-1">Sizing Limit</span>
-                            <span className="font-mono text-xs text-foreground">{m.sizingReason?.replaceAll("_", " ") || "—"}{m.effectiveBudget !== null ? ` · ${formatDollar(m.effectiveBudget)}` : ""}</span>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              );
-            })}
+            ))}
           </tbody>
         </table>
       </div>

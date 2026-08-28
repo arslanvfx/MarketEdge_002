@@ -173,7 +173,7 @@ export async function pauseDashboard2V2(mode: Dashboard2Mode, actorId: string): 
 }
 
 /** Paper fills use only the immutable executable depth supplied by the book store. */
-export async function runDashboard2PaperCandidate(input: { symbol: string; windowKey: string; quote: ExecutableBook | null; elapsedMinutes: number; config?: Dashboard2Config; authorizedCount?: number }): Promise<string> {
+export async function runDashboard2PaperCandidate(input: { symbol: string; windowKey: string; quote: ExecutableBook | null; elapsedMinutes: number; config?: Dashboard2Config; authorizedCount?: number; decisionEvidence?: Record<string, unknown> }): Promise<string> {
   const config = input.config ?? (await readDashboard2V2Config("paper")).config;
   const symbol = input.symbol.toUpperCase();
   let status = "blocked", requested = 0, filled = 0, cost: number | null = null, details: object = {};
@@ -187,7 +187,8 @@ export async function runDashboard2PaperCandidate(input: { symbol: string; windo
     filled = Math.min(requested, input.quote.visibleContracts); cost = input.quote.sideCost;
     status = filled === 0 ? "zero_fill" : filled < requested ? "partial_fill" : "full_fill";
     details = { reason: null, bookVersion: input.quote.bookVersion, executableDepth: input.quote.visibleContracts,
-      weightedSideCost: input.quote.sideCost, marginalLimitCost: input.quote.marginalLimitCost };
+      weightedSideCost: input.quote.sideCost, marginalLimitCost: input.quote.marginalLimitCost,
+      decisionEvidence: input.decisionEvidence ?? null };
   }
   if (!input.quote || status === "blocked") return "blocked";
   const claim = await reserveDashboard2V2Entry({ mode: "paper", symbol, windowKey: input.windowKey, quote: input.quote, requestedContracts: requested, config });
@@ -237,6 +238,7 @@ export async function dashboard2V2EntryState(mode: Dashboard2Mode, symbol: strin
  * charged at the configured ceiling until an exact fill is durably recorded. */
 export async function reserveDashboard2V2Entry(input: {
   mode: Dashboard2Mode; symbol: string; windowKey: string; quote: ExecutableBook; requestedContracts: number; config: Dashboard2Config;
+  decisionEvidence?: Record<string, unknown>;
 }): Promise<{ id: string; clientOrderId: string } | null> {
   await ensureDashboard2V2Tables();
   const client = await pool.connect();
@@ -260,7 +262,12 @@ export async function reserveDashboard2V2Entry(input: {
     await client.query(`INSERT INTO dashboard2_v2_ledger(id,mode,symbol,window_key,ticker,side,status,requested_contracts,book_version,client_order_id,details)
       VALUES($1,$2,$3,$4,$5,$6,'reserved',$7,$8,$9,$10::jsonb)`,
        [id, input.mode, input.symbol.toUpperCase(), input.windowKey, input.quote.ticker, input.quote.side, input.requestedContracts, input.quote.bookVersion, clientOrderId,
-         JSON.stringify({ weightedSideCost: input.quote.sideCost, marginalLimitCost: input.quote.marginalLimitCost, executableDepth: input.quote.visibleContracts })]);
+          JSON.stringify({
+            weightedSideCost: input.quote.sideCost,
+            marginalLimitCost: input.quote.marginalLimitCost,
+            executableDepth: input.quote.visibleContracts,
+            decisionEvidence: input.decisionEvidence ?? null,
+          })]);
     await client.query("COMMIT");
     return { id, clientOrderId };
   } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; } finally { client.release(); }

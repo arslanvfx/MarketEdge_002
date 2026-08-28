@@ -197,8 +197,8 @@ export default function Dashboard2() {
                   }
                 />
 
-                <CompactLiveTargets markets={status.markets} />
                 <CompactPositions positions={positions} />
+                <CompactLiveTargets markets={status.markets} />
                 <CompactHistory history={history} />
               </div>
 

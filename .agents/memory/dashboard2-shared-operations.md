@@ -27,4 +27,10 @@ Dashboard 2 Live Targets must display the best current quote independently of en
 
 **Why:** Filtering display data through the entry gate made values blink out whenever prices left the band or the authenticated book briefly reconnected, hiding useful real-time context.
 
-**How to apply:** Keep safety fail-closed, visibly label retained data as refreshing/stale, and show a near-top live decision feed with current market reasons plus durable bet/fill events.
+**How to apply:** Keep safety fail-closed, visibly label retained data as refreshing/stale, and show a near-top live decision feed with current market reasons plus durable bet/fill events. Keep Active Positions above Live Targets; Live Targets must use fixed rows/columns with no internal vertical scrollbar or expansion jitter.
+
+Dashboard 2 must take regular-entry direction from Bot 1’s fresh conviction quote for the exact ticker, then use its authenticated depth only to validate and execute that same side.
+
+**Why:** Letting Bot 2 independently choose the cheapest depth-book side and approve it with a generic cached trend produced opposite-side paper entries that were not comparable to Bot 1.
+
+**How to apply:** Match Bot 1’s YES-first conviction-zone semantics, fail closed when its 1.5-second snapshot is absent/stale or ticker-mismatched, and revalidate the chosen side immediately before live submission. Persist both raw conviction asks and the final depth quote with each entry.

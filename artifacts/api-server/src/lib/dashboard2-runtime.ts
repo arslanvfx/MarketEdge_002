@@ -6,6 +6,8 @@ import { completeDashboard2PaperExit, dashboard2SafetyAuthorizations, dashboard2
 import { getBalance } from "./kalshi-trader.ts";
 import { readCanonicalBotConfig } from "./kalshi-bot-state.ts";
 import { applyDashboard2CanonicalPolicy } from "./dashboard2-canonical-policy.ts";
+import { getConvictionLivePrice } from "./kalshi-conviction-poller.ts";
+import { selectDashboard2ConvictionSideFromSnapshot } from "./dashboard2-conviction-side.ts";
 
 type ReadinessStatus = "ready" | "warming" | "blocked" | "stale";
 type WindowPhase = "preparing" | "armed" | "eligible" | "blocked";
@@ -52,6 +54,38 @@ function contractCeilingForDollarStake(config: { maxDollarBudget: number; sideCo
 
 function distanceFromEntryBand(cost: number, floor: number, ceiling: number): number {
   return cost < floor ? floor - cost : cost > ceiling ? cost - ceiling : 0;
+}
+
+function selectConvictionSide(
+  symbol: string,
+  ticker: string,
+  floor: number,
+  ceiling: number,
+  allowNearest = false,
+) {
+  return selectDashboard2ConvictionSideFromSnapshot(
+    getConvictionLivePrice(symbol),
+    ticker,
+    floor,
+    ceiling,
+    allowNearest,
+  );
+}
+
+function convictionEvidence(selection: NonNullable<ReturnType<typeof selectDashboard2ConvictionSideFromSnapshot>>) {
+  const snapshot = selection.snapshot;
+  return {
+    source: "bot1_conviction_live_price",
+    selectedSide: selection.side,
+    selectedAsk: selection.ask,
+    yesAsk: snapshot.yesAsk,
+    yesBid: snapshot.yesBid,
+    noAsk: snapshot.noAsk ?? (snapshot.yesBid !== null ? 1 - snapshot.yesBid : null),
+    ticker: snapshot.ticker ?? null,
+    target: snapshot.target,
+    fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
+    ageMs: Math.max(0, Date.now() - snapshot.fetchedAt),
+  };
 }
 
 function decisionReasonLabel(reason: string | null): string {
@@ -129,14 +163,20 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     if (!config.enabledSymbols.includes(symbol.toUpperCase())) continue;
     const target = getKalshiCachedData(symbol);
     const ticker = target?.ticker;
-    const quotes = ticker
-      ? (["yes", "no"] as const)
-        .map(side => dashboard2KalshiOrderbookService.getExecutable(ticker, side, dollarDerivedMaxContracts, config.sideCostFloor, config.sideCostCeiling))
-        .filter((quote): quote is NonNullable<typeof quote> => quote !== null)
-        .sort((a, b) => a.sideCost - b.sideCost)
-      : [];
-    const quote = quotes[0];
+    const convictionSelection = ticker
+      ? selectConvictionSide(symbol, ticker, config.sideCostFloor, config.sideCostCeiling)
+      : null;
+    const quote = ticker && convictionSelection
+      ? dashboard2KalshiOrderbookService.getExecutable(
+          ticker,
+          convictionSelection.side,
+          dollarDerivedMaxContracts,
+          config.sideCostFloor,
+          config.sideCostCeiling,
+        )
+      : null;
     if (!quote) continue; // never consume a window before exact executable depth
+    const entryDecisionEvidence = convictionEvidence(convictionSelection!);
     const exactTicker = quote.ticker;
     const state = await dashboard2V2EntryState(mode, symbol, windowKey);
     const signal = directionAndProximity(symbol, target?.value, now);
@@ -158,7 +198,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
       sequenceValid: true, bookFresh: dashboard2KalshiOrderbookService.isFresh(exactTicker), signalPreparationComplete: fresh(target?.at, now) && signal.spotFresh,
       hasDuplicateOrOpenPosition: state.conflict || state.positions >= config.maxConcurrentPositions,
       quietHoursAllows: dashboard2QuietHoursAllows(config.quietHours, now) && !circuitOpen && canonicalPreview.allowed,
-      directionEvidencePositive: !config.directionGuard.enabled || (quote.side === "yes" ? signal.direction === "up" : signal.direction === "down"),
+       directionEvidencePositive: !config.directionGuard.enabled || quote.side === convictionSelection!.side,
       targetProximityPositive: !config.proximityGuard.enabled || (signal.distancePct != null && signal.distancePct >= config.proximityGuard.minPct),
       availableFunding: funding, exposureAllowance: state.exposure >= config.maxTotalExposure ? 0 : Math.floor((config.maxTotalExposure - state.exposure) / config.sideCostCeiling),
     };
@@ -172,7 +212,15 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     });
     if (mode === "paper") {
       if (!decision.shadowQualified || !canonicalPolicy.allowed) continue;
-      const claim = await runDashboard2PaperCandidate({ symbol, windowKey, elapsedMinutes, quote, config, authorizedCount: canonicalPolicy.cappedQuantity });
+      const claim = await runDashboard2PaperCandidate({
+        symbol,
+        windowKey,
+        elapsedMinutes,
+        quote,
+        config,
+        authorizedCount: canonicalPolicy.cappedQuantity,
+        decisionEvidence: entryDecisionEvidence,
+      });
       if (claim !== "blocked" && claim !== "duplicate") {
         remainingFunding = Math.max(0, (remainingFunding ?? 0) - canonicalPolicy.cappedQuantity * config.sideCostCeiling);
       }
@@ -187,11 +235,20 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
       intendedQuantity: canonicalPolicy.cappedQuantity, now: new Date(),
     });
     if (!placementPolicy.allowed) continue;
-    const reservation = await reserveDashboard2V2Entry({ mode: "live", symbol, windowKey, quote, requestedContracts: placementPolicy.cappedQuantity, config });
+    const reservation = await reserveDashboard2V2Entry({
+      mode: "live",
+      symbol,
+      windowKey,
+      quote,
+      requestedContracts: placementPolicy.cappedQuantity,
+      config,
+      decisionEvidence: entryDecisionEvidence,
+    });
     if (!reservation) continue;
     remainingFunding = Math.max(0, (remainingFunding ?? 0) - placementPolicy.cappedQuantity * config.sideCostCeiling);
     const authorization = dashboard2SafetyAuthorizations.issue({ mode, symbol, ticker: exactTicker, windowKey, side: quote.side, bookVersion: quote.bookVersion }, policy);
     await submitDashboard2LiveIoc({ symbol, windowKey, quote, count: placementPolicy.cappedQuantity, owner: owner.owner, activationReady: true, reservation, preSubmitGuard: () => {
+      const finalConvictionSelection = selectConvictionSide(symbol, exactTicker, config.sideCostFloor, config.sideCostCeiling);
       const current = dashboard2KalshiOrderbookService.getExecutable(exactTicker, quote.side, dollarDerivedMaxContracts, config.sideCostFloor, config.sideCostCeiling);
       const finalPolicy = applyDashboard2CanonicalPolicy({
         canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
@@ -200,6 +257,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
       });
       const consumed = dashboard2SafetyAuthorizations.consume(authorization.token, { mode, symbol, ticker: exactTicker, windowKey, side: quote.side, policyVersion: policy.version, bookVersion: quote.bookVersion });
       return consumed.accepted &&
+        finalConvictionSelection?.side === quote.side &&
         finalPolicy.allowed &&
         finalPolicy.cappedQuantity >= placementPolicy.cappedQuantity &&
         isDashboard2ExecutionOwnerCurrent("dashboard2_bot") &&
@@ -246,6 +304,9 @@ export async function getDashboard2RuntimeStatus(
     const retainedDisplay = previousDisplay?.windowKey === windowKey ? previousDisplay : null;
     const ticker = market?.ticker ?? retainedDisplay?.ticker ?? null;
     const target = market?.value ?? retainedDisplay?.target ?? null;
+    const displayConvictionSelection = ticker
+      ? selectConvictionSide(normalized, ticker, policy.sideCostFloor, policy.sideCostCeiling, true)
+      : null;
     const liveQuotes = ticker
       ? (["yes", "no"] as const)
           .map(side => dashboard2KalshiOrderbookService.getExecutable(
@@ -257,7 +318,9 @@ export async function getDashboard2RuntimeStatus(
             - distanceFromEntryBand(b.sideCost, policy.sideCostFloor, policy.sideCostCeiling)
           )
       : [];
-    const freshDisplayQuote = liveQuotes[0] ?? null;
+    const freshDisplayQuote = displayConvictionSelection
+      ? liveQuotes.find(quote => quote.side === displayConvictionSelection.side) ?? null
+      : null;
     const displayQuote = freshDisplayQuote
       ?? (retainedDisplay?.quote?.ticker === ticker ? retainedDisplay.quote : null);
     lastMarketDisplayBySymbol.set(normalized, {
