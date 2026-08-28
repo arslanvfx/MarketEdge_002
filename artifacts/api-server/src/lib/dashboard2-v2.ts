@@ -207,7 +207,7 @@ export async function dashboard2V2EntryState(mode: Dashboard2Mode, symbol: strin
     `SELECT
       COUNT(*) FILTER (WHERE status='unknown' OR
         (symbol=$2 AND window_key=$3 AND (status='reserved' OR (filled_contracts > 0 AND settled_at IS NULL))))::text conflict,
-      COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN requested_contracts*$4 ELSE filled_contracts*COALESCE(entry_cost,0) END) FILTER (WHERE settled_at IS NULL),0)::text exposure,
+       COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN requested_contracts*($4::numeric) ELSE filled_contracts*COALESCE(entry_cost,0) END) FILTER (WHERE settled_at IS NULL),0)::text exposure,
       COUNT(*) FILTER (WHERE settled_at IS NULL AND (status IN ('reserved','unknown') OR filled_contracts > 0))::text positions
      FROM dashboard2_v2_ledger WHERE mode=$1`, [mode, symbol.toUpperCase(), windowKey, config.sideCostCeiling],
   );
@@ -248,7 +248,7 @@ export async function reserveDashboard2V2Entry(input: {
       `SELECT COUNT(*) FILTER (WHERE symbol=$2 AND window_key=$3)::text duplicate,
         COUNT(*) FILTER (WHERE settled_at IS NULL AND (status IN ('reserved','unknown') OR filled_contracts>0))::text positions,
          COUNT(*) FILTER (WHERE status='unknown')::text unknown,
-        COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN requested_contracts*$4 ELSE filled_contracts*COALESCE(entry_cost,0) END)
+        COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN requested_contracts*($4::numeric) ELSE filled_contracts*COALESCE(entry_cost,0) END)
           FILTER (WHERE settled_at IS NULL),0)::text exposure
        FROM dashboard2_v2_ledger WHERE mode=$1`,
       [input.mode, input.symbol.toUpperCase(), input.windowKey, input.config.sideCostCeiling],

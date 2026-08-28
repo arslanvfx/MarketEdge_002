@@ -134,37 +134,44 @@ export function TopNav({
             </button>
           </div>
 
-          {/* Authority Toggle */}
-          <div className="flex items-center bg-background rounded-lg p-1 border shrink-0">
-            <span className="text-[9px] uppercase tracking-widest text-muted-foreground px-2 font-bold flex items-center gap-1 opacity-70"><Shield className="w-3 h-3"/> Auth:</span>
-            <button
-              onClick={() => doOwner('current_bot')}
-              disabled={isOwnerChanging}
-              className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
-                owner === 'current_bot' ? "bg-slate-800 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
-              } disabled:opacity-50`}
-            >
-              Bot 1
-            </button>
-            <button
-              onClick={() => doOwner('dashboard2_bot')}
-              disabled={isOwnerChanging}
-              className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
-                owner === 'dashboard2_bot' ? "bg-cyan-900/40 text-cyan-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
-              } disabled:opacity-50`}
-            >
-              Dash 2
-            </button>
-            <button
-              onClick={() => doOwner('paused')}
-              disabled={isOwnerChanging}
-              className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
-                owner === 'paused' ? "bg-amber-900/40 text-amber-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
-              } disabled:opacity-50`}
-            >
-              Paused
-            </button>
-          </div>
+          {/* Live authority is intentionally irrelevant while paper mode is selected. */}
+          {isLive ? (
+            <div className="flex items-center bg-background rounded-lg p-1 border shrink-0">
+              <span className="text-[9px] uppercase tracking-widest text-muted-foreground px-2 font-bold flex items-center gap-1 opacity-70"><Shield className="w-3 h-3"/> Live Auth:</span>
+              <button
+                onClick={() => doOwner('current_bot')}
+                disabled={isOwnerChanging}
+                className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
+                  owner === 'current_bot' ? "bg-slate-800 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
+                } disabled:opacity-50`}
+              >
+                Bot 1
+              </button>
+              <button
+                onClick={() => doOwner('dashboard2_bot')}
+                disabled={isOwnerChanging}
+                className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
+                  owner === 'dashboard2_bot' ? "bg-cyan-900/40 text-cyan-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
+                } disabled:opacity-50`}
+              >
+                Dash 2
+              </button>
+              <button
+                onClick={() => doOwner('paused')}
+                disabled={isOwnerChanging}
+                className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${
+                  owner === 'paused' ? "bg-amber-900/40 text-amber-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
+                } disabled:opacity-50`}
+              >
+                Paused
+              </button>
+            </div>
+          ) : (
+            <div className="flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-cyan-300/80">
+              <Shield className="h-3 w-3" />
+              Paper only · live authority unused
+            </div>
+          )}
 
           {/* Master Control */}
           <div className="w-full shrink-0 sm:w-auto">

@@ -89,6 +89,7 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
   });
 
   beforeEach(cleanup);
+  after(cleanup);
 
   const key = (clientOrderId: string, windowKey: string) => ({
     clientOrderId, mode: MODE, symbol: "BTC", windowKey, ticker: "KXBTC-TEST",
