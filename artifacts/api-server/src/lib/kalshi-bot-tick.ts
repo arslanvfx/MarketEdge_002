@@ -83,6 +83,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
+  windowZeroFillRetryAfter,
   windowRandomizerUsedValues,
   convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
@@ -104,6 +105,11 @@ import {
   type BotMode, type BotStatus, type OpenPosition, type OpenPositionDisplay,
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
+import {
+  REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+  regularZeroFillRetryKey,
+  regularZeroFillRetryRemainingMs,
+} from "./kalshi-regular-zero-fill-policy";
 import { closePosition, persistBetRecord, BetRecordArgs } from "./kalshi-bot-close";
 import { captureSmartExitRegularEntry } from "./kalshi-smart-exit-service";
 import { getTimingAccuracy } from "./kalshi-bot-db";
@@ -624,6 +630,18 @@ async function _runBotTick(
   // locks.  S.botMode is never mutated — position close accounting
   // (closePosition uses pos.entryMode directly) is unaffected.
   const effectiveMode: BotMode = (shadowQhBypassActive || qhEntry.forcedPaper) ? "paper" : S.botMode;
+  const zeroFillRetryKey = regularZeroFillRetryKey(effectiveMode, sym, windowKey);
+  const zeroFillRetryRemaining = regularZeroFillRetryRemainingMs(
+    windowZeroFillRetryAfter.get(zeroFillRetryKey),
+  );
+  if (effectiveMode === "live" && zeroFillRetryRemaining > 0) {
+    setTickAbortReason(
+      sym,
+      windowKey,
+      `confirmed zero-fill cooldown: retry available in ${(zeroFillRetryRemaining / 1_000).toFixed(1)}s`,
+    );
+    return;
+  }
 
   // Multi-bet guard: purge stale window entries then check the per-window cap.
   // Purge any entry for this symbol that belongs to an older window key (any mode).
@@ -2743,6 +2761,12 @@ async function _runBotTick(
         maxTotalExposure: S.config.maxTotalExposure,
       });
       if (!claim.claimed) {
+        if (claim.reason === "authoritative_zero_fill_cooldown") {
+          windowZeroFillRetryAfter.set(
+            regularZeroFillRetryKey("live", sym, windowKey),
+            Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+          );
+        }
         regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
         markPlacementTerminal("intent_denied", claim.reason ?? "durable reservation denied");
         // An unresolved intent already exists for this symbol/window — a prior
@@ -2891,18 +2915,27 @@ async function _runBotTick(
         _routeFundingHoldClaimed = false;
         regularPlacementFunnel.fill(ensurePlacementCandidate(), 0, exchangeResponseAt);
         markPlacementTerminal("zero_fill", "entry order returned zero fills");
-        // IOC returned 0 fills — no resting contracts at our capped price.
-        // Allow up to 2 attempts (spaced by ~30 s bot ticks) before blocking the
+        // IOC returned 0 fills — no resting contracts at our exact price.
+        // Allow up to 2 attempts (spaced by the authoritative cooldown) before blocking the
         // coin for the rest of the window. Gives the book time to build
         // liquidity (especially early in a window) without hammering empty book.
-        const failWk = currentWindowKey();
-        const attemptKey = `${sym}:${failWk}:${S.botMode}`;
+        // Capture the original order ownership before releasing anything. This
+        // synchronous timestamp closes the gap where another poller dispatch
+        // could re-enter before the durable zero-fill update completes.
+        const retryKey = regularZeroFillRetryKey(entryMode, sym, windowKey);
+        windowZeroFillRetryAfter.set(
+          retryKey,
+          Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+        );
+        // Preserve the established key format consumed by the window-level
+        // failed-fill guards and attempt counter.
+        const attemptKey = `${sym}:${windowKey}:${entryMode}`;
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
         // In conviction mode the book is thin and IOC 0-fills are normal for
         // the first minute of a window (market makers haven't posted quotes yet).
-        // Allow up to 10 attempts (~50 s at 5 s ticks) before giving up so the
+        // Allow up to 10 attempts, never faster than the 30-second cooldown, so the
         // bot keeps trying as liquidity builds, instead of blocking after just 10 s.
         const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 10 : 2;
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
@@ -2923,7 +2956,7 @@ async function _runBotTick(
           // Without this, the coin stays locked for the whole window after one 0-fill.
           releaseConvictionEntryReservation("entry order returned zero fills; retry allowed");
           setTickAbortReason(sym, windowKey,
-            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying next tick`);
+            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS / 1_000}s cooldown`);
         }
         // Confirmed zero fill (dead) — release the durable reservation so the
         // next tick may re-claim. This is a DEFINITE outcome, safe to release.

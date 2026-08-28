@@ -45,6 +45,7 @@ import {
   shouldRunRegularSpotSampler,
 } from "./kalshi-regular-spot-sampler";
 import { ConvictionOrderbookWarmupCoordinator } from "./kalshi-conviction-orderbook-warmup";
+import { PerKeyInFlight } from "./per-key-in-flight";
 
 const POLL_INTERVAL_MS = 1_000;
 export const CONVICTION_LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
@@ -65,7 +66,7 @@ const tickFeedHealth = new Map<string, TickFeedHealth>();
 let lastHealthLogAt = 0;
 let pollerGeneration = 0;
 let spotSamplerHandle: ReturnType<typeof setInterval> | null = null;
-let spotSampleInFlight: Promise<void> | null = null;
+const spotSamplesInFlight = new PerKeyInFlight();
 
 function healthFor(sym: string): TickFeedHealth {
   let h = tickFeedHealth.get(sym);
@@ -173,20 +174,13 @@ async function refreshSpotTick(sym: string, product: string, generation: number)
 async function sampleSpotsOnceImpl(generation: number): Promise<void> {
   await Promise.allSettled(
     Object.entries(COIN_PRODUCT).map(([sym, product]) =>
-      refreshSpotTick(sym, product, generation)
+      spotSamplesInFlight.run(sym, () => refreshSpotTick(sym, product, generation))
     ),
   );
 }
 
 function sampleSpotsOnce(): Promise<void> {
-  if (spotSampleInFlight) return spotSampleInFlight;
-  const generation = pollerGeneration;
-  let run: Promise<void>;
-  run = sampleSpotsOnceImpl(generation).finally(() => {
-    if (spotSampleInFlight === run) spotSampleInFlight = null;
-  });
-  spotSampleInFlight = run;
-  return run;
+  return sampleSpotsOnceImpl(pollerGeneration);
 }
 
 /**
@@ -509,7 +503,7 @@ export function stopConvictionPoller(): void {
   if (spotSamplerHandle !== null) clearInterval(spotSamplerHandle);
   pollerHandle = null;
   spotSamplerHandle = null;
-  spotSampleInFlight = null;
+  spotSamplesInFlight.clear();
   convictionPriceMap.clear();
   orderbookWarmups.clear();
   tickFeedHealth.clear();

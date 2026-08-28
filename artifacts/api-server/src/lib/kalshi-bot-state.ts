@@ -218,6 +218,10 @@ export const windowBetDetails = new Map<string, { direction: "yes" | "no"; confi
 export const windowDirectionCounts = new Map<"yes" | "no", number>();
 export const windowFailedFills = new Set<string>();
 export const windowZeroFillAttempts = new Map<string, number>();
+// Captured live mode + symbol + original submission window → earliest allowed
+// retry timestamp after an authoritative IOC zero fill. The durable intent
+// claim independently enforces the same boundary across restarts/processes.
+export const windowZeroFillRetryAfter = new Map<string, number>();
 // Per-window randomizer de-duplication: tracks which dollar amounts the
 // randomizer has already picked for each coin in the current window.
 // Key = sym, value = Set of dollar amounts already used.

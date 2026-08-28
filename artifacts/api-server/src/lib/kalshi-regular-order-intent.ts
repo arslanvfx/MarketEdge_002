@@ -22,6 +22,7 @@
 import { criticalIntentPool, pool } from "@workspace/db";
 import { logger } from "./logger.ts";
 import { regularCountHundredths } from "./kalshi-regular-fixed-point.ts";
+import { REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS } from "./kalshi-regular-zero-fill-policy.ts";
 
 export type RegularIntentStatus =
   | "reserved"    // intent persisted + reserved, POST not yet attempted / in flight
@@ -279,19 +280,31 @@ async function claimRegularOrderIntentBatch(
       window_key: string;
       status: string;
       reserved_cost: string | number | null;
+      resolved_at: Date | string | null;
     }>(
-      `SELECT symbol, window_key, status, reserved_cost
+      `SELECT symbol, window_key, status, reserved_cost, resolved_at
          FROM kalshi_regular_order_intents
         WHERE mode = $1
           AND (
             status IN ('reserved','unknown')
             OR (window_key = $2 AND status = 'filled')
+            OR (
+              window_key = $2
+              AND status = 'zero_fill'
+              AND resolved_at > NOW() - ($3::double precision * INTERVAL '1 millisecond')
+            )
           )`,
-      [first.mode, first.windowKey],
+      [first.mode, first.windowKey, REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS],
     );
     const blockedSymbols = new Set(facts.rows.map((row) => row.symbol.toUpperCase()));
-    let activeCount = facts.rows.filter((row) => row.window_key === first.windowKey).length;
-    let activeCost = facts.rows.reduce((sum, row) => sum + (Number(row.reserved_cost) || 0), 0);
+    const cooldownSymbols = new Set(
+      facts.rows
+        .filter((row) => row.status === "zero_fill")
+        .map((row) => row.symbol.toUpperCase()),
+    );
+    const economicallyActive = facts.rows.filter((row) => row.status !== "zero_fill");
+    let activeCount = economicallyActive.filter((row) => row.window_key === first.windowKey).length;
+    let activeCost = economicallyActive.reduce((sum, row) => sum + (Number(row.reserved_cost) || 0), 0);
     const approved: RegularOrderIntentKey[] = [];
 
     for (const key of keys) {
@@ -301,7 +314,12 @@ async function claimRegularOrderIntentBatch(
           ? key.requestedCost!
           : null;
       if (blockedSymbols.has(symbol)) {
-        results.set(key.clientOrderId, { claimed: false, reason: "unresolved_intent_exists" });
+        results.set(key.clientOrderId, {
+          claimed: false,
+          reason: cooldownSymbols.has(symbol)
+            ? "authoritative_zero_fill_cooldown"
+            : "unresolved_intent_exists",
+        });
         continue;
       }
       if (maxOrders != null && activeCount >= maxOrders) {

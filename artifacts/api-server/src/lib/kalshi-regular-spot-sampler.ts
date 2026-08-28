@@ -2,9 +2,12 @@ import { CRYPTO_COINS, getTickerFreshEvidence } from "./crypto-data";
 import { convictionPriceTicks } from "./kalshi-bot-state";
 import { logger } from "./logger";
 import {
+  collectRegularEntrySpotSample,
   collectRegularEntrySpotSamples,
+  isRegularSpotSampleOwnerActive,
   shouldRunRegularSpotSampler,
 } from "./kalshi-regular-spot-sampler-core";
+import { PerKeyInFlight } from "./per-key-in-flight";
 
 export {
   collectRegularEntrySpotSamples,
@@ -18,43 +21,49 @@ const WINDOW_MS = 15 * 60_000;
 let samplerHandle: ReturnType<typeof setInterval> | null = null;
 let samplerWindowStartMs: number | null = null;
 let samplerGeneration = 0;
-let sampleInFlight = false;
+const samplesInFlight = new PerKeyInFlight();
 
 async function sampleOnce(): Promise<void> {
-  if (sampleInFlight) return;
-  sampleInFlight = true;
-  const generation = samplerGeneration;
   const nowMs = Date.now();
   const windowStartMs = Math.floor(nowMs / WINDOW_MS) * WINDOW_MS;
-  try {
-    if (samplerWindowStartMs !== windowStartMs) {
-      convictionPriceTicks.clear();
-      samplerWindowStartMs = windowStartMs;
-    }
-    const nextSamples = new Map(
-      [...convictionPriceTicks].map(([symbol, ticks]) => [symbol, [...ticks]]),
-    );
-    await collectRegularEntrySpotSamples({
-      products: CRYPTO_COINS,
-      fetchFresh: getTickerFreshEvidence,
-      samples: nextSamples,
-      nowMs,
-      receiptClock: Date.now,
-    });
-    // A stop/mode transition may occur while network requests are in flight.
-    // Never let that retired owner repopulate the shared map afterward.
-    if (
-      generation !== samplerGeneration
-      || samplerHandle === null
-      || samplerWindowStartMs !== windowStartMs
-      || Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS !== windowStartMs
-    ) return;
+  if (samplerWindowStartMs !== windowStartMs) {
+    // Invalidate all prior-window callbacks before allowing the new owner to
+    // launch, then clear only once at the window boundary.
+    samplerGeneration += 1;
+    samplesInFlight.clear();
     convictionPriceTicks.clear();
-    for (const [symbol, ticks] of nextSamples) {
-      convictionPriceTicks.set(symbol, ticks);
-    }
-  } finally {
-    sampleInFlight = false;
+    samplerWindowStartMs = windowStartMs;
+  }
+  const generation = samplerGeneration;
+
+  for (const product of CRYPTO_COINS) {
+    const symbol = product.symbol.toUpperCase();
+    void samplesInFlight.run(symbol, async () => {
+      const symbolSamples = new Map([
+        [symbol, [...(convictionPriceTicks.get(symbol) ?? [])]],
+      ]);
+      await collectRegularEntrySpotSample({
+        product,
+        fetchFresh: getTickerFreshEvidence,
+        samples: symbolSamples,
+        nowMs,
+        receiptClock: Date.now,
+      });
+      // Publish this symbol immediately. A slow unrelated product cannot delay
+      // it, while retired mode/window owners remain unable to repopulate state.
+      if (!isRegularSpotSampleOwnerActive({
+        capturedGeneration: generation,
+        currentGeneration: samplerGeneration,
+        samplerRunning: samplerHandle !== null,
+        capturedWindowStartMs: windowStartMs,
+        currentWindowStartMs: samplerWindowStartMs,
+        clockWindowStartMs: Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS,
+      })) return;
+      const ticks = symbolSamples.get(symbol);
+      if (ticks) convictionPriceTicks.set(symbol, ticks);
+    }).catch((err) =>
+      logger.debug({ err, symbol }, "[regular-spot-sampler] symbol sample failed"),
+    );
   }
 }
 
@@ -78,6 +87,7 @@ export function stopRegularSpotSampler(): void {
   samplerHandle = null;
   samplerWindowStartMs = null;
   samplerGeneration += 1;
+  samplesInFlight.clear();
   convictionPriceTicks.clear();
 }
 

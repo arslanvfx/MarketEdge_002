@@ -1,15 +1,15 @@
 ---
-name: Conviction entry sizing & proximity band
-description: Order time-in-force rules for larger conviction entries, and the global-only proximity clamp on mode-switch baselines
+name: Conviction entry sizing, zero-fill retry safety, and proximity band
+description: IOC ownership rules, durable zero-fill throttling, per-symbol spot preparation, and the global-only proximity clamp
 ---
 
 # Conviction entry time-in-force
 
-**Rule:** All regular conviction entries, including guarded poller fallback, accept partial fills with IOC and track the position by ACTUAL fill count. Submit at the exact verified executable quote, capped by the conviction zone. Each guarded entry invocation emits exactly one broker request; a definitive insufficient-volume rejection becomes a zero-fill and may be reconsidered only by the next fully guarded tick. Non-volume errors must always propagate.
+**Rule:** All regular conviction entries, including guarded poller fallback, accept partial fills with IOC and track the position by ACTUAL fill count. Submit at the exact verified executable quote, capped by the conviction zone. Each guarded invocation emits exactly one broker request. An authoritative zero fill has a 30-second minimum retry interval keyed by mode, symbol, and original window, enforced both in memory and by the durable claim transaction. Non-volume errors must always propagate.
 
-**Why:** Regular bets are expected to be IOC. A July 2026 change made conviction FOK; a later correction restored real-book IOC but silently left guarded poller fallback on FOK. Paper mode treated the displayed quote as a fill while fallback FOK rejected the whole request whenever full size was unavailable. IOC captures available contracts without leaving a resting order or authorizing price chase.
+**Why:** Regular bets are expected to be IOC. A July 2026 change made conviction FOK; a later correction restored real-book IOC but silently left guarded poller fallback on FOK. Paper mode treated the displayed quote as a fill while fallback FOK rejected the whole request whenever full size was unavailable. After IOC restoration, independent dispatch paths retried authoritative zero fills up to ten times in about 22 seconds. Those calls did not overlap, but the burst was unsafe. Separately, globally coalesced spot batches let one slow product prevent another symbol from receiving its next fresh safety sample.
 
-**How to apply:** Regular conviction entries use IOC at the exact verified quote for every quote source. Pass single-attempt mode to the entry helper; do not add an internal half-size or remainder request. Exits depend on the volume-rejection throw to keep the in-memory position open for retry. Confirmed fills retain durable symbol/window ownership; ambiguous outcomes retain ownership and halt re-entry.
+**How to apply:** Regular conviction entries use IOC at the exact verified quote for every quote source. Pass single-attempt mode to the entry helper; do not add an internal half-size or remainder request. Stamp zero-fill cooldown ownership before releasing any entry reservation, using captured mode and window rather than mutable globals; the database claim must independently enforce the same floor across restarts. Confirmed fills retain durable symbol/window ownership, ambiguous outcomes retain ownership and halt re-entry, and fresh spot sampling must coalesce/publish per symbol so unrelated feeds cannot cause head-of-line blocking. Stop, mode-switch, and rollover callbacks must fail ownership checks before publishing.
 
 # Global proximity threshold — mode-switch baseline clamp
 
