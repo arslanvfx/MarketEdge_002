@@ -1531,7 +1531,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     partial.convictionMinEntryMinutes = Math.round(convictionMinEntryMinutes);
   }
   if (typeof convictionMaxDailySpend === "number" && convictionMaxDailySpend >= 0) {
-    partial.convictionMaxDailySpend = convictionMaxDailySpend > 0 ? convictionMaxDailySpend : undefined;
+    partial.convictionMaxDailySpend = convictionMaxDailySpend;
   }
   // 0 = disabled; > 0 enables boost for that dollar amount
   if (typeof convictionBoostBetSize === "number" && convictionBoostBetSize >= 0) {

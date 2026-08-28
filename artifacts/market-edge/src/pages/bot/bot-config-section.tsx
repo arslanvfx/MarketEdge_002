@@ -952,7 +952,9 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         value={merged.convictionMaxDailySpend ?? 0}
                         onChange={e => {
                           const v = parseFloat(e.target.value);
-                          setConfigDraft(d => ({ ...d, convictionMaxDailySpend: Number.isNaN(v) || v <= 0 ? undefined : v }));
+                          if (!Number.isNaN(v) && v >= 0) {
+                            setConfigDraft(d => ({ ...d, convictionMaxDailySpend: v }));
+                          }
                         }} />
                       <span className="text-[10px] text-muted-foreground/60">
                         Hard cap on total $ placed as bets today (wins don't reduce this — it only goes up). 0 = no limit.
