@@ -6,8 +6,8 @@ import { BotConfig } from "../types";
 import { useForm, Controller } from "react-hook-form";
 import { Settings, Save, Loader2, AlertTriangle, CheckCircle2, XCircle, DollarSign, ShieldAlert, Zap, Clock, Target } from "lucide-react";
 import { Button } from "@/components/ui/button";
-
-const AVAILABLE_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "AVAX", "LINK", "UNI"];
+import { REGULAR_BOT_SYMBOLS } from "../../bot/regular-symbols";
+import { SharedRegularControls } from "./shared-regular-controls";
 
 export default function SettingsView({ mode }: { mode: 'paper' | 'live' }) {
   const { getToken } = useAuth();
@@ -94,7 +94,7 @@ export default function SettingsView({ mode }: { mode: 'paper' | 'live' }) {
     );
   }
 
-  const allSymbols = Array.from(new Set([...AVAILABLE_SYMBOLS, ...(configData?.config?.enabledSymbols || [])]));
+  const allSymbols = Array.from(new Set([...REGULAR_BOT_SYMBOLS, ...(configData?.config?.enabledSymbols || [])]));
 
   return (
     <div className="flex flex-col w-full max-w-6xl mx-auto p-4 md:p-6 pb-24">
@@ -131,7 +131,7 @@ export default function SettingsView({ mode }: { mode: 'paper' | 'live' }) {
         </div>
       </div>
 
-      <form className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+      <form className="grid min-w-0 grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
 
         {/* Execution Limits */}
         <div className="bg-card border rounded-xl p-5 shadow-sm space-y-5">
@@ -311,6 +311,9 @@ export default function SettingsView({ mode }: { mode: 'paper' | 'live' }) {
         </div>
 
       </form>
+      <div className="mt-6 min-w-0">
+        <SharedRegularControls />
+      </div>
     </div>
   );
 }

@@ -4,6 +4,8 @@ import { isDashboard2ExecutionOwnerCurrent, readDashboard2ExecutionOwner, type D
 import { evaluateDashboard2SafetyGate } from "./dashboard2-safety-gate.ts";
 import { completeDashboard2PaperExit, dashboard2SafetyAuthorizations, dashboard2V2EntryState, dashboard2V2LiveReadiness, dashboard2V2OpenPositionsForExit, isDashboard2V2ConfigCurrent, readDashboard2V2Config, readDashboard2V2SelectedMode, reconcileDashboard2V2LiveUnknowns, reserveDashboard2V2Entry, reserveDashboard2V2Exit, runDashboard2PaperCandidate, settleDashboard2V2PriorWindows, submitDashboard2LiveExit, submitDashboard2LiveIoc } from "./dashboard2-v2.ts";
 import { getBalance } from "./kalshi-trader.ts";
+import { readCanonicalBotConfig } from "./kalshi-bot-state.ts";
+import { applyDashboard2CanonicalPolicy } from "./dashboard2-canonical-policy.ts";
 
 type ReadinessStatus = "ready" | "warming" | "blocked" | "stale";
 type WindowPhase = "preparing" | "armed" | "eligible" | "blocked";
@@ -92,6 +94,13 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     const state = await dashboard2V2EntryState(mode, symbol, windowKey);
     const signal = directionAndProximity(symbol, target?.value, now);
     const funding = remainingFunding;
+    // Canonical controls are evaluated independently of Dashboard 2's legacy
+    // UTC quiet-hours switch. A missing snapshot is deliberately a block.
+    const canonicalPreview = applyDashboard2CanonicalPolicy({
+      canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
+      dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
+      intendedQuantity: config.maxContracts, now: new Date(now),
+    });
     const policy = { version: `dashboard2-v2-${config.version}`, minEntryMinute: config.minEntryMinute, sideCostFloor: config.sideCostFloor, sideCostCeiling: config.sideCostCeiling, maxContracts: config.maxContracts };
     const circuitOpen = config.circuitBreaker.enabled && (
        state.dailyPnl <= -config.circuitBreaker.maxDailyLoss ||
@@ -101,7 +110,7 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
       identity: { symbol, ticker: exactTicker, windowKey, side: quote.side, bookVersion: quote.bookVersion }, elapsedMinutes, sideCost: quote.sideCost,
       sequenceValid: true, bookFresh: dashboard2KalshiOrderbookService.isFresh(exactTicker), signalPreparationComplete: fresh(target?.at, now) && signal.spotFresh,
       hasDuplicateOrOpenPosition: state.conflict || state.positions >= config.maxConcurrentPositions,
-      quietHoursAllows: dashboard2QuietHoursAllows(config.quietHours, now) && !circuitOpen,
+      quietHoursAllows: dashboard2QuietHoursAllows(config.quietHours, now) && !circuitOpen && canonicalPreview.allowed,
       directionEvidencePositive: !config.directionGuard.enabled || (quote.side === "yes" ? signal.direction === "up" : signal.direction === "down"),
       targetProximityPositive: !config.proximityGuard.enabled || (signal.distancePct != null && signal.distancePct >= config.proximityGuard.minPct),
       availableFunding: funding, exposureAllowance: state.exposure >= config.maxTotalExposure ? 0 : Math.floor((config.maxTotalExposure - state.exposure) / config.sideCostCeiling),
@@ -109,29 +118,49 @@ export async function runDashboard2Orchestrator(now = Date.now()): Promise<void>
     // Paper is intentionally an observation authorization: it never acquires
     // broker capability and therefore does not require the live owner.
     const decision = evaluateDashboard2SafetyGate({ expectedIdentity: evidence.identity, evidence, policy, visibleExecutableDepth: quote.visibleContracts, observationOnly: mode === "paper" ? true : !(owner.owner === "dashboard2_bot"), owner: owner.owner });
+    const canonicalPolicy = applyDashboard2CanonicalPolicy({
+      canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
+      dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
+      intendedQuantity: decision.capital.quantity, now: new Date(now),
+    });
     if (mode === "paper") {
-      if (!decision.shadowQualified) continue;
-      const claim = await runDashboard2PaperCandidate({ symbol, windowKey, elapsedMinutes, quote, config, authorizedCount: decision.capital.quantity });
+      if (!decision.shadowQualified || !canonicalPolicy.allowed) continue;
+      const claim = await runDashboard2PaperCandidate({ symbol, windowKey, elapsedMinutes, quote, config, authorizedCount: canonicalPolicy.cappedQuantity });
       if (claim !== "blocked" && claim !== "duplicate") {
-        remainingFunding = Math.max(0, (remainingFunding ?? 0) - decision.capital.quantity * config.sideCostCeiling);
+        remainingFunding = Math.max(0, (remainingFunding ?? 0) - canonicalPolicy.cappedQuantity * config.sideCostCeiling);
       }
       continue;
     }
-    if (!decision.executionAuthorized) continue;
-    const reservation = await reserveDashboard2V2Entry({ mode: "live", symbol, windowKey, quote, requestedContracts: decision.capital.quantity, config });
+    if (!decision.executionAuthorized || !canonicalPolicy.allowed) continue;
+    // Re-resolve just before the durable claim. The config snapshot is never
+    // retained across this boundary, so an operator pause/cap wins the race.
+    const placementPolicy = applyDashboard2CanonicalPolicy({
+      canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
+      dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
+      intendedQuantity: canonicalPolicy.cappedQuantity, now: new Date(),
+    });
+    if (!placementPolicy.allowed) continue;
+    const reservation = await reserveDashboard2V2Entry({ mode: "live", symbol, windowKey, quote, requestedContracts: placementPolicy.cappedQuantity, config });
     if (!reservation) continue;
-    remainingFunding = Math.max(0, (remainingFunding ?? 0) - decision.capital.quantity * config.sideCostCeiling);
+    remainingFunding = Math.max(0, (remainingFunding ?? 0) - placementPolicy.cappedQuantity * config.sideCostCeiling);
     const authorization = dashboard2SafetyAuthorizations.issue({ mode, symbol, ticker: exactTicker, windowKey, side: quote.side, bookVersion: quote.bookVersion }, policy);
-    await submitDashboard2LiveIoc({ symbol, windowKey, quote, count: decision.capital.quantity, owner: owner.owner, activationReady: true, reservation, preSubmitGuard: () => {
+    await submitDashboard2LiveIoc({ symbol, windowKey, quote, count: placementPolicy.cappedQuantity, owner: owner.owner, activationReady: true, reservation, preSubmitGuard: () => {
       const current = dashboard2KalshiOrderbookService.getExecutable(exactTicker, quote.side, config.maxContracts, config.sideCostFloor, config.sideCostCeiling);
+      const finalPolicy = applyDashboard2CanonicalPolicy({
+        canonicalConfig: readCanonicalBotConfig(), symbol, mode, sideCost: quote.sideCost,
+        dashboardBudget: config.maxDollarBudget, maxContracts: config.maxContracts,
+        intendedQuantity: placementPolicy.cappedQuantity,
+      });
       const consumed = dashboard2SafetyAuthorizations.consume(authorization.token, { mode, symbol, ticker: exactTicker, windowKey, side: quote.side, policyVersion: policy.version, bookVersion: quote.bookVersion });
       return consumed.accepted &&
+        finalPolicy.allowed &&
+        finalPolicy.cappedQuantity >= placementPolicy.cappedQuantity &&
         isDashboard2ExecutionOwnerCurrent("dashboard2_bot") &&
         isDashboard2V2ConfigCurrent("live", config) &&
         current?.bookVersion === quote.bookVersion &&
          current.sideCost === quote.sideCost &&
          current.marginalLimitCost === quote.marginalLimitCost &&
-         current.visibleContracts >= decision.capital.quantity;
+          current.visibleContracts >= placementPolicy.cappedQuantity;
     }});
   }
 }
@@ -155,6 +184,7 @@ export async function getDashboard2RuntimeStatus(
   const windowKey = new Date(windowStart).toISOString().slice(0, 16);
   const selected = await readDashboard2V2SelectedMode();
   const selectedConfig = await readDashboard2V2Config(selected.selectedMode);
+  const canonicalConfigAvailable = readCanonicalBotConfig() !== null;
   const liveReadiness = selected.selectedMode === "live" ? await dashboard2V2LiveReadiness() : { activationReady: false, reasons: [] as string[] };
   const policy = { version: `dashboard2-v2-${selectedConfig.config.version}`, minEntryMinute: selectedConfig.config.minEntryMinute, sideCostFloor: selectedConfig.config.sideCostFloor, sideCostCeiling: selectedConfig.config.sideCostCeiling, maxContracts: selectedConfig.config.maxContracts } as const;
 
@@ -179,6 +209,14 @@ export async function getDashboard2RuntimeStatus(
     // actual qualifying quote before the entry window opens.
     const eligibleSide = executable;
     const bookFresh = Boolean(ticker && dashboard2KalshiOrderbookService.isFresh(ticker));
+    const canonicalPolicy = eligibleSide
+      ? applyDashboard2CanonicalPolicy({
+          canonicalConfig: readCanonicalBotConfig(), symbol: normalized, mode: selected.selectedMode,
+          sideCost: eligibleSide.sideCost, dashboardBudget: selectedConfig.config.maxDollarBudget,
+          maxContracts: selectedConfig.config.maxContracts, intendedQuantity: selectedConfig.config.maxContracts,
+          now: new Date(now),
+        })
+      : null;
 
     const safetyDecision = evaluateDashboard2SafetyGate({
       expectedIdentity: {
@@ -197,13 +235,13 @@ export async function getDashboard2RuntimeStatus(
         signalPreparationComplete: null,
         // These require legacy state or broad imports; Dashboard 2 observes them
         // as unknown rather than reading or mutating execution state.
-        hasDuplicateOrOpenPosition: null, quietHoursAllows: null, directionEvidencePositive: null,
+        hasDuplicateOrOpenPosition: null, quietHoursAllows: eligibleSide ? canonicalPolicy!.allowed : null, directionEvidencePositive: null,
         targetProximityPositive: null, availableFunding: null, exposureAllowance: null,
       },
       policy, visibleExecutableDepth: eligibleSide?.visibleContracts ?? null,
       observationOnly: true, owner,
     });
-    const reason = safetyDecision.blockingReason ?? "execution_observation_only";
+    const reason = canonicalPolicy?.reason ?? safetyDecision.blockingReason ?? "execution_observation_only";
 
     return {
       symbol: normalized,
@@ -214,7 +252,7 @@ export async function getDashboard2RuntimeStatus(
       target: market?.value ?? null,
       spot: signal.spotPrice,
       distancePct: signal.distancePct,
-      intendedQuantity: 0,
+      intendedQuantity: canonicalPolicy?.cappedQuantity ?? 0,
       bookVersion: eligibleSide?.bookVersion ?? null,
       bookFresh,
        safety: safetyDecision.shadowQualified ? ("waiting" as const) : ("blocked" as const),
@@ -279,6 +317,15 @@ export async function getDashboard2RuntimeStatus(
       status: "blocked",
        detail: selected.selectedMode === "live" ? "IOC executor is guarded by one-use authorization" : "Paper ledger executor",
       updatedAt: null,
+    },
+    {
+      id: "canonical-entry-controls",
+      label: "Canonical entry controls",
+      status: canonicalConfigAvailable ? "ready" : "blocked",
+      detail: canonicalConfigAvailable
+        ? "Smart Quiet Hours and per-coin overrides are enforced at sizing and placement"
+        : "Canonical BotConfig is unavailable; Dashboard 2 entries fail closed",
+      updatedAt: canonicalConfigAvailable ? nowIso : null,
     },
   ];
   const phase: WindowPhase =

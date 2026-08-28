@@ -202,6 +202,39 @@ export const S = {
   autoTuneQHLastChanges: null as { silenced: number[]; unsilenced: number[] } | null,
 };
 
+/** Read-only snapshot for runtimes which must consume, but never share, Bot 1
+ * mutable state. Returns null rather than exposing a partially-cloneable or
+ * malformed canonical config to an execution path. */
+export function readCanonicalBotConfig(): Readonly<BotConfig> | null {
+  try {
+    if (!S.config || typeof S.config !== "object") return null;
+    const snapshot = structuredClone(S.config) as BotConfig;
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+    const qh = snapshot.quietHoursV2;
+    if (qh != null && (typeof qh !== "object" || typeof qh.enabled !== "boolean" ||
+        !Array.isArray(qh.silencedUtcHours) || !qh.reducedBetUtcHours ||
+        typeof qh.reducedBetUtcHours !== "object" ||
+        qh.silencedUtcHours.some(hour => !Number.isInteger(hour) || hour < 0 || hour > 23) ||
+        Object.values(qh.reducedBetUtcHours).some(pct => typeof pct !== "number" || !Number.isFinite(pct) || pct < 1 || pct > 99))) return null;
+    if (snapshot.quietHoursMode != null && snapshot.quietHoursMode !== "global" && snapshot.quietHoursMode !== "per_market") return null;
+    if (snapshot.dataGatheringEnabled != null && typeof snapshot.dataGatheringEnabled !== "boolean") return null;
+    if (snapshot.coinOverrides != null && (typeof snapshot.coinOverrides !== "object" || Array.isArray(snapshot.coinOverrides))) return null;
+    for (const override of Object.values(snapshot.coinOverrides ?? {})) {
+      if (!override || typeof override !== "object" ||
+          (override.paused != null && typeof override.paused !== "boolean") ||
+          (override.maxBetSize != null && (!Number.isFinite(override.maxBetSize) || override.maxBetSize < 0))) return null;
+    }
+    const freeze = (value: unknown): unknown => {
+      if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+      for (const child of Object.values(value as Record<string, unknown>)) freeze(child);
+      return Object.freeze(value);
+    };
+    return freeze(snapshot) as Readonly<BotConfig>;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Mutable Maps/Sets exported as reference types (const — safe to export)
 // ---------------------------------------------------------------------------
