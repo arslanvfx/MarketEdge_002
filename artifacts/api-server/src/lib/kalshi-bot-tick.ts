@@ -2136,7 +2136,7 @@ async function _runBotTick(
     // still shows the trigger-time bid of 7¢), the gate can pass while the real
     // market has bounced significantly.
     //
-    // Problem: an ask-side FOK with limitPrice = 0.06 (sell YES ≥ 6¢) fills at
+    // Problem: an immediate ask-side order with limitPrice = 0.06 (sell YES ≥ 6¢) fills at
     // ANY available YES bid — including a bounced 24¢ bid → NO fill at 76¢,
     // far outside the conviction zone.
     //
@@ -2150,14 +2150,14 @@ async function _runBotTick(
     //   allow up to 0.11 + 0.10 = 0.21 (21¢) for normal bid-ask spread
     //   freshYesAsk = 0.24 → 0.24 > 0.21 → abort ✓
     //   freshYesAsk = 0.14 → 0.14 ≤ 0.21 → proceed ✓
-    // NO cross-check: a FOK buy-NO fills at the cheapest YES ask ≤ limit, so
+    // NO cross-check: an immediate buy-NO can fill against an eligible YES bid, so
     // a high YES ask IS a fill-price risk.  The threshold gives 1¢ of spread
     // tolerance above the conviction zone floor.  Applies to all entry paths
-    // (both poller-fallback and real-book) since both now use FOK.
+    // (both poller-fallback and real-book) since both now use IOC.
     if (direction === "no" && freshYesAsk != null) {
       // Strict zone: only allow 1¢ spread above the YES-side floor.
       // Zone [91¢,96¢] NO = [4¢,9¢] YES → floor = 1−lockPrice = 9¢ → threshold = 10¢.
-      // Any YES ask above 10¢ means the FOK NO fill could land below 91¢ — outside zone.
+      // Any YES ask above 10¢ means the NO fill could land below 91¢ — outside zone.
       // Round to 2 decimal places to avoid IEEE 754 drift: (1 − 0.91) evaluates to
       // 0.08999... in double precision, making the raw threshold 0.09999... instead of
       // 0.10, causing a false abort when freshYesAsk is exactly 0.10.
@@ -2183,7 +2183,7 @@ async function _runBotTick(
     }
 
     // ── YES cross-check (hard bid floor) ────────────────────────────────────
-    // A FOK limit-BUY fills at the best available ask ≤ the limit price —
+    // A marketable limit-BUY fills at the best available ask ≤ the limit price —
     // there is no minimum fill price.  If a resting sell order sits at 86¢
     // and we set limit=88¢, the exchange fills at 86¢.
     //
@@ -2193,11 +2193,11 @@ async function _runBotTick(
     // impossible on Kalshi).  So a fill below the zone floor becomes
     // physically impossible, regardless of any race between gate and fill.
     //
-    // EXCEPTION (usedPollerFallback = true): the authenticated book is empty
-    // — there are no resting sell orders at all.  We place FOK at exactly
-    // freshYesAsk, so the fill price is guaranteed to be freshYesAsk or no
-    // fill.  The bid-floor check is irrelevant here; the ask check above
-    // already confirmed freshYesAsk is in [lockPrice, lockPriceCap].
+    // EXCEPTION (usedPollerFallback = true): the authenticated book is
+    // unavailable, but the poller supplied a fresh, exact-ticker, two-sided,
+    // tight-spread quote in-zone. The bid-floor check is irrelevant here; the
+    // guarded poller ask check already confirmed the executable side is in
+    // [lockPrice, lockPriceCap].
     //
     // Example (target 0.90 → lockPrice 0.88, book has resting orders):
     //   freshYesBid = 0.87 → 0.87 < 0.88 → abort ✓  (book has depth below zone)
@@ -2233,18 +2233,16 @@ async function _runBotTick(
     // stale pre-gate cache (e.g. liveYesBid=0.93 left over from the prior window)
     // cannot inflate contractCount to 57 on a 4 $ bet and produce a $38 fill.
     //
-    // Limit price = the EXACT verified ask (no crossing buffer).  A FOK order
-    // at limit=ask fills at that ask or kills instantly if the book moved —
-    // and the 1 s loop retries on the next tick.  The old ask+3¢ buffer only
-    // widened the range of prices the exchange was allowed to fill at, which
-    // is exactly what the user does not want ("fill in the zone or not at all").
+    // Limit at the exact verified executable quote. IOC accepts whatever volume
+    // is immediately available there and cancels the rest; it does not chase a
+    // moved quote or authorize a higher price.
     if (direction === "yes" && freshYesAsk != null) {
       expectedFillCost = freshYesAsk;
       orderLimitPrice = Math.floor(Math.min(freshYesAsk, lockPriceCap) * 100) / 100;
     } else if (direction === "no" && freshYesBid != null) {
       expectedFillCost = 1 - freshYesBid;
-      // For NO orders the limit is expressed as a YES price.  Floor at
-      // (1 - lockPriceCap) so the NO fill price can never exceed lockPriceCap.
+      // For NO orders the limit is expressed as a YES-side ask. Floor it at
+      // (1 - lockPriceCap) so the acquired NO price cannot exceed the cap.
       orderLimitPrice = Math.ceil(Math.max(freshYesBid, 1 - lockPriceCap) * 100) / 100;
     }
     const freshContractCount = Math.floor(targetBetSize / expectedFillCost);
@@ -2353,7 +2351,7 @@ async function _runBotTick(
   // ── Conviction strike-proximity re-check (tick-time) ──────────────────────
   // The main-loop evaluation runs computeStrikeProximityGate once per loop
   // tick using a potentially-stale cached crypto price.  Between that check
-  // and the FOK order below, the live price can drift much closer to the
+  // and the IOC order below, the live price can drift much closer to the
   // Kalshi strike than the configured threshold allows (e.g. NEAR at 0.03%
   // when the threshold is 0.15%).  Re-check here with the freshest available
   // price — the latest fresh one-second spot sample — immediately before the
@@ -2811,32 +2809,29 @@ async function _runBotTick(
       return;
     }
     try {
-      // ── ENTRY ORDER (IOC real-book / FOK poller-fallback) ───────────────────
+      // ── ENTRY ORDER (IOC for every regular conviction source) ───────────────
       // Kalshi does not support any GTC/resting time-in-force value — both
       // "gtc" and "good_till_cancelled" are rejected with a 400 oneof error.
       //
       // Time-in-force selection (changed 2026-08-15 — the $10 sizing regression):
       //   • Real-book (usedPollerFallback=false): IOC.  At 12–18 contracts an
-      //     all-or-nothing FOK is rejected with 409 insufficient_resting_volume
+      //     all-or-nothing FOK was rejected with 409 insufficient_resting_volume
       //     even when MOST contracts are available (e.g. 11 of 12).  IOC fills
       //     whatever the book has at our limit and cancels the rest — the
       //     partial-fill correction below tracks the position by ACTUAL fill
       //     count.  The limit price still hard-caps the fill price, so zone
       //     enforcement is unchanged.
-      //   • Guarded poller fallback (usedPollerFallback=true): FOK. This covers
-      //     both a confirmed empty book and a transient authenticated-orderbook
-      //     timeout, but only after exact ticker, freshness, complete bid/ask,
-      //     tight-spread, and effective-zone checks pass.
+      //   • Guarded poller fallback (usedPollerFallback=true): IOC as well. The
+      //     quote is accepted only after exact ticker, freshness, complete
+      //     bid/ask, tight-spread, and effective-zone checks pass. IOC prevents
+      //     thin liquidity from rejecting the entire position all-or-nothing.
       //
-      // Both paths go through placeEntryOrderWithSizeFallback: a 409 volume
-      // rejection triggers ONE retry at half the contract count (min 1); a
-      // second rejection surfaces as a 0-fill result that feeds the existing
-      // zero-fill attempt counter below (up to 10 attempts per window in
-      // conviction) instead of throwing into the generic error path.
+      // Regular conviction uses single-attempt mode. A definitive immediate
+      // volume rejection becomes a 0-fill and returns to the guarded next-tick
+      // lifecycle; this call never emits a second broker request.
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
-      const entryTimeInForce: "fill_or_kill" | "immediate_or_cancel" =
-        usedPollerFallback ? "fill_or_kill" : "immediate_or_cancel";
+      const entryTimeInForce: "immediate_or_cancel" = "immediate_or_cancel";
       const pollerFallbackLabel =
         pollerFallbackSource === "orderbook_timeout" ? "orderbook-timeout fallback"
         : pollerFallbackSource === "empty_book" ? "empty-book fallback"
@@ -2844,7 +2839,7 @@ async function _runBotTick(
 
       logger.info(
         { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback, pollerFallbackSource, timeInForce: entryTimeInForce },
-        `[kalshi-bot] conviction entry: placing ${entryTimeInForce === "fill_or_kill" ? "FOK" : "IOC"} order${pollerFallbackLabel ? ` (${pollerFallbackLabel})` : ""}`,
+        `[kalshi-bot] conviction entry: placing IOC order${pollerFallbackLabel ? ` (${pollerFallbackLabel})` : ""}`,
       );
 
       const exchangeSubmitStartedAt = Date.now();
@@ -2896,7 +2891,7 @@ async function _runBotTick(
         _routeFundingHoldClaimed = false;
         regularPlacementFunnel.fill(ensurePlacementCandidate(), 0, exchangeResponseAt);
         markPlacementTerminal("zero_fill", "entry order returned zero fills");
-        // FOK returned 0 fills — no resting contracts at our price right now.
+        // IOC returned 0 fills — no resting contracts at our capped price.
         // Allow up to 2 attempts (spaced by ~30 s bot ticks) before blocking the
         // coin for the rest of the window. Gives the book time to build
         // liquidity (especially early in a window) without hammering empty book.
@@ -2905,7 +2900,7 @@ async function _runBotTick(
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
-        // In conviction mode the book is thin and FOK 0-fills are normal for
+        // In conviction mode the book is thin and IOC 0-fills are normal for
         // the first minute of a window (market makers haven't posted quotes yet).
         // Allow up to 10 attempts (~50 s at 5 s ticks) before giving up so the
         // bot keeps trying as liquidity builds, instead of blocking after just 10 s.
@@ -2913,7 +2908,7 @@ async function _runBotTick(
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, usedPollerFallback },
-            "[kalshi-bot] FOK returned 0 fills after max attempts — blocking for rest of window",
+            "[kalshi-bot] IOC returned 0 fills after max attempts — blocking for rest of window",
           );
           windowFailedFills.add(attemptKey);
           // Conviction lock intentionally left set — coin is blocked for rest of window.
@@ -2922,7 +2917,7 @@ async function _runBotTick(
         } else {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS, usedPollerFallback },
-            "[kalshi-bot] FOK returned 0 fills — book empty, will retry next tick",
+            "[kalshi-bot] IOC returned 0 fills — book empty, will retry next tick",
           );
           // Release conviction lock so the next tick can retry this coin.
           // Without this, the coin stays locked for the whole window after one 0-fill.
@@ -2943,7 +2938,7 @@ async function _runBotTick(
       result = fokResult;
 
       // ── PARTIAL FILL CORRECTION + IOC REMAINDER RE-ATTEMPT ────────────────
-      // placeOrderWithRetry uses FOK/IOC: fills what the book has at our price
+      // The IOC entry fills what the book has at our price
       // and cancels the rest.  result.filledCount is the ACTUAL number of
       // contracts filled — can be less than contractCount.
       //
@@ -2964,8 +2959,8 @@ async function _runBotTick(
       //   detects the fallback via attemptedCount < requestedCount and refuses
       //   the remainder in that case, so a third submission is impossible.
       // Other guards (all inside decideRemainderAttempt):
-      //   • real-book IOC path only (usedPollerFallback=false).  FOK empty-book
-      //     entries are all-or-nothing by design — no remainder can exist.
+      //   • poller-fallback remainder remains disabled even though its initial
+      //     entry is now IOC; the initial partial fill is recorded immediately.
       //   • remainder measured against attemptedCount (actual submitted size).
       //   • fresh ≥3-min hard floor re-check (same rule as entry dispatch) so
       //     the remainder cannot land dangerously late in the window.

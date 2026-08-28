@@ -159,7 +159,7 @@ test("IOC: defaults to immediate_or_cancel when caller does not specify timeInFo
   assert.equal(received, "immediate_or_cancel", "placeOrderWithRetry defaults to IOC");
 });
 
-test("FOK: respects caller-provided timeInForce: fill_or_kill (used by conviction path)", async () => {
+test("FOK: respects caller-provided timeInForce for callers that require all-or-nothing", async () => {
   let received: string | undefined;
   await placeOrderWithRetry(
     { ...baseParams, timeInForce: "fill_or_kill" },

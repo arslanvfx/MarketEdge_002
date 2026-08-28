@@ -1163,9 +1163,9 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
   // the same as a "no ask at 93¢".
   //
   // There is NO "market" order type in v2 — a market order is a marketable LIMIT
-  // with time_in_force="fill_or_kill". We send an aggressive price that crosses
-  // the spread; price-improvement means we never pay worse than the resting book,
-  // and FOK guarantees the whole order fills at once or is killed (never rests).
+  // with an immediate time-in-force. We send an aggressive price that crosses
+  // the spread; price-improvement means we never pay worse than the resting
+  // book, and IOC/FOK guarantees the unfilled quantity never rests.
   const clientOrderId = params.clientOrderId?.trim() || crypto.randomUUID();
 
   // Which side of the YES book acquires the exposure we want.
@@ -1411,9 +1411,8 @@ export interface PlaceOrderRetryOptions {
  * right now and cancels the remainder — so a partial fill is perfectly fine.
  * The position is tracked by actual fill count, not the requested count.
  *
- * Conviction entries pass timeInForce: "fill_or_kill" so the whole order must
- * fill at once — this triggers reactive market-maker fills on Kalshi even when
- * the authenticated orderbook appears empty.
+ * Regular conviction entries use IOC so immediately available contracts create
+ * a position even when the full requested size is not resting at once.
  *
  * Exits (buyYes/buyNo/sellYes/sellNo) still use FOK via placeOrder directly
  * so we never leave a partial position stranded on the exchange.

@@ -537,6 +537,20 @@ test("conviction hot path consumes only prepared orderbook and reaches durable c
   assert.doesNotMatch(hotPath, /await fetchOrderbookPrices/);
 });
 
+test("regular conviction submits one IOC at the exact verified quote", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),
+  );
+  assert.match(source, /Math\.floor\(Math\.min\(freshYesAsk, lockPriceCap\) \* 100\) \/ 100/);
+  assert.match(source, /Math\.ceil\(Math\.max\(freshYesBid, 1 - lockPriceCap\) \* 100\) \/ 100/);
+  assert.match(source, /const entryTimeInForce: "immediate_or_cancel" = "immediate_or_cancel"/);
+  const initialEntry = source.slice(
+    source.indexOf("const fokResult = await placeEntryOrderWithSizeFallback"),
+    source.indexOf("const exchangeResponseAt", source.indexOf("const fokResult = await placeEntryOrderWithSizeFallback")),
+  );
+  assert.match(initialEntry, /disableHalfSizeRetry: true/);
+});
+
 test("placeOrder routing: invalid market identity fails closed with zero POSTs", async () => {
   const invalidPayloads: unknown[] = [
     null,

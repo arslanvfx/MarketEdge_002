@@ -30,10 +30,10 @@ test("remainder CRITICAL: fallback fired and even fully filled at half size → 
   assert.equal(d.attempt, false);
 });
 
-test("remainder: poller-fallback FOK path → never attempts", () => {
+test("remainder: poller-fallback follow-up remains disabled", () => {
   const d = decideRemainderAttempt({ ...base, usedPollerFallback: true });
   assert.equal(d.attempt, false);
-  assert.match(d.skipReason!, /all-or-nothing/);
+  assert.match(d.skipReason!, /disabled/);
 });
 
 test("remainder: non-IOC time-in-force → never attempts", () => {

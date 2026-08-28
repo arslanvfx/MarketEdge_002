@@ -14,8 +14,8 @@
 // fallback deterministically.
 //
 // All other guards:
-//   • real-book IOC path only — poller-fallback entries are FOK all-or-nothing,
-//     so a "partial fill" cannot exist there and no remainder applies.
+//   • This optional follow-up is currently disabled at the call site. If it is
+//     re-enabled, keep the two-order budget below intact for every IOC source.
 //   • remainder counted against attemptedCount (the actual submitted size),
 //     never the original requested count.
 //   • ≥3 minutes must remain in the window (same hard floor as entry dispatch).
@@ -44,7 +44,7 @@ export interface RemainderDecision {
 export function decideRemainderAttempt(a: RemainderDecisionArgs): RemainderDecision {
   const remainder = a.attemptedCount - a.filledCount;
   if (a.usedPollerFallback) {
-    return { attempt: false, remainder, skipReason: "poller-fallback FOK path — all-or-nothing, no remainder possible" };
+    return { attempt: false, remainder, skipReason: "poller-fallback remainder is disabled at this decision boundary" };
   }
   if (a.timeInForce !== "immediate_or_cancel") {
     return { attempt: false, remainder, skipReason: `time-in-force ${a.timeInForce} — remainder applies to IOC only` };

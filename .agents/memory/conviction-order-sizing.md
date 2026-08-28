@@ -5,11 +5,11 @@ description: Order time-in-force rules for larger conviction entries, and the gl
 
 # Conviction entry time-in-force
 
-**Rule:** Real-book conviction entries accept partial fills (IOC-style) and track the position by ACTUAL fill count; the empty-book poller-fallback path must stay all-or-nothing (FOK). On an insufficient-resting-volume rejection, retry once at half size (min 1), then treat a second rejection as a normal zero-fill — never as an error. Non-volume errors must always propagate.
+**Rule:** All regular conviction entries, including guarded poller fallback, accept partial fills with IOC and track the position by ACTUAL fill count. Submit at the exact verified executable quote, capped by the conviction zone. Each guarded entry invocation emits exactly one broker request; a definitive insufficient-volume rejection becomes a zero-fill and may be reconsidered only by the next fully guarded tick. Non-volume errors must always propagate.
 
-**Why:** All-or-nothing orders that worked at 1 contract get rejected wholesale at 12–18 contracts even when most of the volume exists — fill rate collapsed when bet size rose from ~$1 to $10. But Kalshi market makers only fill FOK reactively against an empty book; IOC there cancels instantly with zero fills.
+**Why:** Regular bets are expected to be IOC. A July 2026 change made conviction FOK; a later correction restored real-book IOC but silently left guarded poller fallback on FOK. Paper mode treated the displayed quote as a fill while fallback FOK rejected the whole request whenever full size was unavailable. IOC captures available contracts without leaving a resting order or authorizing price chase.
 
-**How to apply:** Entries use the size-fallback helper in the trader module; exits never do — exits depend on the volume-rejection throw to keep the in-memory position open for retry. The limit price still hard-caps fill cost, so zone enforcement and post-fill checks are unchanged.
+**How to apply:** Regular conviction entries use IOC at the exact verified quote for every quote source. Pass single-attempt mode to the entry helper; do not add an internal half-size or remainder request. Exits depend on the volume-rejection throw to keep the in-memory position open for retry. Confirmed fills retain durable symbol/window ownership; ambiguous outcomes retain ownership and halt re-entry.
 
 # Global proximity threshold — mode-switch baseline clamp
 
