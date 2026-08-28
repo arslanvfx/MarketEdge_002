@@ -1504,7 +1504,14 @@ async function _runPreflight(
   const validatedRoutes = new Map<string, number>();
   let routeFundingPlan: ReturnType<typeof planScalperRouteFunding> | null = null;
   _warmRegularPositionReadView(mode, windowKey);
-  const accountPromise = getScalpCommittedTotals(mode, windowKey);
+  // Attach both handlers immediately. This read intentionally overlaps the
+  // provider warm-up below, which can take several seconds. Leaving its
+  // rejection unobserved until the later await lets a transient pool-acquire
+  // timeout become an unhandled rejection and terminate the entire API.
+  const accountPromise = getScalpCommittedTotals(mode, windowKey).then(
+    (totals) => ({ ok: true as const, totals }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
 
   // Refresh every target rather than treating an old identity marker as
   // readiness. This intentionally primes provider connections and the reserved
@@ -1709,7 +1716,9 @@ async function _runPreflight(
     fundingSnapshotVerified ? nextVerifiedFundingPermits : null,
   );
 
-  const { dailyCommitted, openCommitted } = await accountPromise;
+  const accountResult = await accountPromise;
+  if (!accountResult.ok) throw accountResult.error;
+  const { dailyCommitted, openCommitted } = accountResult.totals;
   if (windowKey !== currentWindowKey() || mode !== _config.mode) return;
   const guardSampleRequired =
     _config.freefallGuardEnabled

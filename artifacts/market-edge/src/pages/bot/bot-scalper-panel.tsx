@@ -561,7 +561,10 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
       return response.json() as Promise<ScalperStatus>;
     },
     enabled: Boolean(cfg),
-    refetchInterval: 2_000,
+    // This response performs several ledger/accounting reads. Five seconds
+    // keeps operator status fresh without continuously contending with the
+    // trading engine for the shared PostgreSQL pool.
+    refetchInterval: 5_000,
   });
 
   const { data: perfData } = useQuery<ScalperPerformance>({

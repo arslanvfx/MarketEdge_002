@@ -9,10 +9,11 @@ Replit's managed PostgreSQL kills idle connections at the **PostgreSQL protocol 
 ## Fix applied
 - `max: 5` (not 20) — fewer connections = fewer stale ones at once
 - `min: 1` — always keep 1 warm
-- `connectionTimeoutMillis: 30000` — enough time for pool to recover
-- `startPoolPinger()` — runs `SELECT 1` every 20s to keep connections alive at the SQL layer
+- Short connection-acquire timeout — fail fast so retry/fail-closed behavior can take over
+- `startPoolPinger()` — regularly runs `SELECT 1` to keep connections alive at the SQL layer
 - `withRetry`: 5 retries, exponential backoff + jitter (not linear 300ms)
+- Any database promise started early to overlap unrelated work must attach both fulfillment and rejection handlers immediately. Never leave rejection handling until a much later `await`.
 
-**Why:** With max:20, concurrent bot ticks hitting 20 stale connections simultaneously caused a cascade — all reconnect at once, overwhelm auth handshake, every retry also times out. Smaller pool + SQL-level keepalive prevents this.
+**Why:** With max:20, concurrent bot ticks hitting 20 stale connections simultaneously caused a cascade. Separately, a preflight read rejected while provider warm-up was still running; because its handler was attached only at a later `await`, Node terminated the API for an unhandled rejection.
 
-**How to apply:** Any time DB timeouts return in production, check pool size first. If `max > 5`, reduce. Ensure `startPoolPinger()` is called at server startup in `artifacts/api-server/src/index.ts`.
+**How to apply:** Any time DB timeouts return, check pool pressure and polling fan-out first. For intentionally concurrent work, immediately convert each promise into a settled-result shape, then inspect or rethrow that result at the normal ownership boundary.
