@@ -13,6 +13,11 @@ import {
   prewarmRegularAccountSnapshot,
   getFreshRegularAccountSnapshot,
   getFreshRegularAccountSnapshotForRoute,
+  claimRegularRouteFundingHold,
+  hasAuthorizedRegularRouteFundingHold,
+  releaseRegularRouteFundingHold,
+  commitRegularRouteFundingHold,
+  REGULAR_ACCOUNT_REFRESH_INTERVAL_MS,
   hasFreshRegularPreparedRouteFunding,
   computeRegularWorstCaseRouteCost,
   invalidateBalanceCache,
@@ -397,7 +402,7 @@ test("regular account prewarm: concurrent callers coalesce, refresh-ahead reuses
     assert.equal(gets, 1, "refresh-ahead retains a usable snapshot without repeated GETs");
     // Enter the refresh-ahead window, then emulate several symbols in the same
     // poll cycle. They must share one replacement GET, before snapshot expiry.
-    now += 9_000;
+    now += REGULAR_ACCOUNT_REFRESH_INTERVAL_MS + 1;
     await Promise.all([
       prewarmRegularAccountSnapshot(),
       prewarmRegularAccountSnapshot(),
@@ -410,6 +415,69 @@ test("regular account prewarm: concurrent callers coalesce, refresh-ahead reuses
     assert.equal(getFreshRegularAccountSnapshotForRoute(2), null);
   } finally {
     Date.now = previousNow;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("regular account snapshot remains usable while a slow replacement is in flight", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousNow = Date.now;
+  let resolveRefresh!: (response: Response) => void;
+  try {
+    invalidateBalanceCache();
+    let now = previousNow();
+    Date.now = () => now;
+    globalThis.fetch = async () => jsonResponse({
+      balance: 2000,
+      portfolio_value: 0,
+      balance_breakdown: [{ exchange_index: 2, balance: "20.0000" }],
+    });
+    prewarmRegularOrderExchangeIndex("SLOW-REFRESH", 2, now);
+    await prewarmRegularAccountSnapshot();
+
+    now += REGULAR_ACCOUNT_REFRESH_INTERVAL_MS + 1;
+    globalThis.fetch = () => new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const refresh = prewarmRegularAccountSnapshot();
+    now += 10_000;
+    assert.equal(getFreshRegularAccountSnapshotForRoute(2)?.availableBalance, 20);
+
+    resolveRefresh(jsonResponse({
+      balance: 1900,
+      portfolio_value: 0,
+      balance_breakdown: [{ exchange_index: 2, balance: "19.0000" }],
+    }));
+    await refresh;
+    assert.equal(getFreshRegularAccountSnapshotForRoute(2)?.availableBalance, 19);
+  } finally {
+    Date.now = previousNow;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("regular route funding holds serialize parallel cash and confirmed fills debit locally", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    invalidateBalanceCache();
+    globalThis.fetch = async () => jsonResponse({
+      balance: 1000,
+      portfolio_value: 0,
+      balance_breakdown: [{ exchange_index: 3, balance: "5.0000" }],
+    });
+    prewarmRegularOrderExchangeIndex("HELD-ROUTE", 3);
+    await prewarmRegularAccountSnapshot();
+
+    assert.equal(claimRegularRouteFundingHold("HELD-ROUTE", "hold-a", 3), true);
+    assert.equal(claimRegularRouteFundingHold("HELD-ROUTE", "hold-b", 3), false);
+    assert.equal(hasAuthorizedRegularRouteFundingHold("HELD-ROUTE", "hold-a"), true);
+    assert.equal(commitRegularRouteFundingHold("hold-a", 2.5), true);
+    assert.equal(getFreshRegularAccountSnapshotForRoute(3)?.availableBalanceByExchange.get(3), 2.5);
+
+    assert.equal(claimRegularRouteFundingHold("HELD-ROUTE", "hold-c", 2), true);
+    releaseRegularRouteFundingHold("hold-c");
+    assert.equal(hasAuthorizedRegularRouteFundingHold("HELD-ROUTE", "hold-c"), false);
+  } finally {
     globalThis.fetch = previousFetch;
   }
 });

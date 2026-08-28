@@ -20,3 +20,9 @@ description: Safety rules for comparing paper opportunities with live regular-or
 **Why:** Candidate-time network preparation caused eligible live orders to miss short price windows. Rechecking funding only before the durable claim also allowed another fill to invalidate the evidence while the claim was waiting.
 
 **How to apply:** Compute one immutable worst-case cost from the final submitted limit and refreshed count, use it for route funding and intent reservation, and synchronously revalidate authorization plus that same prepared funding immediately before the POST. Missing or invalidated evidence fails closed without I/O.
+
+**Rule:** Prepared account evidence needs separate refresh and usable-age thresholds. The usable window must exceed the authenticated request timeout, and parallel exact-route orders must reserve cached shard cash before POST.
+
+**Why:** Using the same 10-second value for request timeout and snapshot expiry created a deterministic production dead zone: refresh began shortly before expiry but could not finish until several seconds after every live candidate started failing closed.
+
+**How to apply:** Refresh early, retain the last authoritative snapshot for a bounded longer window, fail closed after that bound, and convert per-route holds into conservative local debits on confirmed fills. Release only proven no-submit/zero-fill holds; retain unknown exposure.

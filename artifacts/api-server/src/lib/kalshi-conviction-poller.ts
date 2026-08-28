@@ -263,6 +263,11 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
     Math.floor(nowMs / (15 * 60_000)) * (15 * 60_000) + 15 * 60_000,
   );
 
+  // Start the shared authenticated account refresh before the slower per-symbol
+  // market work. Eligible quotes consume this snapshot synchronously; they must
+  // never wait for account I/O on the placement path.
+  void prewarmRegularAccountSnapshot();
+
   await Promise.allSettled(
     syms.map(async (sym) => {
       // forceRefresh=true bypasses the TTL check without deleting the existing
@@ -297,10 +302,6 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
       // Routing is immutable for an exact ticker. Publish it while the target is
       // fresh so the final POST path does not need another market lookup.
       prewarmRegularOrderExchangeIndex(preparedTicker, entry.exchangeIndex, entry.at);
-       // Launch authenticated account preparation before zone eligibility. It is
-       // intentionally never awaited by the zone callback.
-       prewarmRegularAccountSnapshot();
-
       // ── Zone-entry detection ──────────────────────────────────────────────
       // If this coin's price has entered [lockPrice, lockPriceCap] on either
       // side and no bet has been placed this window yet, clear the abort

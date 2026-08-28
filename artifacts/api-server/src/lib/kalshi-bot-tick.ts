@@ -40,7 +40,10 @@ import {
 import {
   buyYes, buyNo, sellYes, sellNo, getBalance, isKalshiConfigured, placeOrderWithRetry,
   placeEntryOrderWithSizeFallback,
-  getCachedKalshiBalance, getFreshRegularAccountSnapshot, getFreshRegularAccountSnapshotForRoute, getPreparedRegularOrderExchangeIndex, hasFreshRegularPreparedRouteFunding, computeRegularWorstCaseRouteCost, invalidateBalanceCache, computeMarketableLimitPrice,
+  getCachedKalshiBalance, getFreshRegularAccountSnapshot, getFreshRegularAccountSnapshotForRoute, getPreparedRegularOrderExchangeIndex,
+  claimRegularRouteFundingHold, hasAuthorizedRegularRouteFundingHold, releaseRegularRouteFundingHold,
+  commitRegularRouteFundingHold, getRegularAccountSnapshotDiagnostics,
+  computeRegularWorstCaseRouteCost, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets, placeOrder,
   isUncertainOrderError,
 } from "./kalshi-trader";
@@ -1664,7 +1667,10 @@ async function _runBotTick(
         return;
       }
     } catch (err) {
-      logger.error({ err, sym }, "[kalshi-bot] SAFETY ABORT — could not fetch Kalshi balance before trade; trade cancelled");
+      logger.error(
+        { err, sym, accountSnapshot: getRegularAccountSnapshotDiagnostics() },
+        "[kalshi-bot] SAFETY ABORT — could not fetch Kalshi balance before trade; trade cancelled",
+      );
       setTickAbortReason(sym, windowKey, "safety abort: could not fetch account balance before trade");
       releaseConvictionEntryReservation("account balance fetch failed");
       return;
@@ -2495,6 +2501,7 @@ async function _runBotTick(
   // stays fully isolated from this durable table.
   const _intentReservationId = crypto.randomUUID();
   let _intentClaimed = false;
+  let _routeFundingHoldClaimed = false;
 
   // ── FINAL SMART HOURS CHECK — immediately before order placement ─────────
   // Authoritative, fail-closed re-resolution at the moment the order would be
@@ -2753,6 +2760,30 @@ async function _runBotTick(
         return;
       }
       _intentClaimed = true;
+      if (!claimRegularRouteFundingHold(expectedTicker, _intentReservationId, worstCaseRouteCost)) {
+        const reason = "prepared route cash already reserved or account snapshot unavailable";
+        regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), reason);
+        markPlacementTerminal("intent_denied", reason);
+        void resolveRegularOrderIntent({
+          clientOrderId: _intentReservationId,
+          status: "skipped",
+          reason,
+        }).catch(() => {});
+        releaseConvictionEntryReservation(reason);
+        logger.warn(
+          {
+            sym,
+            windowKey,
+            ticker: expectedTicker,
+            worstCaseRouteCost,
+            accountSnapshot: getRegularAccountSnapshotDiagnostics(),
+          },
+          "[kalshi-bot] live entry blocked — exact-route funding hold unavailable",
+        );
+        setTickAbortReason(sym, windowKey, `safety abort: ${reason}`);
+        return;
+      }
+      _routeFundingHoldClaimed = true;
       regularPlacementFunnel.reservation(ensurePlacementCandidate(), true, Date.now());
       logger.info(
         {
@@ -2840,7 +2871,7 @@ async function _runBotTick(
             const currentQh = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
             return currentQh.action !== "block"
               && !currentQh.forcedPaper
-              && hasFreshRegularPreparedRouteFunding(expectedTicker, worstCaseRouteCost);
+              && hasAuthorizedRegularRouteFundingHold(expectedTicker, _intentReservationId);
           },
         },
         undefined,
@@ -2861,6 +2892,8 @@ async function _runBotTick(
       );
 
       if (fokResult.filledCount === 0) {
+        releaseRegularRouteFundingHold(_intentReservationId);
+        _routeFundingHoldClaimed = false;
         regularPlacementFunnel.fill(ensurePlacementCandidate(), 0, exchangeResponseAt);
         markPlacementTerminal("zero_fill", "entry order returned zero fills");
         // FOK returned 0 fills — no resting contracts at our price right now.
@@ -3137,8 +3170,20 @@ async function _runBotTick(
           }
         }
       }
-      // Invalidate the cached balance so the next entry guard fetches a fresh value.
-      invalidateBalanceCache();
+      const confirmedRouteCost = computeRegularWorstCaseRouteCost(
+        direction,
+        result.avgPrice,
+        result.filledCount,
+      ) ?? worstCaseRouteCost;
+      const debitCommitted = commitRegularRouteFundingHold(_intentReservationId, confirmedRouteCost);
+      if (debitCommitted) {
+        _routeFundingHoldClaimed = false;
+      } else {
+        logger.error(
+          { sym, windowKey, confirmedRouteCost, accountSnapshot: getRegularAccountSnapshotDiagnostics() },
+          "[kalshi-bot] confirmed fill could not debit prepared account snapshot — retaining route funding hold",
+        );
+      }
       regularPlacementFunnel.fill(ensurePlacementCandidate(), result.filledCount, Date.now());
       markPlacementTerminal("filled", `confirmed ${result.filledCount} contract fill`);
     } catch (err) {
@@ -3178,6 +3223,10 @@ async function _runBotTick(
       // request, auth failure, invalid ticker): no order was accepted, so it is
       // safe to release the durable reservation and allow a retry next tick.
       logger.error({ err, sym }, "[kalshi-bot] order placement failed");
+      if (_routeFundingHoldClaimed) {
+        releaseRegularRouteFundingHold(_intentReservationId);
+        _routeFundingHoldClaimed = false;
+      }
       markPlacementTerminal(
         "definite_error",
         err instanceof Error ? err.message : "definite order placement error",

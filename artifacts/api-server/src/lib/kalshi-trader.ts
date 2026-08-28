@@ -1525,11 +1525,19 @@ const _balanceInflight = new Map<string, Promise<number>>();
 let _regularAccountSnapshot: RegularAccountSnapshot | null = null;
 let _regularAccountPrewarmInflight: Promise<void> | null = null;
 let _regularAccountSnapshotGeneration = 0;
+const _regularRouteFundingHolds = new Map<string, {
+  ticker: string;
+  exchangeIndex: number;
+  reservedCost: number;
+}>();
 const BALANCE_CACHE_TTL_MS = 10_000;
-export const REGULAR_ACCOUNT_SNAPSHOT_TTL_MS = 10_000;
-// Poller calls prewarm every second. Begin a replacement read before expiry,
-// while retaining the still-fresh snapshot for the immediate quote path.
-const REGULAR_ACCOUNT_REFRESH_AHEAD_MS = 2_000;
+// The authenticated GET itself may consume its full 10 s timeout. The previous
+// 10 s usable TTL plus an 8 s refresh point guaranteed a dead zone from t=10
+// until a slow replacement completed at up to t=18. Keep the last authoritative
+// snapshot usable for one bounded 30 s window while refreshing every 5 s.
+// At 30 s without a successful refresh, live entry still fails closed.
+export const REGULAR_ACCOUNT_SNAPSHOT_TTL_MS = 30_000;
+export const REGULAR_ACCOUNT_REFRESH_INTERVAL_MS = 5_000;
 
 /** Keep the authenticated aggregate account snapshot hot before a regular
  * conviction quote becomes eligible. Coalescing is provided by the balance
@@ -1538,7 +1546,7 @@ export function prewarmRegularAccountSnapshot(): Promise<void> {
   const snapshot = _regularAccountSnapshot;
   if (
     snapshot &&
-    Date.now() - snapshot.fetchedAt < REGULAR_ACCOUNT_SNAPSHOT_TTL_MS - REGULAR_ACCOUNT_REFRESH_AHEAD_MS
+    Date.now() - snapshot.fetchedAt < REGULAR_ACCOUNT_REFRESH_INTERVAL_MS
   ) {
     return Promise.resolve();
   }
@@ -1589,6 +1597,22 @@ export function getFreshRegularAccountSnapshotForRoute(exchangeIndex?: number): 
   return snapshot;
 }
 
+export function getRegularAccountSnapshotDiagnostics(): {
+  available: boolean;
+  ageMs: number | null;
+  refreshInFlight: boolean;
+  usableTtlMs: number;
+  activeFundingHolds: number;
+} {
+  return {
+    available: _regularAccountSnapshot != null,
+    ageMs: _regularAccountSnapshot == null ? null : Math.max(0, Date.now() - _regularAccountSnapshot.fetchedAt),
+    refreshInFlight: _regularAccountPrewarmInflight != null,
+    usableTtlMs: REGULAR_ACCOUNT_SNAPSHOT_TTL_MS,
+    activeFundingHolds: _regularRouteFundingHolds.size,
+  };
+}
+
 /** Synchronous exact-route funding predicate for the pre-fetch hot path. */
 export function hasFreshRegularPreparedRouteFunding(ticker: string, requiredCost: number): boolean {
   if (!Number.isFinite(requiredCost) || requiredCost <= 0) return false;
@@ -1600,6 +1624,94 @@ export function hasFreshRegularPreparedRouteFunding(ticker: string, requiredCost
     ? null
     : snapshot?.availableBalanceByExchange.get(exchangeIndex) ?? null;
   return routeBalance != null && routeBalance + 1e-9 >= requiredCost;
+}
+
+function heldRegularRouteCost(exchangeIndex: number): number {
+  let total = 0;
+  for (const hold of _regularRouteFundingHolds.values()) {
+    if (hold.exchangeIndex === exchangeIndex) total += hold.reservedCost;
+  }
+  return total;
+}
+
+/**
+ * Reserve exact-route cash in memory after the durable DB intent is claimed.
+ * This closes the gap where parallel live ticks could all authorize against the
+ * same prepared shard balance before any of their fills update the account.
+ */
+export function claimRegularRouteFundingHold(
+  ticker: string,
+  reservationId: string,
+  requiredCost: number,
+): boolean {
+  if (!reservationId || !Number.isFinite(requiredCost) || requiredCost <= 0) return false;
+  const existing = _regularRouteFundingHolds.get(reservationId);
+  if (existing) {
+    return existing.ticker === ticker && Math.abs(existing.reservedCost - requiredCost) < 1e-9;
+  }
+  const exchangeIndex = getPreparedRegularOrderExchangeIndex(ticker);
+  if (exchangeIndex == null) return false;
+  const snapshot = getFreshRegularAccountSnapshotForRoute(exchangeIndex);
+  const routeBalance = snapshot?.availableBalanceByExchange.get(exchangeIndex) ?? null;
+  if (routeBalance == null || routeBalance - heldRegularRouteCost(exchangeIndex) + 1e-9 < requiredCost) {
+    return false;
+  }
+  _regularRouteFundingHolds.set(reservationId, { ticker, exchangeIndex, reservedCost: requiredCost });
+  return true;
+}
+
+/** Final synchronous authorization at the exact broker-POST boundary. */
+export function hasAuthorizedRegularRouteFundingHold(
+  ticker: string,
+  reservationId: string,
+): boolean {
+  const hold = _regularRouteFundingHolds.get(reservationId);
+  if (!hold || hold.ticker !== ticker) return false;
+  if (getPreparedRegularOrderExchangeIndex(ticker) !== hold.exchangeIndex) return false;
+  const snapshot = getFreshRegularAccountSnapshotForRoute(hold.exchangeIndex);
+  const routeBalance = snapshot?.availableBalanceByExchange.get(hold.exchangeIndex) ?? null;
+  return routeBalance != null && routeBalance + 1e-9 >= heldRegularRouteCost(hold.exchangeIndex);
+}
+
+export function releaseRegularRouteFundingHold(reservationId: string): void {
+  _regularRouteFundingHolds.delete(reservationId);
+}
+
+/**
+ * Convert a confirmed order's temporary hold into a conservative local debit.
+ * The debit prevents subsequent entries from reusing cash while the background
+ * authoritative refresh is slow. Any pre-fill response already in flight is
+ * generation-revoked so it cannot overwrite the debit.
+ */
+export function commitRegularRouteFundingHold(
+  reservationId: string,
+  actualCost: number,
+): boolean {
+  const hold = _regularRouteFundingHolds.get(reservationId);
+  if (!hold || !Number.isFinite(actualCost) || actualCost < 0) return false;
+  const snapshot = _regularAccountSnapshot;
+  if (!snapshot) return false;
+
+  const debit = Math.min(Math.max(actualCost, 0), hold.reservedCost);
+  const byExchange = new Map(snapshot.availableBalanceByExchange);
+  const routeBalance = byExchange.get(hold.exchangeIndex);
+  if (routeBalance == null) return false;
+  _regularRouteFundingHolds.delete(reservationId);
+  byExchange.set(hold.exchangeIndex, Math.max(0, routeBalance - debit));
+
+  _regularAccountSnapshotGeneration++;
+  _regularAccountSnapshot = {
+    availableBalance: Math.max(0, snapshot.availableBalance - debit),
+    availableBalanceByExchange: byExchange,
+    fetchedAt: snapshot.fetchedAt,
+  };
+  _balanceCache.clear();
+  _balanceCache.set("aggregate", {
+    availableBalance: _regularAccountSnapshot.availableBalance,
+    fetchedAt: snapshot.fetchedAt,
+  });
+  void prewarmRegularAccountSnapshot();
+  return true;
 }
 
 /** Return Kalshi available balance in dollars, cached for up to 10 seconds.
