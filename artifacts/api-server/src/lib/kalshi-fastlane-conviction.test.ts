@@ -105,6 +105,12 @@ test("FastLane honors the configured per-window minimum entry wait with no early
   assert.match(tickSource, /const modeLabel = isFastLane \? "fastlane" : "conviction"/);
   assert.match(loopSource, /if \(isPriceTriggeredMode\) \{[\s\S]*getConvictionMinEntryMinute\(sym, S\.config\)/);
   assert.match(loopSource, /const _isExtreme = isConviction && _bypassEnabled/);
+  const modeDeclaration = loopSource.indexOf(
+    "const isPriceTriggeredMode = isPriceTriggeredDecisionMode(S.config.decisionMode)",
+  );
+  const timingGate = loopSource.indexOf("if (isPriceTriggeredMode) {", modeDeclaration);
+  assert.ok(modeDeclaration >= 0, "scheduler must declare its price-triggered mode flag");
+  assert.ok(timingGate > modeDeclaration, "scheduler timing gate must use the declared mode flag");
 });
 
 test("one slow market poll cannot serialize every FastLane symbol", () => {

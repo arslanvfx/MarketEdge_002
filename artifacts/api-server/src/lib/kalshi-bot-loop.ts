@@ -1485,9 +1485,11 @@ export async function runBotLoopTick(): Promise<void> {
     // moment the Kalshi YES price crosses kalshiLockPrice (default $0.90).
     // The pipeline sets the lock on first completion but we deliberately
     // re-evaluate each tick so a 90¢ cross at T+8 is caught within 5 seconds.
-    const isConviction = isPriceTriggeredDecisionMode(S.config.decisionMode);
+    const isPriceTriggeredMode = isPriceTriggeredDecisionMode(S.config.decisionMode);
+    const isFastLane = S.config.decisionMode === "fastlane";
+    const isConviction = S.config.decisionMode === "conviction";
     if (pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`) && !openPositions.has(sym)) {
-      if (!isConviction) {
+      if (!isPriceTriggeredMode) {
         filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "pipeline-triggered entry already evaluated this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
@@ -1498,7 +1500,7 @@ export async function runBotLoopTick(): Promise<void> {
     // (regardless of FOK fill outcome), block any further entry for this coin this
     // window.  This prevents repeated bets when the Kalshi YES price oscillates
     // across the lock threshold (e.g. 89¢ → 91¢ → 89¢ → 91¢ every tick).
-    if (isConviction && convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
+    if (isPriceTriggeredMode && convictionFiredThisWindow.has(`${sym}:${windowKey}`)) {
       filteredByNewGuards.add(sym);
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "conviction: already entered this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
@@ -1576,7 +1578,7 @@ export async function runBotLoopTick(): Promise<void> {
     // CONVICTION MODE: the in-memory prefilter does not serialize parallel
     // symbols. Live entries enforce this shared cap atomically in the durable
     // reservation immediately before POST.
-    if (!isConviction && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
+    if (!isPriceTriggeredMode && globalCapReached && !(windowBetCounts.get(`${sym}:${windowKey}:${S.botMode}`) ?? 0 > 0)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `global bet cap reached (${globalBetsThisWindow}/${S.config.maxBetsPerWindow} bets this window)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
       continue;
     }
@@ -1584,7 +1586,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Conviction mode always allows late entries: the whole point is to catch a
     // zone re-entry even with 1–3 min left in the window. The floors otherwise
     // stop monitoring ~min 12+ and a blocked coin could never retry late.
-    if (!S.config.allowLateEntries && !isConviction) {
+    if (!S.config.allowLateEntries && !isPriceTriggeredMode) {
       const minRem = S.config.minRemainingMinutes ?? 0;
       if (minRem > 0 && 15 * 60 - clockElapsedS < minRem * 60) {
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `min-remaining floor (<${minRem}min remaining, clock=${Math.floor(clockElapsedS)}s elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -1644,7 +1646,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Skipped when _wmBypassActive (unanimous high-confidence signals above).
     // Skipped in conviction mode: conviction is purely reactive to yesPrice; it uses
     // no WM signals, so waiting for candle accumulation only blocks early entries.
-    if (!isConviction && !_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
+    if (!isPriceTriggeredMode && !_wmBypassActive && checkWindowMonitorReadyGuard(_wmPreSig?.ready ?? false, S.config.requireMonitorReady ?? true)) {
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0,
         reason: `window monitor not ready (${minutesElapsed.toFixed(1)}m elapsed — needs ≥2m)`,
         windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -1657,7 +1659,7 @@ export async function runBotLoopTick(): Promise<void> {
     // When requireMonitorReady=true: hard block (full-window, not per-tick defer).
     // When requireMonitorReady=false: advisory log only, entry proceeds.
     // Skipped in conviction mode: WM signals are irrelevant to price-reactive entry.
-    if (!isConviction) {
+    if (!isPriceTriggeredMode) {
       const _stayAway = applyStayAwayGateDecision(
         sym,
         getWindowBetSignal(sym),
@@ -1689,7 +1691,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Skipped in conviction mode: conviction is purely reactive to yesPrice vs
     // lockPrice — it does not use trend-stability direction. Blocking conviction
     // entries while Claude resolves defeats the purpose of a price-reactive bot.
-    if (!isConviction && isAiFeatureEnabled("crypto_stability") && !windowStabilityCache.has(sym)) {
+    if (!isPriceTriggeredMode && isAiFeatureEnabled("crypto_stability") && !windowStabilityCache.has(sym)) {
       if (clockElapsedS < STABILITY_WAIT_MAX_S) {
         evalResults.push({
           symbol: sym,
@@ -1727,7 +1729,7 @@ export async function runBotLoopTick(): Promise<void> {
     // post-decision threshold check and ensures the engine reasoning string
     // correctly reflects the raised floor. Exempt when freeRunMode.
     let _streakPenaltyPp = 0;
-    if (!S.config.freeRunMode && !isConviction) {
+    if (!S.config.freeRunMode && !isPriceTriggeredMode) {
       const _seEntry = activeCoinStreakState().get(sym);
       const _seConLosses = _seEntry?.consecutiveLosses ?? 0;
       const _sePen1 = S.config.coinStreakPenalty1LossPp ?? 6;
@@ -1750,7 +1752,7 @@ export async function runBotLoopTick(): Promise<void> {
 
     // Conviction diagnostic: log once per 60 s per coin (or every BET action)
     // so we always have at least one visible INFO entry showing what Phase 3 sees.
-    if (isConviction) {
+    if (isPriceTriggeredMode) {
       const cvCachedDiag = getKalshiCachedData(sym);
       const _diagKey = `${sym}:${windowKey}`;
       const _diagNow = Date.now();
@@ -1873,7 +1875,7 @@ export async function runBotLoopTick(): Promise<void> {
         && windowKey <= _streakEntry.pauseUntilWindowKey;
       // freeRunMode bypasses streak pauses so "Reset all" + "Free Run" give
       // immediate unrestricted access to all coins.
-      if (_isStreakPaused && !S.config.freeRunMode && !isConviction) {
+      if (_isStreakPaused && !S.config.freeRunMode && !isPriceTriggeredMode) {
         if (decision.action !== "SKIP") {
           const _shadowDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
           void recordShadowBet(
@@ -1915,7 +1917,7 @@ export async function runBotLoopTick(): Promise<void> {
     // bet. checkAllParoles() clears pausedCoins early when shadow accuracy
     // reaches ≥60% over ≥3 evaluated bets (blockedBy="auto_tune_pause").
     // freeRunMode bypasses this gate so the user can un-pause all coins instantly.
-    if (!S.config.freeRunMode && !isConviction && pausedCoins.has(sym)) {
+    if (!S.config.freeRunMode && !isPriceTriggeredMode && pausedCoins.has(sym)) {
       const remaining = pausedCoins.get(sym) ?? 0;
       if (decision.action !== "SKIP") {
         const _pauseDir: "yes" | "no" = decision.action === "BET_YES" ? "yes" : "no";
@@ -2010,7 +2012,7 @@ export async function runBotLoopTick(): Promise<void> {
       // This prevents single-model bets like XRP (stat=null, claude=null, ML only).
       // Skipped in conviction mode: direction is purely yesPrice vs lockPrice;
       // model signal availability is irrelevant to whether entry should fire.
-      if (!isConviction) {
+      if (!isPriceTriggeredMode) {
         const hardSigs = decision.signals as {
           statAbove?: boolean | null;
           claudeAbove?: boolean | null;
