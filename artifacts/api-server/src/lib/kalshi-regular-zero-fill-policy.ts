@@ -1,11 +1,9 @@
 export const REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS = 30_000;
-export const CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS = 30_000;
+// Restore the proven guarded cadence: conviction may retry, but never faster
+// than the roughly five-second lifecycle that was stable before rapid retries.
+export const CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS = 5_000;
 export const REGULAR_MAX_ZERO_FILL_ATTEMPTS = 2;
-// Conviction is a fast-moving price-band strategy. A confirmed zero fill ends
-// the symbol's entry attempt for that window: retrying later can act on a
-// materially different book even when the original poller signal still looks
-// in-range.
-export const CONVICTION_MAX_ZERO_FILL_ATTEMPTS = 1;
+export const CONVICTION_MAX_ZERO_FILL_ATTEMPTS = 10;
 
 export function regularZeroFillRetryCooldownMs(decisionMode: string): number {
   return decisionMode === "conviction"
@@ -33,4 +31,12 @@ export function regularZeroFillRetryRemainingMs(
 ): number {
   if (!Number.isFinite(retryAfter) || !Number.isFinite(now)) return 0;
   return Math.max(0, Math.ceil(retryAfter! - now));
+}
+
+export function hasNewAuthenticatedBookVersion(
+  previousVersion: string | null | undefined,
+  candidateVersion: string | null | undefined,
+): boolean {
+  if (!candidateVersion) return false;
+  return !previousVersion || candidateVersion !== previousVersion;
 }

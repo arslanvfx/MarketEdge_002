@@ -255,6 +255,8 @@ export const windowZeroFillAttempts = new Map<string, number>();
 // retry timestamp after an authoritative IOC zero fill. The durable intent
 // claim independently enforces the same boundary across restarts/processes.
 export const windowZeroFillRetryAfter = new Map<string, number>();
+/** Authenticated book version used by the most recent conviction zero fill. */
+export const windowZeroFillBookVersions = new Map<string, string>();
 // Per-window randomizer de-duplication: tracks which dollar amounts the
 // randomizer has already picked for each coin in the current window.
 // Key = sym, value = Set of dollar amounts already used.

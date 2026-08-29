@@ -87,7 +87,7 @@ import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
-  windowZeroFillRetryAfter,
+  windowZeroFillRetryAfter, windowZeroFillBookVersions,
   windowRandomizerUsedValues,
   convictionFiredThisWindow, coinConvictionWinRates, coinStabilityCache, coinTrajectoryCache,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, convictionDirectionGuardBlockedMap,
@@ -114,6 +114,7 @@ import {
   regularZeroFillMaxAttempts,
   regularZeroFillRetryKey,
   regularZeroFillRetryRemainingMs,
+  hasNewAuthenticatedBookVersion,
 } from "./kalshi-regular-zero-fill-policy";
 import { closePosition, persistBetRecord, BetRecordArgs } from "./kalshi-bot-close";
 import { captureSmartExitRegularEntry } from "./kalshi-smart-exit-service";
@@ -2768,6 +2769,23 @@ async function _runBotTick(
       return;
     }
     if (authenticatedBookQuote) {
+      const priorZeroFillBookVersion = windowZeroFillBookVersions.get(
+        regularZeroFillRetryKey(entryMode, sym, windowKey),
+      );
+      if (
+        authorizationDecisionMode === "conviction"
+        && !hasNewAuthenticatedBookVersion(
+          priorZeroFillBookVersion,
+          authenticatedBookQuote.bookVersion,
+        )
+      ) {
+        const reason = "conviction retry requires a newer authenticated book update after the zero fill";
+        releaseConvictionEntryReservation(reason);
+        setTickAbortReason(sym, windowKey, `gateway abort: ${reason}`);
+        regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);
+        markPlacementTerminal("definite_error", reason);
+        return;
+      }
       logger.info(
         {
           sym,
@@ -2855,6 +2873,7 @@ async function _runBotTick(
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
         maxTotalExposure: S.config.maxTotalExposure,
         zeroFillRetryCooldownMs,
+        maxZeroFillAttempts: regularZeroFillMaxAttempts(authorizationDecisionMode),
         authorizationDecisionMode,
         authorizationConvictionFloor: authorizationConvictionZone?.lockPrice ?? null,
         authorizationConvictionCap: authorizationConvictionZone?.lockPriceCap ?? null,
@@ -2866,11 +2885,9 @@ async function _runBotTick(
             Date.now() + zeroFillRetryCooldownMs,
           );
         }
-        if (claim.reason === "authoritative_zero_fill_terminal") {
-          // Preserve the in-memory conviction reservation as a fast path. The
-          // durable zero-fill row remains authoritative across process restarts.
+        if (claim.reason === "authoritative_zero_fill_attempt_cap") {
           windowFailedFills.add(`${sym}:${windowKey}:${entryMode}`);
-          setTickAbortReason(sym, windowKey, "confirmed conviction zero fill — no retry allowed this window");
+          setTickAbortReason(sym, windowKey, "confirmed zero-fill attempt cap reached — blocked for rest of window");
           regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
           markPlacementTerminal("intent_denied", claim.reason);
           return;
@@ -3025,9 +3042,8 @@ async function _runBotTick(
         regularPlacementFunnel.fill(ensurePlacementCandidate(), 0, exchangeResponseAt);
         markPlacementTerminal("zero_fill", "entry order returned zero fills");
         // IOC returned 0 fills — no resting contracts at our exact price.
-        // Conviction gets one attempt only. Retrying a fast-moving band entry
-        // can act on a materially different book after the original quote has
-        // disappeared. Other modes retain their bounded retry policy.
+        // Conviction retries use the proven five-second cadence and must observe
+        // a newer authenticated book version before another submission.
         // Capture the original order ownership before releasing anything. This
         // synchronous timestamp closes the gap where another poller dispatch
         // could re-enter before the durable zero-fill update completes.
@@ -3036,14 +3052,17 @@ async function _runBotTick(
           retryKey,
           Date.now() + zeroFillRetryCooldownMs,
         );
+        if (authorizationDecisionMode === "conviction" && authenticatedBookQuote) {
+          windowZeroFillBookVersions.set(retryKey, authenticatedBookQuote.bookVersion);
+        }
         // Preserve the established key format consumed by the window-level
         // failed-fill guards and attempt counter.
         const attemptKey = `${sym}:${windowKey}:${entryMode}`;
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
-        // A confirmed conviction zero fill ends this symbol/window. Unknown
-        // outcomes remain durably locked by the intent table in every mode.
+        // Unknown outcomes remain durably locked. Confirmed zero fills may
+        // retry only within this bounded policy.
         const MAX_ZERO_FILL_ATTEMPTS = regularZeroFillMaxAttempts(S.config.decisionMode);
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(

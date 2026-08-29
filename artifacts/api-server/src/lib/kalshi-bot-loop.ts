@@ -50,6 +50,7 @@ import {
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   windowZeroFillRetryAfter,
+  windowZeroFillBookVersions,
   convictionFiredThisWindow, convictionBoostWindowCoins, coinConvictionWinRates, getBotDecisionMode, convictionDirectionGuardBlockedMap,
   convictionAbortCooldown, CONVICTION_ABORT_COOLDOWN_MS, windowRandomizerUsedValues,
   convictionAbortCooldownMs, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS, setConvictionZoneEntryCallback, convictionObCache,
@@ -594,6 +595,7 @@ export async function runBotLoopTick(): Promise<void> {
     windowFailedFills.clear();
     windowZeroFillAttempts.clear();
     windowZeroFillRetryAfter.clear();
+    windowZeroFillBookVersions.clear();
     windowRandomizerUsedValues.clear();
     convictionFiredThisWindow.clear();
     convictionAbortCooldown.clear();

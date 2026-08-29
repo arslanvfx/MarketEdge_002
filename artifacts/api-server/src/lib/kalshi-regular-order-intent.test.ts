@@ -249,23 +249,27 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     assert.equal((await mod.claimRegularOrderIntent(fastKey("cid-z3"))).claimed, true);
   });
 
-  it("conviction zero_fill permanently blocks another claim in the same window", async () => {
-    const wk = "DBTEST-Z-CONVICTION";
-    const convictionKey = (clientOrderId: string) => ({
+  it("confirmed zero fills enforce a durable per-window attempt ceiling", async () => {
+    const wk = "DBTEST-Z-CAP";
+    const cappedKey = (clientOrderId: string) => ({
       ...key(clientOrderId, wk),
       zeroFillRetryCooldownMs: 1,
+      maxZeroFillAttempts: 3,
       authorizationDecisionMode: "conviction",
     });
-    assert.equal((await mod.claimRegularOrderIntent(convictionKey("cid-zc1"))).claimed, true);
-    await mod.resolveRegularOrderIntent({
-      clientOrderId: "cid-zc1",
-      status: "zero_fill",
-      filledCount: 0,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const clientOrderId = `cid-zcap-${attempt}`;
+      assert.equal((await mod.claimRegularOrderIntent(cappedKey(clientOrderId))).claimed, true);
+      await mod.resolveRegularOrderIntent({
+        clientOrderId,
+        status: "zero_fill",
+        filledCount: 0,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     assert.deepEqual(
-      await mod.claimRegularOrderIntent(convictionKey("cid-zc2")),
-      { claimed: false, reason: "authoritative_zero_fill_terminal" },
+      await mod.claimRegularOrderIntent(cappedKey("cid-zcap-4")),
+      { claimed: false, reason: "authoritative_zero_fill_attempt_cap" },
     );
   });
 

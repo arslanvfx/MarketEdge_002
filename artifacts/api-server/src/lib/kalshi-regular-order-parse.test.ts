@@ -515,8 +515,9 @@ test("regular intent migrations declare claim-predicate indexes", async () => {
   );
   assert.match(claim, /migration is not ready; refusing live claim/);
   assert.doesNotMatch(claim, /await ensureMigrated\(\)/);
-  assert.match(claim, /authorization_decision_mode = 'conviction'/);
-  assert.match(claim, /authoritative_zero_fill_terminal/);
+  assert.match(claim, /authoritative_zero_fill_cooldown/);
+  assert.match(claim, /authoritative_zero_fill_attempt_cap/);
+  assert.match(claim, /maxZeroFillAttempts/);
 });
 
 test("conviction hot path consumes only prepared orderbook and reaches durable claim without candidate I/O", async () => {

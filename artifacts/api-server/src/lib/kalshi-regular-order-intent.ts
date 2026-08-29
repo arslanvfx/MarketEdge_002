@@ -51,6 +51,8 @@ export interface RegularOrderIntentKey {
   /** Cooldown after an authoritative zero fill. Unresolved outcomes ignore this
    * value and remain blocking until reconciliation. */
   zeroFillRetryCooldownMs?: number;
+  /** Durable ceiling for confirmed zero-fill submissions per symbol/window. */
+  maxZeroFillAttempts?: number;
   authorizationDecisionMode?: string;
   authorizationConvictionFloor?: number | null;
   authorizationConvictionCap?: number | null;
@@ -250,6 +252,7 @@ function claimBatchGroupKey(key: RegularOrderIntentKey): string {
     key.maxOrdersPerWindow ?? "",
     key.maxTotalExposure ?? "",
     key.zeroFillRetryCooldownMs ?? REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+    key.maxZeroFillAttempts ?? "",
     key.authorizationDecisionMode ?? "",
   ].join("\u0000");
 }
@@ -277,6 +280,10 @@ async function claimRegularOrderIntentBatch(
     Number.isFinite(first.zeroFillRetryCooldownMs) && (first.zeroFillRetryCooldownMs ?? 0) >= 1
       ? Math.floor(first.zeroFillRetryCooldownMs!)
       : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS;
+  const maxZeroFillAttempts =
+    Number.isInteger(first.maxZeroFillAttempts) && (first.maxZeroFillAttempts ?? 0) > 0
+      ? first.maxZeroFillAttempts!
+      : null;
 
   const claimStartedAt = Date.now();
   const client = await criticalIntentPool.connect();
@@ -324,43 +331,38 @@ async function claimRegularOrderIntentBatch(
       status: string;
       reserved_cost: string | number | null;
       resolved_at: Date | string | null;
-      authorization_decision_mode: string | null;
+      zero_fill_in_cooldown: boolean;
     }>(
       `SELECT symbol, window_key, status, reserved_cost, resolved_at,
-              authorization_decision_mode
+              (
+                status = 'zero_fill'
+                AND resolved_at > NOW() - ($3::double precision * INTERVAL '1 millisecond')
+              ) AS zero_fill_in_cooldown
          FROM kalshi_regular_order_intents
         WHERE mode = $1
           AND (
             status IN ('reserved','unknown')
             OR (window_key = $2 AND status = 'filled')
-            OR (
-              window_key = $2
-              AND status = 'zero_fill'
-               AND (
-                 authorization_decision_mode = 'conviction'
-                 OR $4::text = 'conviction'
-                 OR resolved_at > NOW() - ($3::double precision * INTERVAL '1 millisecond')
-               )
-            )
+            OR (window_key = $2 AND status = 'zero_fill')
           )`,
-      [first.mode, first.windowKey, zeroFillRetryCooldownMs, first.authorizationDecisionMode ?? null],
+      [first.mode, first.windowKey, zeroFillRetryCooldownMs],
     );
-    const blockedSymbols = new Set(facts.rows.map((row) => row.symbol.toUpperCase()));
+    const blockedSymbols = new Set(
+      facts.rows
+        .filter((row) => row.status !== "zero_fill" || row.zero_fill_in_cooldown)
+        .map((row) => row.symbol.toUpperCase()),
+    );
     const cooldownSymbols = new Set(
       facts.rows
-        .filter((row) => row.status === "zero_fill" && row.authorization_decision_mode !== "conviction")
+        .filter((row) => row.status === "zero_fill" && row.zero_fill_in_cooldown)
         .map((row) => row.symbol.toUpperCase()),
     );
-    const terminalZeroFillSymbols = new Set(
-      facts.rows
-        .filter((row) =>
-          row.status === "zero_fill"
-          && (
-            row.authorization_decision_mode === "conviction"
-            || first.authorizationDecisionMode === "conviction"
-          ))
-        .map((row) => row.symbol.toUpperCase()),
-    );
+    const zeroFillCounts = new Map<string, number>();
+    for (const row of facts.rows) {
+      if (row.status !== "zero_fill") continue;
+      const symbol = row.symbol.toUpperCase();
+      zeroFillCounts.set(symbol, (zeroFillCounts.get(symbol) ?? 0) + 1);
+    }
     const economicallyActive = facts.rows.filter((row) => row.status !== "zero_fill");
     let activeCount = economicallyActive.filter((row) => row.window_key === first.windowKey).length;
     let activeCost = economicallyActive.reduce((sum, row) => sum + (Number(row.reserved_cost) || 0), 0);
@@ -372,14 +374,19 @@ async function claimRegularOrderIntentBatch(
         Number.isFinite(key.requestedCost) && (key.requestedCost ?? 0) > 0
           ? key.requestedCost!
           : null;
+      if (maxZeroFillAttempts != null && (zeroFillCounts.get(symbol) ?? 0) >= maxZeroFillAttempts) {
+        results.set(key.clientOrderId, {
+          claimed: false,
+          reason: "authoritative_zero_fill_attempt_cap",
+        });
+        continue;
+      }
       if (blockedSymbols.has(symbol)) {
         results.set(key.clientOrderId, {
           claimed: false,
-          reason: terminalZeroFillSymbols.has(symbol)
-            ? "authoritative_zero_fill_terminal"
-            : cooldownSymbols.has(symbol)
-              ? "authoritative_zero_fill_cooldown"
-              : "unresolved_intent_exists",
+          reason: cooldownSymbols.has(symbol)
+            ? "authoritative_zero_fill_cooldown"
+            : "unresolved_intent_exists",
         });
         continue;
       }
