@@ -20,7 +20,7 @@ function winRateTier(wr: number | null, totalBets: number): "good" | "ok" | "bad
  *   - Otherwise fall back to silencedUtcHours (flat).
  * Same logic for reduced bets.
  */
-function hourMode(h: number, v2: QuietHoursV2, dow: number): "silenced" | "reduced" | "active" {
+export function getQuietHoursHourMode(h: number, v2: QuietHoursV2, dow: number): "silenced" | "reduced" | "active" {
   const dowStr = String(dow);
 
   // ── Silence check ──
@@ -520,7 +520,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   // so once we write a DOW entry the flat list is no longer used for this day.
   function toggleSilence(h: number) {
     const dowStr = String(selectedDow);
-    const visual = hourMode(h, value, selectedDow);
+    const visual = getQuietHoursHourMode(h, value, selectedDow);
 
     const currentDow = value.silencedByDow?.[dowStr] ?? [];
 
@@ -733,7 +733,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
                   <HourCell
                     key={h}
                     utcHour={h}
-                    mode={hourMode(h, value, selectedDow)}
+                    mode={getQuietHoursHourMode(h, value, selectedDow)}
                     winRatePct={stat?.winRatePct ?? null}
                     totalBets={stat?.totalBets ?? 0}
                     wins={stat?.wins ?? 0}

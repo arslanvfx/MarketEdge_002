@@ -21,6 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const headerSource   = readFileSync(join(here, "bot-header.tsx"), "utf8");
 const condSource     = readFileSync(join(here, "conditions-panel.tsx"), "utf8");
 const typesSource    = readFileSync(join(here, "types.ts"), "utf8");
+const perSymbolSource = readFileSync(join(here, "per-symbol-quiet-hours-panel.tsx"), "utf8");
 
 // ---------------------------------------------------------------------------
 // bot-header.tsx
@@ -158,5 +159,18 @@ describe("types.ts Smart Hours clarity fields", () => {
   it("SymbolSmartHoursMode includes no-schedule variant", () => {
     assert.match(typesSource, /"no-schedule"/,
       "SymbolSmartHoursMode must include the 'no-schedule' variant");
+  });
+});
+
+describe("per-market Smart Hours tabs", () => {
+  it("color codes active, silenced, and reduced market tabs", () => {
+    assert.match(perSymbolSource, /border-emerald-500/);
+    assert.match(perSymbolSource, /border-red-500/);
+    assert.match(perSymbolSource, /border-amber-400/);
+    assert.match(perSymbolSource, /data-smart-hours-mode=\{mode\}/);
+  });
+
+  it("prefers canonical server-resolved market modes", () => {
+    assert.match(perSymbolSource, /symbolSmartHoursModes\?\.\[symbol\]/);
   });
 });

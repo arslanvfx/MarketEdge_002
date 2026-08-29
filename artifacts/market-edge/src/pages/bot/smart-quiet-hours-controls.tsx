@@ -150,6 +150,7 @@ export function SmartQuietHoursControls({
             onImmediateSaveError={onImmediateSaveError}
             dgCap={merged.dataGatheringBetCap ?? 1}
             dgEnabled={merged.dataGatheringEnabled ?? true}
+            symbolSmartHoursModes={status?.symbolSmartHoursModes}
           />
         </>
       )}

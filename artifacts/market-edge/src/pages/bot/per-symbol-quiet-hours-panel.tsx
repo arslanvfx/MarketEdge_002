@@ -1,7 +1,7 @@
 import React from "react";
 import { Activity, DollarSign, RefreshCw, Zap } from "lucide-react";
-import type { QuietHoursV2 } from "./types";
-import { QuietHoursGrid } from "./quiet-hours-grid";
+import type { QuietHoursV2, SymbolSmartHoursMode } from "./types";
+import { getQuietHoursHourMode, QuietHoursGrid } from "./quiet-hours-grid";
 import { REGULAR_BOT_SYMBOLS } from "./regular-symbols";
 
 // Kept alongside the per-symbol panel so any client-side status additions use
@@ -43,11 +43,13 @@ export interface PerSymbolQuietHoursPanelProps {
   authPost: (path: string, body: object) => Promise<unknown>;
   dgCap?: number;
   dgEnabled?: boolean;
+  symbolSmartHoursModes?: Record<string, SymbolSmartHoursMode>;
 }
 
 export function PerSymbolQuietHoursPanel({
   perSymbolQuietHours, masterEnabled, onChange, onCalibrationApplied, onImmediateSaveError, authPost,
   dgCap: dgCapProp = 1, dgEnabled: dgEnabledProp = true,
+  symbolSmartHoursModes,
 }: PerSymbolQuietHoursPanelProps) {
   const [selectedSymbol, setSelectedSymbol] = React.useState<string>(REGULAR_BOT_SYMBOLS[0]);
   const [calibrating, setCalibrating] = React.useState(false);
@@ -87,6 +89,27 @@ export function PerSymbolQuietHoursPanel({
     }
   };
   const schedule = perSymbolQuietHours[selectedSymbol] ?? { enabled: true, silencedUtcHours: [], reducedBetUtcHours: {} };
+  const now = new Date();
+  const currentUtcHour = now.getUTCHours();
+  const currentEtDow = getEtDowClient(now);
+  const tabMode = (symbol: string): "active" | "silenced" | "reduced" => {
+    if (!masterEnabled) return "active";
+    const serverMode = symbolSmartHoursModes?.[symbol];
+    if (serverMode === "silenced" || serverMode === "reduced" || serverMode === "active") {
+      return serverMode;
+    }
+    const symbolSchedule = perSymbolQuietHours[symbol];
+    if (!symbolSchedule?.enabled) return "active";
+    return getQuietHoursHourMode(currentUtcHour, symbolSchedule, currentEtDow);
+  };
+  const tabStyle = (mode: "active" | "silenced" | "reduced", selected: boolean): string => {
+    const stateStyle = mode === "silenced"
+      ? "border-red-500/60 bg-red-500/15 text-red-300 hover:bg-red-500/25"
+      : mode === "reduced"
+        ? "border-amber-400/60 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
+        : "border-emerald-500/60 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25";
+    return `${stateStyle} ${selected ? "ring-2 ring-white/45 ring-offset-1 ring-offset-background shadow-sm" : ""}`;
+  };
 
   return <div className="flex min-w-0 flex-col gap-3">
     <div className="flex flex-col gap-1.5">
@@ -108,7 +131,24 @@ export function PerSymbolQuietHoursPanel({
       </div>
     </div>
     <div className="flex flex-wrap items-center gap-1.5">
-      {REGULAR_BOT_SYMBOLS.map(symbol => <button type="button" key={symbol} onClick={() => setSelectedSymbol(symbol)} className={`rounded-md border px-2.5 py-1 text-xs ${selectedSymbol === symbol ? "border-primary/50 bg-primary/15 text-primary" : "border-border bg-secondary/50 text-muted-foreground"}`}>{symbol}</button>)}
+      {REGULAR_BOT_SYMBOLS.map(symbol => {
+        const mode = tabMode(symbol);
+        const label = mode === "silenced" ? "Off" : mode === "reduced" ? "Restricted" : "On";
+        return (
+          <button
+            type="button"
+            key={symbol}
+            onClick={() => setSelectedSymbol(symbol)}
+            className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${tabStyle(mode, selectedSymbol === symbol)}`}
+            title={`${symbol}: Smart Hours ${label}`}
+            aria-label={`${symbol}: Smart Hours ${label}`}
+            data-smart-hours-mode={mode}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${mode === "silenced" ? "bg-red-400" : mode === "reduced" ? "bg-amber-300" : "bg-emerald-400"}`} />
+            {symbol}
+          </button>
+        );
+      })}
     </div>
     <div className="rounded-lg border border-border/50 bg-secondary/20 p-2 text-[11px] text-muted-foreground"><Activity className="mr-1 inline h-3 w-3 text-cyan-400" /> Market Status Right Now · {masterEnabled ? "Smart Hours enforcement is on" : "Smart Hours enforcement is off"}</div>
     <QuietHoursGrid key={selectedSymbol} value={schedule} onChange={value => onChange(selectedSymbol, value)} symbolFilter={selectedSymbol} dgCap={dgCap} onSave={value => { onChange(selectedSymbol, value); void post({ perSymbolQuietHours: { ...schedulesRef.current, [selectedSymbol]: value } }); }} />
