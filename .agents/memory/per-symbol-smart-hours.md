@@ -10,6 +10,7 @@ Per-market Smart Hours must recalibrate on exact UTC-hour boundaries without era
 
 **How to apply:**
 - Schedule the next exact UTC boundary rather than anchoring a fixed interval to callback time. Recalculate after every run so event-loop delays do not create permanent drift; skip overlap.
+- Treat the durable UTC-hour marker as authoritative and backstop the exact-boundary timer from an existing recurring loop. Retry stale markers at a bounded cadence; do not queue a duplicate when another calibration is already in flight.
 - Use one threshold everywhere: zero, one, or two settled bets are data-gathering; the third settled bet makes a cell eligible for win-rate calibration.
 - Generate a safe all-hours data-gathering schedule for a market with no history; never skip the market merely because its history is sparse.
 - Calibration owns only the computed silence/data-gathering classification and timestamp. Preserve enablement, percentage reductions, dollar overrides, and auto-tune preferences from the freshest config.

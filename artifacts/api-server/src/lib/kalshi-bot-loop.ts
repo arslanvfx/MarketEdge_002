@@ -82,8 +82,12 @@ import {
 import {
   _persistModeToConfig, updateBotConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadWindowBetCountsFromDB, loadRegimeCache,
-  loadBorderProximityCache, getTimingAccuracy,
+  loadBorderProximityCache, getTimingAccuracy, runSmartHoursCalibration,
 } from "./kalshi-bot-db";
+import {
+  shouldAttemptSmartHoursLoopRecovery,
+  utcHourMarker,
+} from "./kalshi-quiet-hours-scheduler";
 
 // ---------------------------------------------------------------------------
 // Conviction zone-entry dispatch — poller shortcut
@@ -266,6 +270,54 @@ let _lastWinRateRefreshAt = 0;
 // promptly and long enough not to stress the DB.
 let _lastShadowEvalAt = 0;
 let _lastReEvalAt = 0;
+let _lastSmartHoursRecoveryAttemptAt = 0;
+const SMART_HOURS_RECOVERY_RETRY_MS = 5 * 60_000;
+
+function recoverMissedSmartHoursHourlyCalibration(nowMs: number): void {
+  if (!shouldAttemptSmartHoursLoopRecovery(
+    S.config.smartHoursCalibratedUtcHour,
+    _lastSmartHoursRecoveryAttemptAt,
+    nowMs,
+    SMART_HOURS_RECOVERY_RETRY_MS,
+  )) return;
+
+  _lastSmartHoursRecoveryAttemptAt = nowMs;
+  const marker = utcHourMarker(nowMs);
+  logger.info(
+    { marker, storedMarker: S.config.smartHoursCalibratedUtcHour ?? null },
+    "[qh-per-symbol] bot-loop recovery: current UTC hour not calibrated — running once",
+  );
+
+  // Do not queue behind an exact-hour/manual run. If one is already active,
+  // its successful completion will stamp the marker; otherwise this bounded
+  // recovery check retries later.
+  void runSmartHoursCalibration({ nowMs, queueIfBusy: false })
+    .then((result) => {
+      if (result.skipped) {
+        logger.info(
+          { marker },
+          "[qh-per-symbol] bot-loop recovery skipped — calibration already in flight",
+        );
+        return;
+      }
+      logger.info(
+        {
+          marker,
+          calibratedSymbols: result.calibratedSymbols,
+          skippedSymbols: result.skippedSymbols,
+          complete: result.calibratedSymbols.length > 0 && result.skippedSymbols.length === 0,
+        },
+        "[qh-per-symbol] bot-loop recovery calibration complete",
+      );
+    })
+    .catch((err) => {
+      logger.warn(
+        { err, marker },
+        "[qh-per-symbol] bot-loop recovery calibration failed — retry remains eligible",
+      );
+    });
+}
+
 async function refreshConvictionWinRates(): Promise<void> {
   const now = Date.now();
   if (now - _lastWinRateRefreshAt < 60 * 60 * 1000) return; // at most once per hour
@@ -499,6 +551,11 @@ export async function runBotLoopTick(): Promise<void> {
   }
   tickInFlight = true;
   try {
+  // Durable backstop for a delayed/lost exact-hour timer. This is intentionally
+  // non-blocking so calibration cannot delay trading; the shared calibration
+  // operation serializes it against manual, startup, and exact-hour callers.
+  recoverMissedSmartHoursHourlyCalibration(Date.now());
+
   // Evaluate any closed bets that haven't been stamped with outcome yet.
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.
   evalClosedBets().catch(() => {});

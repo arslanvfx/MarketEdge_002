@@ -24,6 +24,24 @@ export function shouldRunSmartHoursCatchUp(
   return storedMarker !== utcHourMarker(nowMs);
 }
 
+/**
+ * Recovery decision used by the recurring bot loop when the exact-boundary
+ * timer did not complete. The durable UTC-hour marker is authoritative; the
+ * local attempt timestamp only prevents a failing database from being retried
+ * on every fast bot tick.
+ */
+export function shouldAttemptSmartHoursLoopRecovery(
+  storedMarker: string | undefined,
+  lastAttemptAtMs: number,
+  nowMs: number = Date.now(),
+  retryIntervalMs: number = 5 * 60_000,
+): boolean {
+  if (storedMarker === utcHourMarker(nowMs)) return false;
+  if (!Number.isFinite(lastAttemptAtMs) || lastAttemptAtMs <= 0) return true;
+  const elapsedMs = nowMs - lastAttemptAtMs;
+  return elapsedMs < 0 || elapsedMs >= retryIntervalMs;
+}
+
 export function millisecondsUntilNextUtcHour(nowMs: number = Date.now()): number {
   const remainder = ((nowMs % UTC_HOUR_MS) + UTC_HOUR_MS) % UTC_HOUR_MS;
   return remainder === 0 ? UTC_HOUR_MS : UTC_HOUR_MS - remainder;

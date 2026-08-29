@@ -8,6 +8,7 @@ import {
   scheduleAtTopOfEveryUtcHour,
   utcHourMarker,
   shouldRunSmartHoursCatchUp,
+  shouldAttemptSmartHoursLoopRecovery,
 } from "./kalshi-quiet-hours-scheduler.ts";
 
 test("Smart Hours UTC marker is stable within an hour and changes at the boundary", () => {
@@ -40,6 +41,51 @@ test("restart catch-up keeps per-market schedules fresh regardless of selected m
   assert.equal(shouldRunSmartHoursCatchUp(undefined, undefined, now), true);
   assert.equal(shouldRunSmartHoursCatchUp("global", "2026-08-19T14", now), true);
   assert.equal(shouldRunSmartHoursCatchUp("global", "2026-08-19T15", now), false);
+});
+
+test("bot-loop recovery runs when the durable hourly marker is stale", () => {
+  const now = Date.parse("2026-08-19T15:02:00.000Z");
+  assert.equal(shouldAttemptSmartHoursLoopRecovery("2026-08-19T14", 0, now), true);
+  assert.equal(shouldAttemptSmartHoursLoopRecovery(undefined, 0, now), true);
+});
+
+test("bot-loop recovery does not duplicate a completed current-hour run", () => {
+  const now = Date.parse("2026-08-19T15:20:00.000Z");
+  assert.equal(
+    shouldAttemptSmartHoursLoopRecovery("2026-08-19T15", 0, now),
+    false,
+  );
+});
+
+test("bot-loop recovery applies a bounded retry interval after an attempt", () => {
+  const attemptedAt = Date.parse("2026-08-19T15:01:00.000Z");
+  assert.equal(
+    shouldAttemptSmartHoursLoopRecovery(
+      "2026-08-19T14",
+      attemptedAt,
+      Date.parse("2026-08-19T15:05:59.999Z"),
+    ),
+    false,
+  );
+  assert.equal(
+    shouldAttemptSmartHoursLoopRecovery(
+      "2026-08-19T14",
+      attemptedAt,
+      Date.parse("2026-08-19T15:06:00.000Z"),
+    ),
+    true,
+  );
+});
+
+test("bot-loop recovery retries after clock rollback instead of remaining stuck", () => {
+  assert.equal(
+    shouldAttemptSmartHoursLoopRecovery(
+      "2026-08-19T14",
+      Date.parse("2026-08-19T16:00:00.000Z"),
+      Date.parse("2026-08-19T15:10:00.000Z"),
+    ),
+    true,
+  );
 });
 
 test("hourly Smart Hours scheduler waits for the next exact UTC hour", () => {
