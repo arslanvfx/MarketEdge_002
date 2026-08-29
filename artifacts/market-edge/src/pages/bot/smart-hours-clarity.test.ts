@@ -186,4 +186,9 @@ describe("per-market Smart Hours tabs", () => {
     assert.match(controlsSource, /authPost\("\/crypto\/bot\/config", \{ quietHoursV2 \}\)/);
     assert.match(controlsSource, /autoTuneThreshold: threshold/);
   });
+
+  it("offers half-point calibration thresholds from 90% down through 40%", () => {
+    assert.match(perSymbolSource, /Array\.from\(\{ length: 101 \}/);
+    assert.match(perSymbolSource, /90 - i \* \.5/);
+  });
 });

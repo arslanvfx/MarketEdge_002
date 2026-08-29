@@ -1145,7 +1145,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       ...(parseReducedByDow(v2.reducedByDow) != null ? { reducedByDow: parseReducedByDow(v2.reducedByDow) } : {}),
       ...(typeof v2.autoTuneEnabled === "boolean" ? { autoTuneEnabled: v2.autoTuneEnabled } : {}),
       ...(typeof v2.autoTuneDays === "number" && v2.autoTuneDays >= 1 && v2.autoTuneDays <= 90 ? { autoTuneDays: v2.autoTuneDays } : {}),
-      ...(typeof v2.autoTuneThreshold === "number" && v2.autoTuneThreshold >= 50 && v2.autoTuneThreshold <= 100 ? { autoTuneThreshold: v2.autoTuneThreshold } : {}),
+      ...(typeof v2.autoTuneThreshold === "number" && v2.autoTuneThreshold >= 40 && v2.autoTuneThreshold <= 100 ? { autoTuneThreshold: v2.autoTuneThreshold } : {}),
       ...(typeof v2.autoTuneIntervalHours === "number" && [1,2,4,6,12].includes(v2.autoTuneIntervalHours) ? { autoTuneIntervalHours: v2.autoTuneIntervalHours } : {}),
     };
   }
@@ -1816,7 +1816,7 @@ router.post("/crypto/bot/quiet-hours-calibrate-all", requireAuth, async (req, re
     // Accept optional threshold from the client (matches the grid's Silence threshold UI).
     // Defaults to 84.5 on the server when not provided.
     const rawThreshold = (req.body as Record<string, unknown>)?.threshold;
-    const thresholdOverride = typeof rawThreshold === "number" && rawThreshold > 0 && rawThreshold <= 100
+    const thresholdOverride = typeof rawThreshold === "number" && rawThreshold >= 40 && rawThreshold <= 100
       ? rawThreshold : undefined;
     // Route the manual button through the shared Smart Hours operation. Unlike
     // background recalibration, this explicit "Apply" action also enables the

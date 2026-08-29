@@ -33,6 +33,7 @@ import { CRYPTO_COINS, KALSHI_SERIES } from "./market-defs.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const botDbSource = readFileSync(join(here, "kalshi-bot-db.ts"), "utf8");
+const routeSource = readFileSync(join(here, "../routes/kalshi-bot.ts"), "utf8");
 
 test("manual Smart Hours threshold is persisted for subsequent hourly calibrations", () => {
   assert.match(
@@ -45,6 +46,11 @@ test("manual Smart Hours threshold is persisted for subsequent hourly calibratio
     /thresholdOverride \?\? qhv2\?\.autoTuneThreshold \?\? 84\.5/,
     "hourly calibration must reuse the saved threshold when no override is supplied",
   );
+});
+
+test("Smart Hours accepts persisted and manual calibration thresholds down to 40%", () => {
+  assert.match(routeSource, /v2\.autoTuneThreshold >= 40/);
+  assert.match(routeSource, /rawThreshold >= 40/);
 });
 
 // ---------------------------------------------------------------------------

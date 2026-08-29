@@ -129,7 +129,7 @@ export function PerSymbolQuietHoursPanel({
             }}
             disabled={calibrating}
           >
-            {Array.from({ length: 31 }, (_, i) => parseFloat((90 - i * .5).toFixed(1))).map(value => <option key={value} value={value}>{value}% win rate</option>)}
+            {Array.from({ length: 101 }, (_, i) => parseFloat((90 - i * .5).toFixed(1))).map(value => <option key={value} value={value}>{value}% win rate</option>)}
           </select>
         </label>
         <button type="button" onClick={calibrate} disabled={calibrating} className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-medium transition-all disabled:opacity-50 ${message ? messageOk ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400" : "border-red-500/50 bg-red-500/10 text-red-400" : "border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20"}`}>
