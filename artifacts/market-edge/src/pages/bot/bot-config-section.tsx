@@ -249,7 +249,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </span>
                 </label>
 
-                {!isConviction && (<>
+                {!isPriceTriggeredMode && (<>
                 {/* Dynamic (confidence-based) sizing toggle */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Dynamic Sizing</span>
@@ -309,7 +309,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </>)}
 
                 {/* ── Stat Regime Max-Bet ───────────────────────────────── */}
-                {!isConviction && (<>
+                {!isPriceTriggeredMode && (<>
                 <div className="flex flex-col gap-2 border border-blue-500/20 rounded-lg p-3 bg-blue-500/5">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] font-medium text-blue-300 flex items-center gap-1.5">
@@ -401,7 +401,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   <span className="text-[10px] text-muted-foreground/60">Per-coin daily loss cap (0 = disabled)</span>
                 </label>
 
-                {!isConviction && (<>
+                {!isPriceTriggeredMode && (<>
                 {/* Min Account Balance */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Min Account Balance ($)</span>
@@ -502,7 +502,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     onChange={e => setConfigDraft(d => ({ ...d, dailyLossLimit: parseFloat(e.target.value) }))} />
                 </label>
 
-                {!isConviction && (<>
+                {!isPriceTriggeredMode && (<>
 
                 {/* Min Signals */}
                 <label className="flex flex-col gap-1.5">
@@ -1400,7 +1400,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   })()}
                 </div>
 
-                {!isConviction && (<>
+                {!isPriceTriggeredMode && (<>
                 {/* Profit Lock */}
                 <div className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Profit Lock</span>
@@ -1637,7 +1637,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </span>
                 </label>
 
-                {!isConviction && (<>
+                {!isPriceTriggeredMode && (<>
                 {/* ── Entry Timing ───────────────────────────────── */}
                 <div className="flex flex-col gap-1.5">
                   <span className="text-xs font-medium text-muted-foreground">Entry Timing</span>
@@ -1758,7 +1758,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   </details>
                 </div>
 
-                {!isConviction && (<>
+                {!isPriceTriggeredMode && (<>
                 {/* Direction Cap Enable */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Directional Balance Filter</span>
