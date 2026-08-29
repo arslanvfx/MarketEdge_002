@@ -15,6 +15,8 @@ import {
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   deriveConvictionZone,
   evaluateConvictionFillZone,
+  CONVICTION_EMERGENCY_EXIT_FLOOR,
+  shouldEmergencyExitConvictionFill,
   getEffectiveConvictionZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
@@ -361,6 +363,41 @@ async function _runBotTick(
 
   const pos = openPositions.get(sym);
   if (pos) {
+    const positionSignals = pos.entryDecision.signals as Record<string, unknown> | null;
+    const outOfBandDetails =
+      positionSignals?.["convictionOutOfBandFillDetails"] as Record<string, unknown> | null | undefined;
+    const recoveredSideCost = Number(outOfBandDetails?.["sideCost"]);
+    const requiresEmergencyUnwind =
+      pos.entryMode === "live"
+      && positionSignals?.["convictionOutOfBandFill"] === true
+      && shouldEmergencyExitConvictionFill(recoveredSideCost);
+    if (pos.windowKey === windowKey && requiresEmergencyUnwind) {
+      try {
+        await closePosition(pos, yesPrice, kalshiTarget, "conviction_fill_below_emergency_floor");
+        openPositions.delete(sym);
+        logger.error(
+          {
+            sym,
+            windowKey,
+            sideCost: recoveredSideCost,
+            emergencyFloor: CONVICTION_EMERGENCY_EXIT_FLOOR,
+          },
+          "[kalshi-bot] recovered conviction fill below emergency floor — unwound",
+        );
+      } catch (closeError) {
+        logger.error(
+          {
+            err: closeError,
+            sym,
+            windowKey,
+            sideCost: recoveredSideCost,
+            emergencyFloor: CONVICTION_EMERGENCY_EXIT_FLOOR,
+          },
+          "[kalshi-bot] recovered sub-floor conviction fill unwind failed — position remains tracked",
+        );
+      }
+      return;
+    }
     // Check if the window has changed (expired)
     if (pos.windowKey !== windowKey) {
       midExitedWindows.delete(sym); // clear flip state — new window starts fresh
@@ -3124,9 +3161,10 @@ async function _runBotTick(
       // Audit the authoritative fill, not only the quote that authorized the
       // submission. A BUY limit caps the worst price but Kalshi can legally fill
       // against a cheaper resting offer that appeared after final revalidation.
-      // Record that exchange price improvement, but never auto-sell it: an
-      // opposite IOC cannot undo the fill and can convert a winner into a
-      // guaranteed spread loss. This restores the pre-2026-08-29 behavior.
+      // Record that exchange price improvement. The normal flexibility buffer
+      // holds every winning-side cost >=70¢ (including above the configured
+      // entry cap). Only the rare disaster case below 70¢ is unwound after the
+      // fill and its ownership have been durably recorded.
       if (authorizationDecisionMode === "conviction" && result.avgPrice != null && authorizationConvictionZone) {
         const { lockPrice: _lp, lockPriceCap: _lpCap } = authorizationConvictionZone;
         const fillZone = evaluateConvictionFillZone(direction, result.avgPrice, _lp, _lpCap);
@@ -3145,7 +3183,9 @@ async function _runBotTick(
               lockPrice: _lp, lockPriceCap: _lpCap,
               contractCount, ticker: expectedTicker,
             },
-            "[kalshi-bot] conviction fill outside entry band — audit recorded; position will be held",
+            shouldEmergencyExitConvictionFill(fillZone.sideCost)
+              ? "[kalshi-bot] conviction fill below 70¢ emergency floor — audit recorded; unwind required"
+              : "[kalshi-bot] conviction fill outside entry band but inside hold buffer — audit recorded; position will be held",
           );
         }
       }
@@ -3458,9 +3498,59 @@ async function _runBotTick(
   }
 
   if (entryMode === "live" && convictionOutOfBandFill != null) {
+    if (shouldEmergencyExitConvictionFill(convictionOutOfBandFill.sideCost)) {
+      try {
+        await closePosition(
+          newPosition,
+          actualFillYesPrice,
+          kalshiTarget,
+          "conviction_fill_below_emergency_floor",
+        );
+        openPositions.delete(sym);
+        setTickAbortReason(
+          sym,
+          windowKey,
+          `actual conviction fill ${(convictionOutOfBandFill.sideCost * 100).toFixed(0)}¢ was below the ${CONVICTION_EMERGENCY_EXIT_FLOOR * 100}¢ emergency floor and was unwound`,
+        );
+        logger.error(
+          {
+            sym,
+            direction,
+            windowKey,
+            emergencyFloor: CONVICTION_EMERGENCY_EXIT_FLOOR,
+            ...convictionOutOfBandFill,
+          },
+          "[kalshi-bot] sub-70¢ conviction fill unwound immediately",
+        );
+      } catch (closeError) {
+        setTickAbortReason(
+          sym,
+          windowKey,
+          "sub-70¢ conviction fill could not be unwound; position retained and re-entry blocked",
+        );
+        logger.error(
+          {
+            err: closeError,
+            sym,
+            direction,
+            windowKey,
+            emergencyFloor: CONVICTION_EMERGENCY_EXIT_FLOOR,
+            ...convictionOutOfBandFill,
+          },
+          "[kalshi-bot] sub-70¢ emergency unwind failed — position remains tracked",
+        );
+      }
+      return;
+    }
     logger.warn(
-      { sym, direction, windowKey, ...convictionOutOfBandFill },
-      "[kalshi-bot] exchange price-improved conviction fill below/away from authorization quote — holding position; no automatic unwind",
+      {
+        sym,
+        direction,
+        windowKey,
+        emergencyFloor: CONVICTION_EMERGENCY_EXIT_FLOOR,
+        ...convictionOutOfBandFill,
+      },
+      "[kalshi-bot] out-of-band conviction fill is within the 70¢+ hold buffer — holding position",
     );
   }
 

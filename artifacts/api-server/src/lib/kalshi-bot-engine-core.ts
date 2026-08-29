@@ -1968,6 +1968,23 @@ export interface ConvictionFillZoneResult {
   reason: "within_zone" | "below_floor" | "above_cap" | "invalid";
 }
 
+export const CONVICTION_EMERGENCY_EXIT_FLOOR = 0.70;
+
+/**
+ * Post-fill disaster exception only. Entry authorization still uses the
+ * configured conviction band; this threshold must never broaden that gate.
+ */
+export function shouldEmergencyExitConvictionFill(
+  sideCost: number | null | undefined,
+  emergencyFloor = CONVICTION_EMERGENCY_EXIT_FLOOR,
+): boolean {
+  return Number.isFinite(sideCost)
+    && Number.isFinite(emergencyFloor)
+    && emergencyFloor > 0
+    && sideCost! > 0
+    && sideCost! < emergencyFloor;
+}
+
 /**
  * Validate the authoritative exchange fill, not the pre-submit quote.
  * Kalshi reports average price in YES terms even for NO orders.

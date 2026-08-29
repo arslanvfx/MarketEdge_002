@@ -59,6 +59,7 @@ import {
   PROXIMITY_GLOBAL_MAX_PCT,
   deriveConvictionZone,
   evaluateConvictionFillZone,
+  shouldEmergencyExitConvictionFill,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
   getEffectiveConvictionZone,
@@ -366,6 +367,17 @@ test("authoritative conviction fills must remain inside the winning-side cost ba
     evaluateConvictionFillZone("no", 0.59, 0.79, 0.87),
     { allowed: false, sideCost: 0.41000000000000003, reason: "below_floor" },
   );
+});
+
+test("conviction post-fill disaster exception unwinds only below 70 cents", () => {
+  assert.equal(shouldEmergencyExitConvictionFill(0.69), true);
+  assert.equal(shouldEmergencyExitConvictionFill(0.6999), true);
+  assert.equal(shouldEmergencyExitConvictionFill(0.70), false);
+  assert.equal(shouldEmergencyExitConvictionFill(0.71), false);
+  assert.equal(shouldEmergencyExitConvictionFill(0.78), false);
+  assert.equal(shouldEmergencyExitConvictionFill(0.86), false);
+  assert.equal(shouldEmergencyExitConvictionFill(0.99), false);
+  assert.equal(shouldEmergencyExitConvictionFill(null), false);
 });
 
 test("canonical conviction zone produces identical live and recovered-fill classification", () => {

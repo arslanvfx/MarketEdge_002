@@ -59,18 +59,19 @@ greater than `0.09999...`, so BNB with `freshYesAsk=0.10` was falsely aborted.
   against the immutable, canonical per-symbol band captured before the live intent claim.
   This must never use mutable post-await config or the stale decision quote.
 - An out-of-band exchange price improvement is persisted at the actual price and tagged for
-  audit, but held through normal position settlement. Never submit an automatic opposite-side
-  order solely because a BUY filled more cheaply than the authorization floor.
+  audit. Winning-side fills from 70¢ through 99¢ are held through normal settlement; the
+  fixed disaster exception below 70¢ uses the durable close lifecycle immediately.
 - Durable intents store the authorization mode/floor/cap. Restart reconciliation tags an
-  out-of-band recovered fill before hydration; that tag is audit-only and must not trigger
-  an automatic unwind.
+  out-of-band recovered fill before hydration; recovered fills use the same strict sub-70¢
+  emergency threshold.
 - `windowFailedFills` Set still prevents rebuy bleed after FOK exhaustion.
 
 **Why:** A BUY limit is only a maximum price, never a minimum. During a slow exchange request,
-Kalshi can legally match a newly cheaper offer after final validation. Selling immediately
-cannot undo the entry and can turn a position that later wins into a guaranteed spread loss.
-The immediate-unwind regression was introduced after the previously working hold behavior.
+Kalshi can legally match a newly cheaper offer after final validation. Selling ordinary price
+improvements immediately can turn a position that later wins into a guaranteed spread loss.
+The operator accepts 70¢–99¢ fills but explicitly requires immediate damage control below 70¢.
 
 **How to apply:** Require authenticated full-depth evidence at every submission boundary.
-Audit actual fills against the authorization snapshot, retain ownership after every positive
-or ambiguous result, and let normal risk/settlement policy manage a price-improved position.
+Audit actual fills against the authorization snapshot and retain ownership after every
+positive or ambiguous result. Hold fills at or above 70¢; only confirmed positive fills below
+70¢ may enter the durable emergency-close path.

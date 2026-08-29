@@ -80,6 +80,8 @@ import {
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
   evaluateConvictionFillZone,
+  CONVICTION_EMERGENCY_EXIT_FLOOR,
+  shouldEmergencyExitConvictionFill,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
   computeConvictionCandleSlopeGate,
@@ -166,6 +168,8 @@ export {
   // Conviction zone derivation — single source of truth for [floor, cap].
   deriveConvictionZone,
   evaluateConvictionFillZone,
+  CONVICTION_EMERGENCY_EXIT_FLOOR,
+  shouldEmergencyExitConvictionFill,
   // Adverse momentum gate math — pure, exported for unit tests and callers.
   computeAdverseMomentumGate,
   // Direction guard — pure, exported for unit tests and callers.
