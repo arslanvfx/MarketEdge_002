@@ -26,6 +26,7 @@ import {
   getEffectiveProximityThreshold,
   getConvictionMinEntryMinute,
   evaluateConvictionPollerFallback,
+  tryClaimEntryReservation,
   releaseEntryReservationOwnership,
   type ConvictionPollerFallbackSource,
   type EntryReservationOwnership,
@@ -108,7 +109,8 @@ import {
   type BotStateSnapshot, type WindowCoinEvaluation, type ParoleState,
 } from "./kalshi-bot-state";
 import {
-  REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+  regularZeroFillRetryCooldownMs,
+  regularZeroFillMaxAttempts,
   regularZeroFillRetryKey,
   regularZeroFillRetryRemainingMs,
 } from "./kalshi-regular-zero-fill-policy";
@@ -1825,7 +1827,11 @@ async function _runBotTick(
   // The Phase-3 scheduler in kalshi-bot-loop.ts checks this same Set and skips
   // conviction coins that are already marked.  Cleared on window transition.
   if (S.config.decisionMode === "conviction") {
-    convictionFiredThisWindow.add(`${sym}:${windowKey}`);
+    const convictionReservationKey = `${sym}:${windowKey}`;
+    if (!tryClaimEntryReservation(convictionFiredThisWindow, convictionReservationKey)) {
+      setTickAbortReason(sym, windowKey, "conviction entry already reserved by another dispatch");
+      return;
+    }
     entryReservationOwnership = {
       ...entryReservationOwnership,
       convictionLockClaimed: true,
@@ -2376,7 +2382,10 @@ async function _runBotTick(
   // when the threshold is 0.15%).  Re-check here with the freshest available
   // price — the latest fresh one-second spot sample — immediately before the
   // order fires. Missing price or strike evidence blocks.
-  if (S.config.decisionMode === "conviction") {
+  if (
+    S.config.decisionMode === "conviction"
+    && (S.config.convictionProximityGuardEnabled ?? true)
+  ) {
     const _proxNow = Date.now();
     const _proxLatestTick = [...(convictionPriceTicks.get(sym) ?? [])]
       .reverse()
@@ -2788,6 +2797,7 @@ async function _runBotTick(
     // (_intentReservationId / _intentClaimed are declared at function scope so
     //  the confirmed-fill resolve after persistBetRecord can reference them.)
     const intentStartedAt = Date.now();
+    const zeroFillRetryCooldownMs = regularZeroFillRetryCooldownMs(S.config.decisionMode);
     try {
       const claim = await claimRegularOrderIntent({
         clientOrderId: _intentReservationId,
@@ -2801,12 +2811,13 @@ async function _runBotTick(
         requestedCost: worstCaseRouteCost,
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
         maxTotalExposure: S.config.maxTotalExposure,
+        zeroFillRetryCooldownMs,
       });
       if (!claim.claimed) {
         if (claim.reason === "authoritative_zero_fill_cooldown") {
           windowZeroFillRetryAfter.set(
             regularZeroFillRetryKey("live", sym, windowKey),
-            Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+            Date.now() + zeroFillRetryCooldownMs,
           );
         }
         regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
@@ -2968,7 +2979,7 @@ async function _runBotTick(
         const retryKey = regularZeroFillRetryKey(entryMode, sym, windowKey);
         windowZeroFillRetryAfter.set(
           retryKey,
-          Date.now() + REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+          Date.now() + zeroFillRetryCooldownMs,
         );
         // Preserve the established key format consumed by the window-level
         // failed-fill guards and attempt counter.
@@ -2976,11 +2987,10 @@ async function _runBotTick(
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
-        // In conviction mode the book is thin and IOC 0-fills are normal for
-        // the first minute of a window (market makers haven't posted quotes yet).
-        // Allow up to 10 attempts, never faster than the 30-second cooldown, so the
-        // bot keeps trying as liquidity builds, instead of blocking after just 10 s.
-        const MAX_ZERO_FILL_ATTEMPTS = S.config.decisionMode === "conviction" ? 10 : 2;
+        // Conviction opportunities can cross the full entry band in seconds.
+        // Retry confirmed zero fills after the short conviction cooldown, while
+        // unresolved/unknown outcomes remain durably locked by the intent table.
+        const MAX_ZERO_FILL_ATTEMPTS = regularZeroFillMaxAttempts(S.config.decisionMode);
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(
             { sym, ticker: kalshiTicker, direction, attempts, usedPollerFallback },
@@ -2999,7 +3009,7 @@ async function _runBotTick(
           // Without this, the coin stays locked for the whole window after one 0-fill.
           releaseConvictionEntryReservation("entry order returned zero fills; retry allowed");
           setTickAbortReason(sym, windowKey,
-            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS / 1_000}s cooldown`);
+            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${zeroFillRetryCooldownMs / 1_000}s cooldown`);
         }
         // Confirmed zero fill (dead) — release the durable reservation so the
         // next tick may re-claim. This is a DEFINITE outcome, safe to release.

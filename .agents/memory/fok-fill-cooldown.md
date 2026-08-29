@@ -1,11 +1,11 @@
 ---
-name: FOK fill cooldown
-description: windowFailedFills Set prevents the bot from retrying an empty order book every tick within the same window
+name: Confirmed zero-fill retries
+description: Fast conviction retries are allowed only after an authoritative zero fill; every uncertain outcome remains locked
 ---
 
 ## Rule
-After `placeOrderWithRetry` exhausts all attempts and returns `filledCount === 0`, add the coin to `windowFailedFills` (`${sym}:${windowKey}:${botMode}`). Phase 3 checks this set before any other evaluation and pushes the coin to `filteredByNewGuards` + SKIP, so it never appears in `betSymbols` for the rest of that window.
+Conviction entries may retry quickly after the exchange authoritatively confirms that zero contracts filled. Timeouts, malformed responses, transport failures, partial fills, positive fills, reserved orders, and unresolved outcomes must never use that fast path.
 
-**Why:** Without this, the bot retried all 4 coins every ~30s tick for an entire 15-min window after a failed fill (observed nightly ~11PM ET when Kalshi books are empty). Each retry consumed a full retry budget (Phase1 + Phase2 escalation) hitting the Kalshi API repeatedly.
+**Why:** A long cooldown caused a valid DOGE entry band to disappear after a confirmed failed purchase, but treating an uncertain response as failed could create duplicate real-money orders.
 
-**How to apply:** `windowFailedFills` is a `Set<string>` declared at module level alongside `windowBetDetails`. Clear it in the window-transition block (`windowDirectionCounts.clear()` — add `windowFailedFills.clear()` immediately after). The Phase 3 guard must add to `filteredByNewGuards` so the coin is also excluded from `skipSymbols` (which filters out `filteredByNewGuards` members).
+**How to apply:** Keep the durable intent reservation authoritative. A short timer may reopen eligibility only after the intent is durably terminal as zero-fill; all quote, ticker, window, ownership, funding, and safety checks must run again before retry.

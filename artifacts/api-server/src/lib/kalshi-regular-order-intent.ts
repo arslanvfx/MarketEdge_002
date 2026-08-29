@@ -48,6 +48,9 @@ export interface RegularOrderIntentKey {
   maxOrdersPerWindow?: number;
   /** Shared live exposure ceiling. Enforced atomically with the order cap. */
   maxTotalExposure?: number;
+  /** Cooldown after an authoritative zero fill. Unresolved outcomes ignore this
+   * value and remain blocking until reconciliation. */
+  zeroFillRetryCooldownMs?: number;
 }
 
 export interface ClaimIntentResult {
@@ -237,6 +240,7 @@ function claimBatchGroupKey(key: RegularOrderIntentKey): string {
     key.windowKey,
     key.maxOrdersPerWindow ?? "",
     key.maxTotalExposure ?? "",
+    key.zeroFillRetryCooldownMs ?? REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
   ].join("\u0000");
 }
 
@@ -259,6 +263,10 @@ async function claimRegularOrderIntentBatch(
     Number.isFinite(first.maxTotalExposure) && (first.maxTotalExposure ?? 0) > 0
       ? first.maxTotalExposure!
       : null;
+  const zeroFillRetryCooldownMs =
+    Number.isFinite(first.zeroFillRetryCooldownMs) && (first.zeroFillRetryCooldownMs ?? 0) >= 1
+      ? Math.floor(first.zeroFillRetryCooldownMs!)
+      : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS;
 
   const claimStartedAt = Date.now();
   const client = await criticalIntentPool.connect();
@@ -319,7 +327,7 @@ async function claimRegularOrderIntentBatch(
               AND resolved_at > NOW() - ($3::double precision * INTERVAL '1 millisecond')
             )
           )`,
-      [first.mode, first.windowKey, REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS],
+      [first.mode, first.windowKey, zeroFillRetryCooldownMs],
     );
     const blockedSymbols = new Set(facts.rows.map((row) => row.symbol.toUpperCase()));
     const cooldownSymbols = new Set(

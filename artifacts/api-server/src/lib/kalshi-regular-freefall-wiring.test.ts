@@ -63,3 +63,48 @@ test("one persisted false disables both regular direction guard checkpoints", ()
     /typeof convictionDirectionGuardEnabled === "boolean"[\s\S]*partial\.convictionDirectionGuardEnabled = convictionDirectionGuardEnabled/,
   );
 });
+
+test("one persisted false disables both conviction proximity checkpoints", () => {
+  const loopSource = readFileSync(
+    new URL("./kalshi-bot-loop.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    loopSource,
+    /isConviction\s*&& \(S\.config\.convictionProximityGuardEnabled \?\? true\)[\s\S]*computeStrikeProximityGate/,
+  );
+
+  const tickSource = readFileSync(
+    new URL("./kalshi-bot-tick.ts", import.meta.url),
+    "utf8",
+  );
+  const finalProximitySection = tickSource.slice(
+    tickSource.indexOf("Conviction strike-proximity re-check (tick-time)"),
+    tickSource.indexOf("Conviction direction guard", tickSource.indexOf("Conviction strike-proximity re-check (tick-time)")),
+  );
+  assert.match(
+    finalProximitySection,
+    /S\.config\.decisionMode === "conviction"\s*&& \(S\.config\.convictionProximityGuardEnabled \?\? true\)/,
+  );
+  assert.match(finalProximitySection, /computeStrikeProximityGate/);
+
+  const reservationSection = tickSource.slice(
+    tickSource.indexOf("Conviction once-per-window lock"),
+    tickSource.indexOf("CONVICTION LIVE-PRICE GATE"),
+  );
+  assert.match(
+    reservationSection,
+    /if \(S\.config\.decisionMode === "conviction"\)[\s\S]*tryClaimEntryReservation/,
+  );
+  assert.doesNotMatch(reservationSection, /convictionProximityGuardEnabled/);
+  assert.match(reservationSection, /tryClaimEntryReservation\(convictionFiredThisWindow/);
+
+  const routeSource = readFileSync(
+    new URL("../routes/kalshi-bot.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    routeSource,
+    /typeof convictionProximityGuardEnabled === "boolean"[\s\S]*partial\.convictionProximityGuardEnabled = convictionProximityGuardEnabled/,
+  );
+});

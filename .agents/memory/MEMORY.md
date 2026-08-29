@@ -52,7 +52,7 @@
 - [Stock trading dashboard frontend](stock-frontend-arch.md) — market-edge /stocks/* vertical; /bot/pnl is mode-filtered but /bot/history isn't; analytics derived client-side; no manual-close endpoint
 - [Stock trading vertical](stock-vertical-arch.md) — Alpaca stock vertical is fully isolated from crypto (stock_* tables, 21-feat ML); never mark DB flat before broker close confirmed
 - [Window-doubt & chop filters](window-doubt-chop.md) — recentWindowOutcomes Map tracks per-window wins/losses; doubt penalty +2/+4pp when 1/2 recent windows <40% win rate; unanimous failure 1-weak=2pp/2-weak=4pp; threshold total>=1 (not 3)
-- [FOK fill cooldown](fok-fill-cooldown.md) — windowFailedFills Set; after all retries fail, coin is skipped for rest of window via Phase 3 guard; cleared on window transition; key format sym:windowKey:mode
+- [Confirmed zero-fill retries](fok-fill-cooldown.md) — conviction retries quickly only after authoritative zero fill; uncertain or partial outcomes stay durably blocked.
 - [Live-ask fill price](live-ask-fill.md) — bot bids at yesAsk+3c (orderLimitPrice, capped at return floor); expectedFillCost still uses raw ask for sizing; exchange price-improves to actual ask
 - [ML features v4](ml-features-v4.md) — N_FEATURES 17→19; feature 17=volumeDirectionBias (net bullish/bearish volume last 8 candles); feature 18=candleReversalSignal (-1/0/+1 for shooting star, engulfing, hammer patterns)
 - [predCache must be warm for ML](predcache-ml-fix.md) — getCachedPrediction() reads predCache; only populated by fetchCryptoPredictions (frontend endpoint); fix: tracker snap loop must also call predCache.set() after analyzeCoin

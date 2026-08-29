@@ -63,6 +63,7 @@ import {
   getEffectiveConvictionZone,
   getConvictionMinEntryMinute,
   evaluateConvictionPollerFallback,
+  tryClaimEntryReservation,
   releaseEntryReservationOwnership,
   mergePerMarketConvictionConfig,
   isValidConvictionZoneBounds,
@@ -333,6 +334,18 @@ test("entry reservation cleanup survives a conviction-to-pipeline mode switch an
   const second = releaseEntryReservationOwnership(ownership);
   assert.equal(second.restoreMaxBetToken, false);
   assert.equal(second.releaseConvictionLock, false);
+});
+
+test("entry reservation claim is synchronous, exclusive, and reusable only after release", () => {
+  const reservations = new Set<string>();
+  const key = "DOGE:2026-08-28T03:00";
+
+  assert.equal(tryClaimEntryReservation(reservations, key), true);
+  assert.equal(tryClaimEntryReservation(reservations, key), false);
+  assert.equal(reservations.size, 1);
+
+  reservations.delete(key);
+  assert.equal(tryClaimEntryReservation(reservations, key), true);
 });
 
 // ---------------------------------------------------------------------------

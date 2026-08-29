@@ -66,6 +66,18 @@ test("disabled regular direction/freefall guard survives persistence and restart
   assert.equal(restored.convictionDirectionGuardEnabled, false);
 });
 
+test("conviction proximity guard defaults on and an explicit false survives persistence", () => {
+  assert.equal(DEFAULT_BOT_CONFIG.convictionProximityGuardEnabled, true);
+  const original: BotConfig = {
+    ...DEFAULT_BOT_CONFIG,
+    convictionProximityGuardEnabled: false,
+  };
+  const stored = jsonRoundtrip(original);
+  const restored = applyStoredConfig(stored as unknown as Record<string, unknown>);
+
+  assert.equal(restored.convictionProximityGuardEnabled, false);
+});
+
 test("ml_gate survives JSON roundtrip + DEFAULT_BOT_CONFIG spread", () => {
   const original: BotConfig = { ...DEFAULT_BOT_CONFIG, decisionMode: "ml_gate" };
   const stored = jsonRoundtrip(original);

@@ -2323,7 +2323,12 @@ export async function runBotLoopTick(): Promise<void> {
     // Kalshi strike. At 82¢ (entry floor) a coin can sit just fractions above
     // the strike — a single adverse candle can flip the outcome. Gate is
     // FAIL-OPEN: if livePrice or kalshiStrike unavailable, bet proceeds normally.
-    if (isConviction && decision.action !== "SKIP" && originalDecision.action !== "SKIP") {
+    if (
+      isConviction
+      && (S.config.convictionProximityGuardEnabled ?? true)
+      && decision.action !== "SKIP"
+      && originalDecision.action !== "SKIP"
+    ) {
       const _proxLivePrice = getCachedPrediction(sym)?.price ?? null;
       const _proxStrike    = kalshiData?.value ?? null;
       const _proxAtrPct    = getCachedPrediction(sym)?.indicators?.volatilityPct ?? null;

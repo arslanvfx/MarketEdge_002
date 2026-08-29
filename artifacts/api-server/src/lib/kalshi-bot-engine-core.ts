@@ -1561,7 +1561,8 @@ export interface BotConfig {
   //
   // Per-coin overrides (Record<symbol, %>) replace the global default for
   // that coin.  0 = disabled for that phase (no proximity gate).
-  proximityGuardEnabled?: boolean;           // master toggle (default false)
+  proximityGuardEnabled?: boolean;           // legacy/general proximity toggle (default false)
+  convictionProximityGuardEnabled?: boolean; // conviction strike-proximity toggle (default true)
   proximityEarlyPct?: number;               // % distance required during early phase (default 0)
   proximityLatePct?: number;                // % distance required during late phase (default 0)
   proximityLateWindowMinutes?: number;      // minutes remaining when late phase starts (default 7)
@@ -1826,6 +1827,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   strikeProximityMinPct: 0.05,
   strikeProximityAtrScale: true,
   strikeProximityMinPctOverrides: {},
+  convictionProximityGuardEnabled: true,
   // Adverse momentum gate disabled by default — the direction guard (tick + candle-slope)
   // already answers "is price moving the wrong way?" without needing a projection formula.
   // Re-enable via bot config UI if the projection check is desired.
@@ -2484,6 +2486,19 @@ export interface EntryReservationRelease {
   restoreMaxBetToken: boolean;
   releaseConvictionLock: boolean;
   nextOwnership: EntryReservationOwnership;
+}
+
+/**
+ * Atomically claim an in-memory entry reservation within one JS turn.
+ * Returns false without mutating the set when another dispatch already owns it.
+ */
+export function tryClaimEntryReservation(
+  reservations: Set<string>,
+  key: string,
+): boolean {
+  if (reservations.has(key)) return false;
+  reservations.add(key);
+  return true;
 }
 
 /**

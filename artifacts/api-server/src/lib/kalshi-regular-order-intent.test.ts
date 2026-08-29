@@ -228,21 +228,25 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     assert.equal((await mod.claimRegularOrderIntent(key("cid-f2", wk))).claimed, false);
   });
 
-  it("zero_fill releases exposure but enforces the durable 30-second retry cooldown", async () => {
+  it("zero_fill releases exposure but enforces the requested durable retry cooldown", async () => {
     const wk = "DBTEST-Z";
-    assert.equal((await mod.claimRegularOrderIntent(key("cid-z1", wk))).claimed, true);
+    const fastKey = (clientOrderId: string) => ({
+      ...key(clientOrderId, wk),
+      zeroFillRetryCooldownMs: 1_000,
+    });
+    assert.equal((await mod.claimRegularOrderIntent(fastKey("cid-z1"))).claimed, true);
     await mod.resolveRegularOrderIntent({ clientOrderId: "cid-z1", status: "zero_fill", filledCount: 0 });
     assert.deepEqual(
-      await mod.claimRegularOrderIntent(key("cid-z2", wk)),
+      await mod.claimRegularOrderIntent(fastKey("cid-z2")),
       { claimed: false, reason: "authoritative_zero_fill_cooldown" },
     );
     await pool.query(
       `UPDATE kalshi_regular_order_intents
-          SET resolved_at = NOW() - INTERVAL '31 seconds'
+          SET resolved_at = NOW() - INTERVAL '1100 milliseconds'
         WHERE client_order_id = $1`,
       ["cid-z1"],
     );
-    assert.equal((await mod.claimRegularOrderIntent(key("cid-z3", wk))).claimed, true);
+    assert.equal((await mod.claimRegularOrderIntent(fastKey("cid-z3"))).claimed, true);
   });
 
   it("resolve detects a missing intent row instead of reporting success", async () => {

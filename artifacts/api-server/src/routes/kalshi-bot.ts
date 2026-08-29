@@ -168,6 +168,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
   },
   conviction: {
     decisionMode: "conviction",
+    convictionProximityGuardEnabled: true,
     minConfidence: 50,
     minReturnMultiple: 1.00,
     kalshiLockPrice: 0.82,
@@ -850,6 +851,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     kalshiLockPriceCap,
     strikeProximityMinPct,
     strikeProximityAtrScale,
+    convictionProximityGuardEnabled,
     strikeProximityMinPctOverrides,
     minWindowEntryMinutes,
     convictionEarlyBypassEnabled,
@@ -915,6 +917,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     kalshiLockPriceCap?: number;
     strikeProximityMinPct?: number;
     strikeProximityAtrScale?: boolean;
+    convictionProximityGuardEnabled?: boolean;
     strikeProximityMinPctOverrides?: Record<string, number>;
     minWindowEntryMinutes?: number;
     convictionEarlyBypassEnabled?: boolean;
@@ -1466,6 +1469,9 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
   if (typeof strikeProximityAtrScale === "boolean") {
     partial.strikeProximityAtrScale = strikeProximityAtrScale;
+  }
+  if (typeof convictionProximityGuardEnabled === "boolean") {
+    partial.convictionProximityGuardEnabled = convictionProximityGuardEnabled;
   }
   if (strikeProximityMinPctOverrides != null && typeof strikeProximityMinPctOverrides === "object") {
     const cleaned: Record<string, number> = {};

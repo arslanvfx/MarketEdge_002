@@ -900,6 +900,25 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         Blocks an order when the live crypto price is too close to the Kalshi strike — a single adverse candle near the strike can flip the outcome. Each coin uses its per-coin override if set, otherwise the global threshold below. Missing or invalid spot/strike data blocks entry.
                         {(merged.strikeProximityAtrScale ?? true) && <span className="text-sky-400/70"> Threshold is ATR-scaled up to 1.2× for volatile coins.</span>}
                       </span>
+                      <div className="flex items-center justify-between rounded-md border border-sky-500/20 bg-sky-500/5 px-3 py-2">
+                        <div className="min-w-0 pr-3">
+                          <div className="text-xs font-medium text-foreground">Strike Proximity Gate</div>
+                          <div className="text-[10px] text-muted-foreground/70">
+                            On by default. Turn off only when you intentionally want conviction entries near the strike.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          title={(merged.convictionProximityGuardEnabled ?? true) ? "Click to disable strike proximity gate" : "Click to enable strike proximity gate"}
+                          onClick={() => setConfigDraft(d => ({
+                            ...d,
+                            convictionProximityGuardEnabled: !(merged.convictionProximityGuardEnabled ?? true),
+                          }))}
+                          className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${(merged.convictionProximityGuardEnabled ?? true) ? "bg-sky-500" : "bg-muted"}`}
+                        >
+                          <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${(merged.convictionProximityGuardEnabled ?? true) ? "translate-x-4" : ""}`} />
+                        </button>
+                      </div>
                       <label className="flex flex-col gap-1.5">
                         <span className="text-xs text-muted-foreground">
                           Global threshold <span className="font-mono text-sky-400">{(merged.strikeProximityMinPct ?? 0.05).toFixed(2)}%</span>

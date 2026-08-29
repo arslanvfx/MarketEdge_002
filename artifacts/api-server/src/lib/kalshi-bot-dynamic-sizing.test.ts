@@ -380,9 +380,9 @@ test("conviction cleanup releases only the lock owned by the current tick, even 
     "each tick must track reservation ownership locally",
   );
   assert.ok(
-    src.includes("convictionFiredThisWindow.add(`${sym}:${windowKey}`);")
+    src.includes("tryClaimEntryReservation(convictionFiredThisWindow, convictionReservationKey)")
       && src.includes("convictionLockClaimed: true,"),
-    "the tick must record ownership immediately after acquiring the lock",
+    "the tick must atomically acquire the lock before recording local ownership",
   );
 
   const cleanupStart = src.indexOf("const releaseConvictionEntryReservation");
