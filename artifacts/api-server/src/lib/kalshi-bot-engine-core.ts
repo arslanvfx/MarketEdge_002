@@ -1962,6 +1962,40 @@ export function deriveConvictionZone(target: number, capOverride?: number): {
   };
 }
 
+export interface ConvictionFillZoneResult {
+  allowed: boolean;
+  sideCost: number | null;
+  reason: "within_zone" | "below_floor" | "above_cap" | "invalid";
+}
+
+/**
+ * Validate the authoritative exchange fill, not the pre-submit quote.
+ * Kalshi reports average price in YES terms even for NO orders.
+ */
+export function evaluateConvictionFillZone(
+  direction: "yes" | "no",
+  avgYesPrice: number | null | undefined,
+  lockPrice: number,
+  lockPriceCap: number,
+): ConvictionFillZoneResult {
+  if (
+    !Number.isFinite(avgYesPrice)
+    || avgYesPrice! <= 0
+    || avgYesPrice! >= 1
+    || !Number.isFinite(lockPrice)
+    || !Number.isFinite(lockPriceCap)
+    || lockPrice <= 0
+    || lockPriceCap >= 1
+    || lockPrice > lockPriceCap
+  ) {
+    return { allowed: false, sideCost: null, reason: "invalid" };
+  }
+  const sideCost = direction === "yes" ? avgYesPrice! : 1 - avgYesPrice!;
+  if (sideCost < lockPrice) return { allowed: false, sideCost, reason: "below_floor" };
+  if (sideCost > lockPriceCap) return { allowed: false, sideCost, reason: "above_cap" };
+  return { allowed: true, sideCost, reason: "within_zone" };
+}
+
 /**
  * computeAdverseMomentumGate — pure, export for testing.
  *

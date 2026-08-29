@@ -79,6 +79,7 @@ import {
   PER_MARKET_CONVICTION_SYMBOLS,
   PROXIMITY_THRESHOLD_SUGGESTIONS,
   deriveConvictionZone,
+  evaluateConvictionFillZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
   computeConvictionCandleSlopeGate,
@@ -164,6 +165,7 @@ export {
   PROXIMITY_GLOBAL_MAX_PCT,
   // Conviction zone derivation — single source of truth for [floor, cap].
   deriveConvictionZone,
+  evaluateConvictionFillZone,
   // Adverse momentum gate math — pure, exported for unit tests and callers.
   computeAdverseMomentumGate,
   // Direction guard — pure, exported for unit tests and callers.

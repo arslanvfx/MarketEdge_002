@@ -14,6 +14,7 @@ import {
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, buildStreakSnapshot, restoreStreakState,
   deriveConvictionZone,
+  evaluateConvictionFillZone,
   getEffectiveConvictionZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
@@ -365,6 +366,25 @@ async function _runBotTick(
 
   const pos = openPositions.get(sym);
   if (pos) {
+    const requiresOutOfBandUnwind =
+      pos.entryMode === "live"
+      && (pos.entryDecision.signals as Record<string, unknown> | null)?.["convictionOutOfBandFill"] === true;
+    if (pos.windowKey === windowKey && requiresOutOfBandUnwind) {
+      try {
+        await closePosition(pos, yesPrice, kalshiTarget, "conviction_fill_outside_entry_band");
+        openPositions.delete(sym);
+        logger.error(
+          { sym, windowKey, entryYesPrice: pos.entryYesPrice },
+          "[kalshi-bot] recovered out-of-band conviction position unwound",
+        );
+      } catch (closeError) {
+        logger.error(
+          { err: closeError, sym, windowKey, entryYesPrice: pos.entryYesPrice },
+          "[kalshi-bot] recovered out-of-band conviction position still open — re-entry remains blocked",
+        );
+      }
+      return;
+    }
     // Check if the window has changed (expired)
     if (pos.windowKey !== windowKey) {
       midExitedWindows.delete(sym); // clear flip state — new window starts fresh
@@ -2519,6 +2539,18 @@ async function _runBotTick(
 
   let fillPrice = yesPrice; // paper fill
   let orderId: string | null = null;
+  const authorizationDecisionMode = S.config.decisionMode;
+  const authorizationConvictionZone = (() => {
+    if (authorizationDecisionMode !== "conviction") return null;
+    const effective = getEffectiveConvictionZone(sym, S.config);
+    return deriveConvictionZone(effective.lockPrice, effective.lockPriceCap);
+  })();
+  let convictionOutOfBandFill: {
+    sideCost: number;
+    reason: "below_floor" | "above_cap";
+    lockPrice: number;
+    lockPriceCap: number;
+  } | null = null;
 
   // ── DURABLE INTENT LIFECYCLE (live mode only) ────────────────────────────
   // These MUST live at function scope, not inside the `if (entryMode === "live")`
@@ -2812,6 +2844,9 @@ async function _runBotTick(
         maxOrdersPerWindow: S.config.maxBetsPerWindow,
         maxTotalExposure: S.config.maxTotalExposure,
         zeroFillRetryCooldownMs,
+        authorizationDecisionMode,
+        authorizationConvictionFloor: authorizationConvictionZone?.lockPrice ?? null,
+        authorizationConvictionCap: authorizationConvictionZone?.lockPriceCap ?? null,
       });
       if (!claim.claimed) {
         if (claim.reason === "authoritative_zero_fill_cooldown") {
@@ -3170,39 +3205,29 @@ async function _runBotTick(
       // so the dashboard shows the placed bet, not a superseded abort.
       clearTickAbort(tickAbortReasons, sym, windowKey);
 
-      // Post-fill integrity audit. The submitted limit remains the hard
-      // worst-price boundary and the trader parser rejects any fill that breaches
-      // it. Kalshi may legally price-improve a BUY below the entry floor; that is
-      // recorded and held rather than submitting an automatic opposite order.
-      if (S.config.decisionMode === "conviction" && result.avgPrice != null) {
-        const _postFillZone = getEffectiveConvictionZone(sym, S.config);
-        const { lockPrice: _lp, lockPriceCap: _lpCap } = deriveConvictionZone(
-          _postFillZone.lockPrice,
-          _postFillZone.lockPriceCap,
-        );
-        // Kalshi always returns avgPrice in YES-side terms.
-        // For YES bets: fill price IS avgPrice.
-        // For NO  bets: fill price = 1 − avgPrice (what we paid per NO contract).
-        const convFillPrice = direction === "yes"
-          ? result.avgPrice
-          : 1 - result.avgPrice;
-
-        const fillDeviation = direction === "yes"
-          ? _lp - convFillPrice
-          : convFillPrice - _lpCap;
-
-        if (fillDeviation > 0) {
-          const deviationCents = fillDeviation * 100;
-          logger.warn(
+      // Layer 3: validate the authoritative fill, not the quote that authorized
+      // submission. A BUY limit caps the worst price but Kalshi can legally fill
+      // against a much cheaper resting offer. That "improvement" destroys the
+      // conviction premise and must be unwound after it is durably recorded.
+      if (authorizationDecisionMode === "conviction" && result.avgPrice != null && authorizationConvictionZone) {
+        const { lockPrice: _lp, lockPriceCap: _lpCap } = authorizationConvictionZone;
+        const fillZone = evaluateConvictionFillZone(direction, result.avgPrice, _lp, _lpCap);
+        if (!fillZone.allowed && fillZone.sideCost != null && fillZone.reason !== "invalid") {
+          convictionOutOfBandFill = {
+            sideCost: fillZone.sideCost,
+            reason: fillZone.reason,
+            lockPrice: _lp,
+            lockPriceCap: _lpCap,
+          };
+          logger.error(
             {
               sym, direction, windowKey,
-              convFillPrice: +convFillPrice.toFixed(4),
+              convFillPrice: +fillZone.sideCost.toFixed(4),
               avgPrice: +result.avgPrice.toFixed(4),
               lockPrice: _lp, lockPriceCap: _lpCap,
-              deviationCents: +deviationCents.toFixed(1),
               contractCount, ticker: expectedTicker,
             },
-            "[kalshi-bot] conviction fill price-improved outside entry band — integrity audit recorded; holding position",
+            "[kalshi-bot] conviction fill outside entry band — emergency unwind required",
           );
         }
       }
@@ -3449,6 +3474,8 @@ async function _runBotTick(
     trendStability: windowStabilityCache.get(sym) ?? null,
     windowDoubtPenalty: S.currentWindowDoubtPenalty,
     reasoning: decision.reasoning ?? null,
+    convictionOutOfBandFill: convictionOutOfBandFill != null,
+    convictionOutOfBandFillDetails: convictionOutOfBandFill,
     // Conviction-stability metrics at entry — null for non-conviction modes.
     stabilityEr:     _stabilitySnap?.er     ?? null,
     stabilityOsc:    _stabilitySnap?.osc    ?? null,
@@ -3476,8 +3503,9 @@ async function _runBotTick(
     // Persist the snapshotted entry mode (not the live global) so a mid-fill
     // mode flip cannot mislabel this row on restart.
     mode: entryMode,
-    // Kalshi YES contract price at decision time (used for conviction threshold analysis).
-    entryYesPrice: yesPrice,
+    // Persist the authoritative exchange fill. The decision-time quote remains
+    // available in signals.yesPrice for analytics.
+    entryYesPrice: actualFillYesPrice,
     // Max-bet flag: true when the stability gate + probability roll upgraded this bet.
     isMaxBet: boostBetSize != null,
   });
@@ -3509,6 +3537,38 @@ async function _runBotTick(
         "[kalshi-bot] confirmed fill persisted but intent resolve failed — reservation remains fail-closed",
       );
     }
+  }
+
+  if (entryMode === "live" && convictionOutOfBandFill != null) {
+    try {
+      await closePosition(
+        newPosition,
+        actualFillYesPrice,
+        kalshiTarget,
+        "conviction_fill_outside_entry_band",
+      );
+      openPositions.delete(sym);
+      setTickAbortReason(
+        sym,
+        windowKey,
+        `actual fill ${(convictionOutOfBandFill.sideCost * 100).toFixed(0)}¢ was outside the conviction band and was unwound`,
+      );
+      logger.error(
+        { sym, direction, windowKey, ...convictionOutOfBandFill },
+        "[kalshi-bot] out-of-band conviction fill unwound immediately",
+      );
+    } catch (closeError) {
+      setTickAbortReason(
+        sym,
+        windowKey,
+        "out-of-band conviction fill could not be unwound; position retained and re-entry blocked",
+      );
+      logger.error(
+        { err: closeError, sym, direction, windowKey, ...convictionOutOfBandFill },
+        "[kalshi-bot] emergency unwind failed — position remains tracked and re-entry stays blocked",
+      );
+    }
+    return;
   }
 
   // Shadow paper bet: when live mode is active and shadowPaperBets is enabled,

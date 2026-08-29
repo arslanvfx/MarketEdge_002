@@ -51,6 +51,9 @@ export interface RegularOrderIntentKey {
   /** Cooldown after an authoritative zero fill. Unresolved outcomes ignore this
    * value and remain blocking until reconciliation. */
   zeroFillRetryCooldownMs?: number;
+  authorizationDecisionMode?: string;
+  authorizationConvictionFloor?: number | null;
+  authorizationConvictionCap?: number | null;
 }
 
 export interface ClaimIntentResult {
@@ -116,6 +119,9 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
         reconciliation_reason TEXT,
         reconciliation_evidence JSONB,
         last_reconciled_at TIMESTAMPTZ,
+        authorization_decision_mode TEXT,
+        authorization_conviction_floor NUMERIC(12,8),
+        authorization_conviction_cap NUMERIC(12,8),
         created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         resolved_at      TIMESTAMPTZ
       )
@@ -184,7 +190,10 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
         ADD COLUMN IF NOT EXISTS reconciliation_reason TEXT,
         ADD COLUMN IF NOT EXISTS reconciliation_evidence JSONB,
         ADD COLUMN IF NOT EXISTS last_reconciled_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS reserved_cost NUMERIC(12,8)
+        ADD COLUMN IF NOT EXISTS reserved_cost NUMERIC(12,8),
+        ADD COLUMN IF NOT EXISTS authorization_decision_mode TEXT,
+        ADD COLUMN IF NOT EXISTS authorization_conviction_floor NUMERIC(12,8),
+        ADD COLUMN IF NOT EXISTS authorization_conviction_cap NUMERIC(12,8)
     `);
     await client.query(`
       ALTER TABLE kalshi_regular_exit_intents
@@ -375,7 +384,7 @@ async function claimRegularOrderIntentBatch(
       for (const key of approved) {
         const offset = params.length;
         values.push(
-          `($${offset + 1},$${offset + 2},$${offset + 3},$${offset + 4},$${offset + 5},$${offset + 6},$${offset + 7},$${offset + 8},$${offset + 9},'reserved',NOW())`,
+          `($${offset + 1},$${offset + 2},$${offset + 3},$${offset + 4},$${offset + 5},$${offset + 6},$${offset + 7},$${offset + 8},$${offset + 9},$${offset + 10},$${offset + 11},$${offset + 12},'reserved',NOW())`,
         );
         params.push(
           key.clientOrderId,
@@ -387,12 +396,17 @@ async function claimRegularOrderIntentBatch(
           key.requestedCount,
           key.limitPrice,
           Number.isFinite(key.requestedCost) && (key.requestedCost ?? 0) > 0 ? key.requestedCost : null,
+          key.authorizationDecisionMode ?? null,
+          Number.isFinite(key.authorizationConvictionFloor) ? key.authorizationConvictionFloor : null,
+          Number.isFinite(key.authorizationConvictionCap) ? key.authorizationConvictionCap : null,
         );
       }
       const inserted = await client.query<{ client_order_id: string }>(
         `INSERT INTO kalshi_regular_order_intents
            (client_order_id, mode, symbol, window_key, ticker, side,
-            requested_count, limit_price, reserved_cost, status, created_at)
+             requested_count, limit_price, reserved_cost,
+             authorization_decision_mode, authorization_conviction_floor,
+             authorization_conviction_cap, status, created_at)
          VALUES ${values.join(",")}
          ON CONFLICT DO NOTHING
          RETURNING client_order_id`,

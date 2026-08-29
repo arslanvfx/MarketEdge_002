@@ -57,9 +57,21 @@ greater than `0.09999...`, so BNB with `freshYesAsk=0.10` was falsely aborted.
   - NO side: `freshYesAsk > round((1−lockPrice)+0.01)` → abort. Threshold = 10¢ for 0.91.
   - YES side: `freshYesBid < lockPrice && !usedPollerFallback` → abort.
 - **Order limit = exact verified ask/bid**, clamped inside the zone. No crossing buffer.
-- **Layer 3 — NO emergency close**: fills below lockPrice are logged as warnings but the
-  position is HELD to window close. Emergency close was removed July 2026 because Kalshi
-  FOK "price-improves" NO fills to cheaper NO cost (e.g. 87¢ instead of 91¢) — fill below
-  lockPrice simply means cheaper entry, not a losing position. Emergency close + re-enable
-  caused repeated buy→sell cycles burning spread every tick.
+- **Layer 3 — authoritative fill enforcement**: every positive conviction fill is checked
+  against the immutable, canonical per-symbol band captured before the live intent claim.
+  This must never use mutable post-await config or the stale decision quote.
+- An out-of-band fill is persisted at the actual exchange price, then immediately unwound
+  through the durable exit-intent lifecycle. The entry lock remains claimed after a positive
+  fill, so a successful unwind cannot restart a buy→sell loop in the same window.
+- If the unwind is rejected or ambiguous, the actual exposure remains tracked and blocks
+  re-entry; never clear ownership or pretend the position is gone.
+- Durable intents store the authorization mode/floor/cap. Restart reconciliation tags an
+  out-of-band recovered fill before hydration so position management retries the unwind.
 - `windowFailedFills` Set still prevents rebuy bleed after FOK exhaustion.
+
+**Why:** An 81¢ IOC BUY was legally price-improved to a 41¢ resting offer during a rapid
+collapse after two zero fills. Audit-only handling then held the invalid conviction position
+to a full loss. A BUY limit is only a maximum price, never a minimum.
+
+**How to apply:** Any execution or reconciliation path that accepts a positive conviction
+fill must validate the actual winning-side cost against the pre-submit authorization snapshot.

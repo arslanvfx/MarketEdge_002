@@ -58,6 +58,7 @@ import {
   clampProximityToCalibratedBand,
   PROXIMITY_GLOBAL_MAX_PCT,
   deriveConvictionZone,
+  evaluateConvictionFillZone,
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
   getEffectiveConvictionZone,
@@ -346,6 +347,44 @@ test("entry reservation claim is synchronous, exclusive, and reusable only after
 
   reservations.delete(key);
   assert.equal(tryClaimEntryReservation(reservations, key), true);
+});
+
+test("authoritative conviction fills must remain inside the winning-side cost band", () => {
+  assert.deepEqual(
+    evaluateConvictionFillZone("yes", 0.81, 0.79, 0.87),
+    { allowed: true, sideCost: 0.81, reason: "within_zone" },
+  );
+  assert.deepEqual(
+    evaluateConvictionFillZone("yes", 0.41, 0.79, 0.87),
+    { allowed: false, sideCost: 0.41, reason: "below_floor" },
+  );
+  assert.deepEqual(
+    evaluateConvictionFillZone("no", 0.19, 0.79, 0.87),
+    { allowed: true, sideCost: 0.81, reason: "within_zone" },
+  );
+  assert.deepEqual(
+    evaluateConvictionFillZone("no", 0.59, 0.79, 0.87),
+    { allowed: false, sideCost: 0.41000000000000003, reason: "below_floor" },
+  );
+});
+
+test("canonical conviction zone produces identical live and recovered-fill classification", () => {
+  const canonical = deriveConvictionZone(0.80004, 0.87006);
+  const live = evaluateConvictionFillZone(
+    "yes",
+    0.80002,
+    canonical.lockPrice,
+    canonical.lockPriceCap,
+  );
+  const recovered = evaluateConvictionFillZone(
+    "yes",
+    0.80002,
+    canonical.lockPrice,
+    canonical.lockPriceCap,
+  );
+  assert.deepEqual(canonical, { lockPrice: 0.8, lockPriceCap: 0.8701 });
+  assert.deepEqual(live, recovered);
+  assert.equal(live.allowed, true);
 });
 
 // ---------------------------------------------------------------------------

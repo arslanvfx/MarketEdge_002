@@ -19,6 +19,12 @@ import {
   type RegularExchangeReconciliation,
   type RegularOrderReconciliationInput,
 } from "./kalshi-regular-order-reconcile-core.ts";
+import {
+  DEFAULT_BOT_CONFIG,
+  evaluateConvictionFillZone,
+  getEffectiveConvictionZone,
+  type BotConfig,
+} from "./kalshi-bot-engine-core.ts";
 export {
   resolveRegularReconciliationEvidence,
 } from "./kalshi-regular-order-reconcile-core.ts";
@@ -451,6 +457,9 @@ async function readIntent(clientOrderId: string): Promise<(RegularOrderReconcili
   symbol: string;
   windowKey: string;
   reason: string | null;
+  authorizationDecisionMode: string | null;
+  authorizationConvictionFloor: number | null;
+  authorizationConvictionCap: number | null;
 }) | null> {
   await ensureRegularOrderIntentMigrations();
   const result = await pool.query<{
@@ -463,10 +472,15 @@ async function readIntent(clientOrderId: string): Promise<(RegularOrderReconcili
     requested_count: string;
     limit_price: string | null;
     reason: string | null;
+    authorization_decision_mode: string | null;
+    authorization_conviction_floor: string | null;
+    authorization_conviction_cap: string | null;
     created_at: Date;
   }>(
     `SELECT client_order_id, status, symbol, window_key, ticker, side,
-            requested_count, limit_price, reason, created_at
+             requested_count, limit_price, reason,
+             authorization_decision_mode, authorization_conviction_floor,
+             authorization_conviction_cap, created_at
        FROM kalshi_regular_order_intents
       WHERE client_order_id = $1
         AND mode = 'live'
@@ -485,6 +499,11 @@ async function readIntent(clientOrderId: string): Promise<(RegularOrderReconcili
     requestedCount: Number(row.requested_count),
     submittedYesLimitPrice: Number(row.limit_price),
     reason: row.reason,
+    authorizationDecisionMode: row.authorization_decision_mode,
+    authorizationConvictionFloor: row.authorization_conviction_floor == null
+      ? null : Number(row.authorization_conviction_floor),
+    authorizationConvictionCap: row.authorization_conviction_cap == null
+      ? null : Number(row.authorization_conviction_cap),
     createdAt: row.created_at,
   };
 }
@@ -572,11 +591,67 @@ export async function reconcileRegularIntent(
   const count = evidence.filledCount.toFixed(2);
   const betAmount = evidence.budgetSpent.toFixed(8);
   const pnlText = pnl == null ? null : pnl.toFixed(8);
+  let recoveredOutOfBandFill: Record<string, unknown> | null = null;
+  try {
+    let decisionMode = intent.authorizationDecisionMode;
+    let convictionFloor = intent.authorizationConvictionFloor;
+    let convictionCap = intent.authorizationConvictionCap;
+    // Legacy unresolved intents created before immutable authorization metadata
+    // was introduced have no snapshot. Only those rows use current config as a
+    // conservative migration fallback.
+    if (decisionMode == null) {
+      const configResult = await pool.query<{ config: Record<string, unknown> }>(
+        `SELECT config FROM bot_config WHERE id = 'default' LIMIT 1`,
+      );
+      const config = {
+        ...DEFAULT_BOT_CONFIG,
+        ...(configResult.rows[0]?.config ?? {}),
+      } as BotConfig;
+      decisionMode = config.decisionMode;
+      if (decisionMode === "conviction") {
+        const effectiveZone = getEffectiveConvictionZone(intent.symbol, config);
+        convictionFloor = effectiveZone.lockPrice;
+        convictionCap = effectiveZone.lockPriceCap;
+      }
+    }
+    if (
+      decisionMode === "conviction"
+      && convictionFloor != null
+      && convictionCap != null
+    ) {
+      const fillZone = evaluateConvictionFillZone(
+        intent.side,
+        evidence.avgYesPrice,
+        convictionFloor,
+        convictionCap,
+      );
+      if (!fillZone.allowed && fillZone.sideCost != null && fillZone.reason !== "invalid") {
+        recoveredOutOfBandFill = {
+          sideCost: fillZone.sideCost,
+          reason: fillZone.reason,
+          lockPrice: convictionFloor,
+          lockPriceCap: convictionCap,
+        };
+      }
+    }
+  } catch (error) {
+    logger.error(
+      { error, clientOrderId, symbol: intent.symbol },
+      "[regular-reconcile] fill-zone recovery check failed — retaining ambiguity",
+    );
+    await persistAmbiguity(clientOrderId, {
+      outcome: "ambiguous",
+      reason: "fill_zone_recovery_check_failed",
+    });
+    return { outcome: "ambiguous", clientOrderId, reason: "fill_zone_recovery_check_failed" };
+  }
   const signals = JSON.stringify({
     recoveredFromExchange: true,
     clientOrderId,
     orderId: evidence.orderId,
     fillRecords: evidence.fillCount,
+    convictionOutOfBandFill: recoveredOutOfBandFill != null,
+    convictionOutOfBandFillDetails: recoveredOutOfBandFill,
   });
 
   const client = await pool.connect();
@@ -621,6 +696,20 @@ export async function reconcileRegularIntent(
       return { outcome: "ambiguous", clientOrderId, reason: "multiple_exact_local_bets" };
     }
     const persistedBetId = exactLocal.rows[0]?.id ?? localBetId;
+    if (exactLocal.rows.length === 1 && recoveredOutOfBandFill != null) {
+      await client.query(
+        `UPDATE kalshi_bot_bets
+            SET signals = COALESCE(signals, '{}'::jsonb) ||
+              jsonb_build_object(
+                'convictionOutOfBandFill', true,
+                'convictionOutOfBandFillDetails', $2::jsonb
+              ),
+                entry_yes_price = entry_price,
+                decision_mode = COALESCE(decision_mode, 'conviction')
+          WHERE id = $1`,
+        [persistedBetId, JSON.stringify(recoveredOutOfBandFill)],
+      );
+    }
     if (exactLocal.rows.length === 0) {
       await client.query(
         `INSERT INTO kalshi_bot_bets
@@ -630,7 +719,7 @@ export async function reconcileRegularIntent(
            decision_mode, created_at)
          VALUES
           ($1,$2,$3,$4,$5,$6,'live','bot',$7::jsonb,$8::numeric,$9::numeric,
-           $10::numeric,$11::numeric,$12,$13,$14,$15::numeric,$8::numeric,NULL,$16)
+            $10::numeric,$11::numeric,$12,$13,$14,$15::numeric,$8::numeric,$16,$17)
          ON CONFLICT (id) DO NOTHING`,
         [
           persistedBetId,
@@ -648,6 +737,7 @@ export async function reconcileRegularIntent(
           settledOutcome == null ? null : new Date(),
           closed ? new Date() : null,
           target == null ? null : String(target),
+          recoveredOutOfBandFill == null ? null : "conviction",
           intent.createdAt,
         ],
       );
