@@ -13,7 +13,7 @@ import {
   isInQuietHours, applyBetOutcome, tickCircuitBreakerWindow, checkMomentumOverride,
   deriveRegime, isLiveModePermitted, assertSetBotModeAllowed, resolveStartupMode,
   applyStartupModeRestore, applyLockPrice090Migration, applyLockPrice093Bootstrap, applyLockPrice092Bootstrap, applyLockPrice082Migration, applyProximityCalibrationMigration, buildStreakSnapshot, restoreStreakState,
-  applyQuietHoursAutoTuneDeltas,
+  applyQuietHoursAutoTuneDeltas, resolveEntryQuietHoursDecisionForSymbol,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry, type QuietHoursAutoTuneDelta, type QuietHoursV2,
 } from "./kalshi-bot-engine";
@@ -40,7 +40,11 @@ import {
   persistCoinStreakState, loadCoinStreakState, type StreakDbStore,
 } from "./kalshi-bot-streak-db";
 import { AsyncSerialQueue } from "./async-serial-queue";
-import { utcHourMarker, shouldRunSmartHoursCatchUp } from "./kalshi-quiet-hours-scheduler";
+import {
+  createSerializedAsyncOperation,
+  utcHourMarker,
+  shouldRunSmartHoursCatchUp,
+} from "./kalshi-quiet-hours-scheduler";
 import {
   S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
@@ -1199,59 +1203,112 @@ async function _runSmartHoursCalibrationInner(opts?: {
     );
   }
 
+  if (isCompleteRun) {
+    const activeSymbols: string[] = [];
+    const silencedSymbols: string[] = [];
+    const reducedSymbols: string[] = [];
+    const atCalibrationTime = new Date(nowMs);
+    for (const sym of result.calibratedSymbols) {
+      const decision = resolveEntryQuietHoursDecisionForSymbol(
+        S.config,
+        S.botMode,
+        sym,
+        atCalibrationTime,
+      );
+      if (decision.action === "block" || decision.qhMode === "silenced") {
+        silencedSymbols.push(sym);
+      } else if (decision.qhMode === "reduced") {
+        reducedSymbols.push(sym);
+      } else {
+        activeSymbols.push(sym);
+      }
+    }
+    logger.info(
+      {
+        marker: utcHourMarker(nowMs),
+        threshold: S.config.quietHoursV2?.autoTuneThreshold ?? 84.5,
+        activeSymbols,
+        silencedSymbols,
+        reducedSymbols,
+      },
+      "[qh-per-symbol] calibration committed for current UTC hour",
+    );
+  }
+
   // Stamp only a complete run. The manual endpoint may still return partial
   // results, but a restart in the same hour should retry any skipped market
   // rather than treating an incomplete automatic pass as fully calibrated.
   return result;
 }
 
-let _smartHoursCalibrationInFlight = false;
-let _smartHoursCalibrationRerunRequested = false;
+type SmartHoursCalibrationResult = {
+  skipped: false;
+  perSymbolQuietHours: Record<string, QuietHoursV2>;
+  calibratedSymbols: string[];
+  skippedSymbols: string[];
+};
 
-/**
- * Manual/auto entry point that returns the calibration result.  Serialized
- * against concurrent calls via a shared in-flight lock: a call that arrives
- * while another is running resolves to a skipped:true sentinel rather than
- * starting a second overlapping calibration.
- */
-export async function runSmartHoursCalibration(opts?: {
+type SmartHoursCalibrationOptions = {
   thresholdOverride?: number;
   nowMs?: number;
   /** Turn on the per-market Smart Hours master after applying at least one
    * schedule. Reserved for the explicit manual "Calibrate & Apply" action. */
   activateMaster?: boolean;
-  /** Automatic callers set this so a boundary that arrives during another run
-   * is queued once instead of dropping the new UTC hour. */
+  /** Retained for API compatibility. All callers are now durably serialized. */
   queueIfBusy?: boolean;
-}): Promise<
-  | { skipped: true }
-  | {
-      skipped: false;
-      perSymbolQuietHours: Record<string, QuietHoursV2>;
-      calibratedSymbols: string[];
-      skippedSymbols: string[];
+};
+
+/**
+ * Manual/auto execution queue. Every caller receives its own completion
+ * promise and retains its requested threshold/master options. Redundant
+ * automatic requests collapse at execution time once the current-hour marker
+ * is already committed.
+ */
+const _enqueueSmartHoursCalibration = createSerializedAsyncOperation(
+  async (opts: SmartHoursCalibrationOptions): Promise<SmartHoursCalibrationResult> => {
+    const targetNowMs = opts.nowMs ?? Date.now();
+    const isAutomaticRequest =
+      opts.thresholdOverride === undefined
+      && opts.activateMaster !== true;
+    if (
+      isAutomaticRequest
+      && S.config.smartHoursCalibratedUtcHour === utcHourMarker(targetNowMs)
+    ) {
+      return {
+        skipped: false,
+        perSymbolQuietHours: S.config.perSymbolQuietHours ?? {},
+        calibratedSymbols: Object.keys(S.config.perSymbolQuietHours ?? {}),
+        skippedSymbols: [],
+      };
     }
-> {
-  if (_smartHoursCalibrationInFlight) {
-    if (opts?.queueIfBusy) _smartHoursCalibrationRerunRequested = true;
-    return { skipped: true };
-  }
-  _smartHoursCalibrationInFlight = true;
-  try {
-    let result = await _runSmartHoursCalibrationInner(opts);
-    while (_smartHoursCalibrationRerunRequested) {
-      _smartHoursCalibrationRerunRequested = false;
-      // A queued boundary always uses a fresh clock so the durable marker is
-      // stamped for the latest hour, not the hour when the prior run began.
-      result = await _runSmartHoursCalibrationInner({
-        thresholdOverride: opts?.thresholdOverride,
-        activateMaster: opts?.activateMaster,
-      });
-    }
+    const result = await _runSmartHoursCalibrationInner({
+      thresholdOverride: opts.thresholdOverride,
+      activateMaster: opts.activateMaster,
+      nowMs: targetNowMs,
+    });
     return { skipped: false, ...result };
-  } finally {
-    _smartHoursCalibrationInFlight = false;
   }
+);
+
+export function runSmartHoursCalibration(
+  opts: SmartHoursCalibrationOptions = {},
+): Promise<SmartHoursCalibrationResult> {
+  return _enqueueSmartHoursCalibration(opts);
+}
+
+/**
+ * Current-hour readiness barrier.
+ *
+ * Waits for an already-running manual/timer/startup calibration instead of
+ * interpreting "already in flight" as success. If the run that completed was
+ * for the previous UTC hour, one fresh current-hour run is performed.
+ */
+export async function ensureSmartHoursCalibrationCurrent(nowMs: number = Date.now()): Promise<boolean> {
+  const marker = utcHourMarker(nowMs);
+  if (S.config.smartHoursCalibratedUtcHour === marker) return true;
+
+  await runSmartHoursCalibration({ nowMs, queueIfBusy: true }).catch(() => null);
+  return S.config.smartHoursCalibratedUtcHour === marker;
 }
 
 /**

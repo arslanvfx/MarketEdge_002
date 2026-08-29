@@ -64,7 +64,7 @@ export {
   loadCoinStreakStateFromDB, loadOpenPositionFromDB, loadPaperBalanceFromDB,
   loadWindowBetCountsFromDB, fixLiveExpiredPnlHistorical, clearBetHistoryOld,
   updateBotConfig, runQuietHoursAutoTune, recomputeAllSymbolQuietHours,
-  runSmartHoursCalibration, runSmartHoursCalibrationCatchUpIfNeeded,
+  runSmartHoursCalibration, ensureSmartHoursCalibrationCurrent, runSmartHoursCalibrationCatchUpIfNeeded,
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
 export { runBotTickForCoin } from "./kalshi-bot-tick";

@@ -4,9 +4,11 @@ import assert from "node:assert/strict";
 import {
   UTC_HOUR_MS,
   createNonOverlappingAsyncJob,
+  createSerializedAsyncOperation,
   millisecondsUntilNextUtcHour,
   scheduleAtTopOfEveryUtcHour,
   utcHourMarker,
+  isSmartHoursCalibrationCurrent,
   shouldRunSmartHoursCatchUp,
   shouldAttemptSmartHoursLoopRecovery,
 } from "./kalshi-quiet-hours-scheduler.ts";
@@ -15,6 +17,30 @@ test("Smart Hours UTC marker is stable within an hour and changes at the boundar
   assert.equal(utcHourMarker(Date.parse("2026-08-19T14:00:00.000Z")), "2026-08-19T14");
   assert.equal(utcHourMarker(Date.parse("2026-08-19T14:59:59.999Z")), "2026-08-19T14");
   assert.equal(utcHourMarker(Date.parse("2026-08-19T15:00:00.000Z")), "2026-08-19T15");
+});
+
+test("Smart Hours readiness rejects a prior-hour marker at the exact boundary", () => {
+  assert.equal(
+    isSmartHoursCalibrationCurrent(
+      "2026-08-19T14",
+      Date.parse("2026-08-19T14:59:59.999Z"),
+    ),
+    true,
+  );
+  assert.equal(
+    isSmartHoursCalibrationCurrent(
+      "2026-08-19T14",
+      Date.parse("2026-08-19T15:00:00.000Z"),
+    ),
+    false,
+  );
+  assert.equal(
+    isSmartHoursCalibrationCurrent(
+      "2026-08-19T15",
+      Date.parse("2026-08-19T15:08:00.000Z"),
+    ),
+    true,
+  );
 });
 
 test("restart catch-up runs when current UTC hour is uncalibrated in per_market mode", () => {
@@ -147,4 +173,34 @@ test("hourly Smart Hours scheduler queues one overlap and resumes after completi
   assert.equal(runs, 2);
   assert.equal(await run(), true);
   assert.equal(runs, 3);
+});
+
+test("serialized async operation preserves caller options and completion order", async () => {
+  let releaseFirst: (() => void) | undefined;
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const started: string[] = [];
+  const operation = createSerializedAsyncOperation(async (label: string) => {
+    started.push(label);
+    if (label === "automatic") await firstGate;
+    return `${label}:complete`;
+  });
+
+  const automatic = operation("automatic");
+  const manual = operation("manual-60-percent");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ["automatic"]);
+
+  releaseFirst?.();
+  assert.equal(await automatic, "automatic:complete");
+  assert.equal(await manual, "manual-60-percent:complete");
+  assert.deepEqual(started, ["automatic", "manual-60-percent"]);
+});
+
+test("serialized async operation continues after a rejected caller", async () => {
+  const operation = createSerializedAsyncOperation(async (label: string) => {
+    if (label === "fail") throw new Error("controlled failure");
+    return label;
+  });
+  await assert.rejects(operation("fail"), /controlled failure/);
+  assert.equal(await operation("recovery"), "recovery");
 });

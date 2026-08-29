@@ -4,13 +4,14 @@ description: Durable invariants for per-market Smart Hours calibration, sparse c
 ---
 
 ## The rule
-Per-market Smart Hours must recalibrate on exact UTC-hour boundaries without erasing operator-owned restrictions or treating sparse history as meaningful performance evidence.
+Per-market Smart Hours must make a successfully committed current-hour calibration a prerequisite for new entries, without delaying exits or erasing operator-owned restrictions.
 
-**Why:** Evaluation-only calibration deadlocks when a market is already silenced, two samples are too noisy for performance decisions, and full-JSON config writes can otherwise let a slow calibration overwrite a newer manual save.
+**Why:** A best-effort timer can miss or overlap an hourly run while stale prior-hour cells keep blocking entries. Calibration failures must never strand open positions, and concurrent automatic/manual runs must not drop the operator’s threshold.
 
 **How to apply:**
-- Schedule the next exact UTC boundary rather than anchoring a fixed interval to callback time. Recalculate after every run so event-loop delays do not create permanent drift; skip overlap.
-- Treat the durable UTC-hour marker as authoritative and backstop the exact-boundary timer from an existing recurring loop. Retry stale markers at a bounded cadence; do not queue a duplicate when another calibration is already in flight.
+- Schedule the next exact UTC boundary rather than anchoring a fixed interval to callback time. Recalculate after every run so event-loop delays do not create permanent drift.
+- Treat the durable UTC-hour marker as authoritative. Backstop the timer from the recurring loop, and defer only new entries while the marker is stale; exits, expiry, and protective management must continue.
+- Serialize every automatic/manual/startup calibration through one promise queue. Preserve each caller’s threshold/master options and completion promise; collapse redundant automatic work only after the target-hour marker is committed.
 - Use one threshold everywhere: zero, one, or two settled bets are data-gathering; the third settled bet makes a cell eligible for win-rate calibration.
 - Generate a safe all-hours data-gathering schedule for a market with no history; never skip the market merely because its history is sparse.
 - Calibration owns only the computed silence/data-gathering classification and timestamp. Preserve enablement, percentage reductions, dollar overrides, and auto-tune preferences from the freshest config.

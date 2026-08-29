@@ -10,6 +10,13 @@ export function utcHourMarker(nowMs: number = Date.now()): string {
   return new Date(nowMs).toISOString().slice(0, 13);
 }
 
+export function isSmartHoursCalibrationCurrent(
+  calibratedUtcHour: string | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  return calibratedUtcHour === utcHourMarker(nowMs);
+}
+
 /**
  * Pure decision for the restart catch-up: run Smart Hours calibration once on
  * startup when the current UTC hour has not already been calibrated. Calibration
@@ -67,6 +74,27 @@ export function createNonOverlappingAsyncJob(
     } finally {
       inFlight = false;
     }
+  };
+}
+
+/**
+ * Serialize an async operation while preserving every caller's arguments and
+ * completion promise. A rejection does not poison the queue for later callers.
+ */
+export function createSerializedAsyncOperation<TArgs, TResult>(
+  operation: (args: TArgs) => Promise<TResult>,
+): (args: TArgs) => Promise<TResult> {
+  let tail: Promise<void> = Promise.resolve();
+  return (args: TArgs): Promise<TResult> => {
+    const result = tail.then(
+      () => operation(args),
+      () => operation(args),
+    );
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   };
 }
 

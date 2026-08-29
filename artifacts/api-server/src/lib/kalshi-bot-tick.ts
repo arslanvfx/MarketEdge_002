@@ -36,6 +36,7 @@ import {
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
+import { isSmartHoursCalibrationCurrent } from "./kalshi-quiet-hours-scheduler";
 import {
   makeInitialExitState, runExitGuard, type ExitState, type GuardStates,
 } from "./kalshi-bot-exit";
@@ -648,6 +649,24 @@ async function _runBotTick(
   // exact block — never a reason left over from an earlier tick that would
   // otherwise mask the current state.
   clearTickAbort(tickAbortReasons, sym, windowKey);
+
+  if (
+    S.config.quietHoursMode === "per_market"
+    && S.config.quietHoursV2?.enabled === true
+    && !isSmartHoursCalibrationCurrent(S.config.smartHoursCalibratedUtcHour)
+  ) {
+    logger.info(
+      {
+        sym,
+        windowKey,
+        storedMarker: S.config.smartHoursCalibratedUtcHour ?? null,
+        source: "tick-entry-readiness",
+      },
+      "[kalshi-bot] smart-hours calibration pending for current hour — deferring entry without applying stale schedule",
+    );
+    setTickAbortReason(sym, windowKey, "smart hours: current-hour calibration pending — entry will retry");
+    return;
+  }
 
   const qhEntry = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
   if (qhEntry.action === "block") {
@@ -2494,6 +2513,33 @@ async function _runBotTick(
   // hour before reaching this point.  A live order must NEVER be placed during
   // a silenced hour — with the shadow bypass the entry is demoted to paper;
   // without it the entry is rejected outright.
+  if (
+    S.config.quietHoursMode === "per_market"
+    && S.config.quietHoursV2?.enabled === true
+    && !isSmartHoursCalibrationCurrent(S.config.smartHoursCalibratedUtcHour)
+  ) {
+    logger.warn(
+      {
+        sym,
+        windowKey,
+        direction,
+        storedMarker: S.config.smartHoursCalibratedUtcHour ?? null,
+        source: "pre-order-readiness",
+      },
+      "[kalshi-bot] smart-hours calibration became stale before placement — deferring order without applying stale schedule",
+    );
+    releaseConvictionEntryReservation("current-hour smart-hours calibration pending");
+    setTickAbortReason(sym, windowKey, "smart hours: current-hour calibration pending — order deferred");
+    regularPlacementFunnel.finalEligibility(
+      ensurePlacementCandidate(),
+      false,
+      Date.now(),
+      "current-hour smart-hours calibration pending",
+    );
+    markPlacementTerminal("smart_hours", "current-hour smart-hours calibration pending");
+    return;
+  }
+
   const qhFinal = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
   if (qhFinal.action === "block") {
     logger.warn(

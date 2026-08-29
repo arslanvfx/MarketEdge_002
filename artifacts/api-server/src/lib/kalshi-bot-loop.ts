@@ -82,7 +82,7 @@ import {
 import {
   _persistModeToConfig, updateBotConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadWindowBetCountsFromDB, loadRegimeCache,
-  loadBorderProximityCache, getTimingAccuracy, runSmartHoursCalibration,
+  loadBorderProximityCache, getTimingAccuracy, ensureSmartHoursCalibrationCurrent,
 } from "./kalshi-bot-db";
 import {
   shouldAttemptSmartHoursLoopRecovery,
@@ -273,7 +273,15 @@ let _lastReEvalAt = 0;
 let _lastSmartHoursRecoveryAttemptAt = 0;
 const SMART_HOURS_RECOVERY_RETRY_MS = 5 * 60_000;
 
-function recoverMissedSmartHoursHourlyCalibration(nowMs: number): void {
+function recoverCurrentSmartHoursHourlyCalibration(nowMs: number): void {
+  if (
+    S.config.quietHoursMode !== "per_market"
+    || S.config.quietHoursV2?.enabled !== true
+  ) return;
+
+  const marker = utcHourMarker(nowMs);
+  if (S.config.smartHoursCalibratedUtcHour === marker) return;
+
   if (!shouldAttemptSmartHoursLoopRecovery(
     S.config.smartHoursCalibratedUtcHour,
     _lastSmartHoursRecoveryAttemptAt,
@@ -282,38 +290,29 @@ function recoverMissedSmartHoursHourlyCalibration(nowMs: number): void {
   )) return;
 
   _lastSmartHoursRecoveryAttemptAt = nowMs;
-  const marker = utcHourMarker(nowMs);
   logger.info(
     { marker, storedMarker: S.config.smartHoursCalibratedUtcHour ?? null },
-    "[qh-per-symbol] bot-loop recovery: current UTC hour not calibrated — running once",
+    "[qh-per-symbol] bot-loop readiness: current UTC hour not calibrated — awaiting shared calibration",
   );
 
-  // Do not queue behind an exact-hour/manual run. If one is already active,
-  // its successful completion will stamp the marker; otherwise this bounded
-  // recovery check retries later.
-  void runSmartHoursCalibration({ nowMs, queueIfBusy: false })
-    .then((result) => {
-      if (result.skipped) {
-        logger.info(
-          { marker },
-          "[qh-per-symbol] bot-loop recovery skipped — calibration already in flight",
-        );
-        return;
-      }
+  void ensureSmartHoursCalibrationCurrent(nowMs)
+    .then((ready) => {
       logger.info(
         {
           marker,
-          calibratedSymbols: result.calibratedSymbols,
-          skippedSymbols: result.skippedSymbols,
-          complete: result.calibratedSymbols.length > 0 && result.skippedSymbols.length === 0,
+          ready,
+          storedMarker: S.config.smartHoursCalibratedUtcHour ?? null,
+          threshold: S.config.quietHoursV2?.autoTuneThreshold ?? 84.5,
         },
-        "[qh-per-symbol] bot-loop recovery calibration complete",
+        ready
+          ? "[qh-per-symbol] bot-loop readiness calibration complete"
+          : "[qh-per-symbol] bot-loop readiness not established — new entries remain deferred",
       );
     })
     .catch((err) => {
       logger.warn(
         { err, marker },
-        "[qh-per-symbol] bot-loop recovery calibration failed — retry remains eligible",
+        "[qh-per-symbol] bot-loop readiness calibration failed — new entries remain deferred",
       );
     });
 }
@@ -551,10 +550,11 @@ export async function runBotLoopTick(): Promise<void> {
   }
   tickInFlight = true;
   try {
-  // Durable backstop for a delayed/lost exact-hour timer. This is intentionally
-  // non-blocking so calibration cannot delay trading; the shared calibration
-  // operation serializes it against manual, startup, and exact-hour callers.
-  recoverMissedSmartHoursHourlyCalibration(Date.now());
+  // Start bounded recovery when the current-hour marker is stale. This must
+  // remain non-blocking so exits, expiry handling, and protective management
+  // continue. The authoritative stale-schedule barrier lives inside each
+  // tick's new-entry section, after position management.
+  recoverCurrentSmartHoursHourlyCalibration(Date.now());
 
   // Evaluate any closed bets that haven't been stamped with outcome yet.
   // Fire-and-forget — outcome evaluation is non-blocking and non-fatal.

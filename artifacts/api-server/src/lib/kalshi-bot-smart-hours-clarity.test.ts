@@ -33,6 +33,8 @@ import { CRYPTO_COINS, KALSHI_SERIES } from "./market-defs.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const botDbSource = readFileSync(join(here, "kalshi-bot-db.ts"), "utf8");
+const botLoopSource = readFileSync(join(here, "kalshi-bot-loop.ts"), "utf8");
+const botTickSource = readFileSync(join(here, "kalshi-bot-tick.ts"), "utf8");
 const routeSource = readFileSync(join(here, "../routes/kalshi-bot.ts"), "utf8");
 
 test("manual Smart Hours threshold is persisted for subsequent hourly calibrations", () => {
@@ -51,6 +53,54 @@ test("manual Smart Hours threshold is persisted for subsequent hourly calibratio
 test("Smart Hours accepts persisted and manual calibration thresholds down to 40%", () => {
   assert.match(routeSource, /v2\.autoTuneThreshold >= 40/);
   assert.match(routeSource, /rawThreshold >= 40/);
+});
+
+test("bot loop starts recovery without blocking exits or position management", () => {
+  assert.match(
+    botLoopSource,
+    /recoverCurrentSmartHoursHourlyCalibration\(Date\.now\(\)\);/,
+    "the trading loop must trigger current-hour recovery",
+  );
+  assert.doesNotMatch(
+    botLoopSource,
+    /if \(!await ensureCurrentSmartHoursHourlyCalibration/,
+    "calibration readiness must never return from the whole loop before exits and position management",
+  );
+});
+
+test("direct and final entry paths defer while the current-hour calibration marker is stale", () => {
+  const readinessChecks = botTickSource.match(
+    /!isSmartHoursCalibrationCurrent\(S\.config\.smartHoursCalibratedUtcHour\)/g,
+  ) ?? [];
+  assert.equal(
+    readinessChecks.length,
+    2,
+    "both initial entry and final pre-order boundaries need a current-hour readiness check",
+  );
+  assert.match(
+    botTickSource,
+    /deferring entry without applying stale schedule/,
+  );
+  assert.match(
+    botTickSource,
+    /deferring order without applying stale schedule/,
+  );
+});
+
+test("concurrent Smart Hours callers can await the shared calibration operation", () => {
+  assert.match(
+    botDbSource,
+    /createSerializedAsyncOperation/,
+  );
+  assert.match(
+    botDbSource,
+    /export async function ensureSmartHoursCalibrationCurrent/,
+  );
+  assert.match(
+    botDbSource,
+    /return _enqueueSmartHoursCalibration\(opts\)/,
+    "all timer/manual/startup callers must receive completion from the same serialized queue",
+  );
 });
 
 // ---------------------------------------------------------------------------
