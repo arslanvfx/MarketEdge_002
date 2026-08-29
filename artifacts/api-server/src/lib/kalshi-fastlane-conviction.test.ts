@@ -113,6 +113,18 @@ test("FastLane honors the configured per-window minimum entry wait with no early
   assert.ok(timingGate > modeDeclaration, "scheduler timing gate must use the declared mode flag");
 });
 
+test("FastLane has no cross-symbol bets-per-window cap", () => {
+  const tickSource = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
+  assert.match(
+    tickSource,
+    /maxOrdersPerWindow:\s*isPriceTriggeredMode\s*\?\s*undefined\s*:\s*S\.config\.maxBetsPerWindow/,
+  );
+  assert.match(
+    tickSource,
+    /if \(!isPriceTriggeredMode && betsThisWindow >= S\.config\.maxBetsPerWindow\)/,
+  );
+});
+
 test("one slow market poll cannot serialize every FastLane symbol", () => {
   const source = readFileSync(new URL("./kalshi-conviction-poller.ts", import.meta.url), "utf8");
   assert.match(source, /const marketPollsInFlight = new PerKeyInFlight\(\)/);

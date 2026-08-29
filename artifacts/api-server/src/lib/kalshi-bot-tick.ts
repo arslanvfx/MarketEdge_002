@@ -715,7 +715,7 @@ async function _runBotTick(
   // Mode-aware key so paper bets don't count against the live cap and vice-versa.
   const windowBetKey = `${sym}:${windowKey}:${effectiveMode}`;
   const betsThisWindow = windowBetCounts.get(windowBetKey) ?? 0;
-  if (betsThisWindow >= S.config.maxBetsPerWindow) {
+  if (!isPriceTriggeredMode && betsThisWindow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, betsThisWindow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] maxBetsPerWindow reached — skipping entry");
     setTickAbortReason(sym, windowKey, `per-coin bet cap reached (${betsThisWindow}/${S.config.maxBetsPerWindow} this window)`);
     return;
@@ -2904,7 +2904,10 @@ async function _runBotTick(
         requestedCount: contractCount,
         limitPrice: durableEntryLimitPrice,
         requestedCost: worstCaseRouteCost,
-        maxOrdersPerWindow: S.config.maxBetsPerWindow,
+        // Price-triggered modes intentionally take every eligible market.
+        // Durable symbol/window ownership still prevents duplicate exposure,
+        // but there is no cross-symbol order-count ceiling.
+        maxOrdersPerWindow: isPriceTriggeredMode ? undefined : S.config.maxBetsPerWindow,
         maxTotalExposure: S.config.maxTotalExposure,
         zeroFillRetryCooldownMs,
         maxZeroFillAttempts: regularZeroFillMaxAttempts(authorizationDecisionMode),

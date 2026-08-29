@@ -1622,7 +1622,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                   );
                 })()}
 
-                {/* Max Bets Per Window — visible in all modes */}
+                {/* Price-triggered modes take every eligible market. */}
+                {!isPriceTriggeredMode && (
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Max Bets / Window</span>
                   <select className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
@@ -1636,6 +1637,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                     Max bets placed per 15-min window across all coins (e.g. 2 bets × $10 = $20 max per window)
                   </span>
                 </label>
+                )}
 
                 {!isPriceTriggeredMode && (<>
                 {/* ── Entry Timing ───────────────────────────────── */}
