@@ -28,6 +28,10 @@ import {
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
   getConvictionMinEntryMinute,
+  isPriceTriggeredDecisionMode,
+  computeFastLaneLimitPrice,
+  computeFastLaneContractCount,
+  computeKalshi15mTicker,
   tryClaimEntryReservation,
   releaseEntryReservationOwnership,
   type EntryReservationOwnership,
@@ -335,6 +339,8 @@ async function _runBotTick(
   candles: Array<{ c: number; h: number; l: number; t: number; v: number; o: number }>,
 ): Promise<void> {
   resetDailyIfNeeded();
+  const isFastLane = S.config.decisionMode === "fastlane";
+  const isPriceTriggeredMode = isPriceTriggeredDecisionMode(S.config.decisionMode);
 
   // Daily loss limit check (uses conviction-specific limit when in conviction mode)
   if (S.dailyPnl <= -getEffectiveDailyLossLimit()) {
@@ -721,7 +727,7 @@ async function _runBotTick(
   // CONVICTION MODE: global cap bypassed — each coin bets independently on price cross;
   // max-bet slots are governed by convictionStabilityMaxBetsPerWindow.
   const globalTotalNow = windowTotalBets.get(`${windowKey}:${effectiveMode}`) ?? 0;
-  if (S.config.decisionMode !== "conviction" && S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
+  if (!isPriceTriggeredMode && S.config.maxBetsPerWindow > 0 && globalTotalNow >= S.config.maxBetsPerWindow) {
     logger.debug({ sym, globalTotalNow, max: S.config.maxBetsPerWindow }, "[kalshi-bot] global cap reached at entry — skipping");
     setTickAbortReason(sym, windowKey, `global bet cap reached (${globalTotalNow}/${S.config.maxBetsPerWindow} this window)`);
     return;
@@ -729,7 +735,7 @@ async function _runBotTick(
 
   // Ceiling: skip if bot has been in the window longer than maxEntryMinutes.
   // 0 = disabled (no ceiling — enter at any point).
-  if (S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) {
+  if (!isFastLane && S.config.maxEntryMinutes > 0 && secondsElapsed > S.config.maxEntryMinutes * 60) {
     setTickAbortReason(sym, windowKey, `past entry ceiling (>${S.config.maxEntryMinutes}min elapsed)`);
     return;
   }
@@ -739,7 +745,7 @@ async function _runBotTick(
   // the separate maxBetMinWindowEntryMinutes gate controls when max bets are eligible.
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
-    if (minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
+    if (!isFastLane && minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
       // Bypass: configurable — disabled means the timer is ALWAYS respected.
       // When enabled, the threshold is user-adjustable (default 0.92).
       const bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
@@ -781,7 +787,7 @@ async function _runBotTick(
   // Bypassed entirely when allowLateEntries=true (conviction mode design: the
   // price crossing happens near settlement; blocking it defeats the purpose).
   // The hard pre-order floor below is also bypassed when allowLateEntries=true.
-  if (!S.config.allowLateEntries && S.config.decisionMode !== "conviction") {
+  if (!S.config.allowLateEntries && !isPriceTriggeredMode) {
     const minRemaining = S.config.minRemainingMinutes ?? 0;
     if (minRemaining > 0 && 15 * 60 - secondsElapsed < minRemaining * 60) {
       logger.debug({ sym, secondsElapsed, minRemaining }, "[kalshi-bot] min-remaining floor — skipping tick early");
@@ -809,7 +815,7 @@ async function _runBotTick(
   // is exactly *why* the market is pricing at 92 ¢ or 8 ¢.  Blocking these bets
   // defeats the purpose of conviction mode.  This mirrors the same bypass used
   // for the minWindowEntryMinutes guard above.
-  if (S.config.proximityGuardEnabled) {
+  if (!isFastLane && S.config.proximityGuardEnabled) {
     // Derive the same zone floor used by the engine so the bypass is in sync.
     const _proximityZone = getEffectiveConvictionZone(sym, S.config);
     const convZoneFloor = deriveConvictionZone(
@@ -817,7 +823,7 @@ async function _runBotTick(
       _proximityZone.lockPriceCap,
     ).lockPrice;
     const proximityIsConvictionExtreme =
-      S.config.decisionMode === "conviction" &&
+      isPriceTriggeredMode &&
       yesPrice !== null &&
       (yesPrice >= convZoneFloor || yesPrice <= 1 - convZoneFloor);
 
@@ -879,7 +885,7 @@ async function _runBotTick(
   //
   // CONVICTION MODE — price alone is the signal.  All model gates are bypassed
   // entirely.  The engine fires purely on yesPrice vs lockPrice.
-  if (S.config.decisionMode !== "conviction") {
+  if (!isPriceTriggeredMode) {
     const live = getLatestCoinSignals(sym);
     if (live.statAbove === null || live.claudeAbove === null || live.mlAbove === null) {
       logger.info(
@@ -901,7 +907,7 @@ async function _runBotTick(
   const livePrice = getCachedPrediction(sym)?.price ?? null;
   const decision = makeBotDecision(
     sym,
-    S.config,
+    isFastLane ? { ...S.config, minConfidence: 0 } : S.config,
     kalshiTicker,
     yesPrice,
     minutesElapsed,
@@ -943,12 +949,12 @@ async function _runBotTick(
   // result may have been SKIP (so the coin was never flagged), yet here
   // makeBotDecision now returns BET_YES — slipping past the per-coin block.
   // Re-checking here closes that race window unconditionally.
-  if (!S.config.freeRunMode && decision.action === "BET_YES" && COIN_YES_BLOCKED.has(sym)) {
+  if (!isFastLane && !S.config.freeRunMode && decision.action === "BET_YES" && COIN_YES_BLOCKED.has(sym)) {
     logger.debug({ sym }, "[kalshi-bot] _runBotTick: BET_YES blocked by COIN_YES_BLOCKED (defense-in-depth)");
     setTickAbortReason(sym, windowKey, "coin filter: YES bets blocked for this coin");
     return;
   }
-  if (!S.config.freeRunMode && decision.action !== "SKIP" && COIN_FULLY_BLOCKED.has(sym)) {
+  if (!isFastLane && !S.config.freeRunMode && decision.action !== "SKIP" && COIN_FULLY_BLOCKED.has(sym)) {
     logger.debug({ sym }, "[kalshi-bot] _runBotTick: entry blocked by COIN_FULLY_BLOCKED (defense-in-depth)");
     setTickAbortReason(sym, windowKey, "coin filter: all bets blocked for this coin");
     return;
@@ -962,7 +968,7 @@ async function _runBotTick(
   // is calling BELOW — exactly the bug observed when ML briefly outputted YES
   // at window-open before settling to NO, while Claude's opening call was BELOW.
   //
-  if (S.config.decisionMode !== "conviction") {
+  if (!isPriceTriggeredMode) {
     const dirSigs = decision.signals as { claudeAbove?: boolean | null };
     if (decision.action === "BET_YES" && dirSigs.claudeAbove === false) {
       logger.info(
@@ -987,7 +993,7 @@ async function _runBotTick(
   // — but only in the OPPOSITE direction, and only with a higher confidence bar
   // (+5pp) to avoid immediately flipping back on noise.
   const recentFlip = midExitedWindows.get(sym);
-  if (recentFlip && recentFlip.windowKey === windowKey && decision.action !== "SKIP") {
+  if (!isFastLane && recentFlip && recentFlip.windowKey === windowKey && decision.action !== "SKIP") {
     const exitedDir = recentFlip.direction; // "yes" or "no"
     const newDir = decision.action === "BET_YES" ? "yes" : "no";
     if (newDir === exitedDir) {
@@ -1053,7 +1059,7 @@ async function _runBotTick(
   const streakMap = activeCoinStreakState();
   const streakInfo = streakMap.get(sym);
   const streakPause = checkStreakPauseGuard(streakInfo?.pauseUntilWindowKey ?? null, windowKey);
-  if (!S.config.freeRunMode && streakPause.blocked) {
+  if (!isFastLane && !S.config.freeRunMode && streakPause.blocked) {
     logger.info(
       { sym, pauseUntilWindowKey: streakInfo!.pauseUntilWindowKey, windowKey, consecutiveLosses: streakInfo!.consecutiveLosses },
       "[kalshi-bot] SKIP — coin paused after consecutive window losing streak",
@@ -1071,7 +1077,7 @@ async function _runBotTick(
   // gets to attempt the recovery bet and the pause only kicks in if it loses
   // again.  The post-loss pause (coinStreakPauseWindows) handles the cooldown
   // after the limit is reached and that pause is set by the eval/close path.
-  if (!S.config.freeRunMode) {
+  if (!isFastLane && !S.config.freeRunMode) {
     const streakLimit = S.config.coinStreakLossLimit ?? 3;
     const currentLosses = streakInfo?.consecutiveLosses ?? 0;
     if (streakLimit > 0 && currentLosses >= streakLimit) {
@@ -1088,7 +1094,7 @@ async function _runBotTick(
   // Skip for the rest of the UTC day when this coin's losses reach the cap.
   const coinLossToday = activeCoinDailyLoss().get(sym) ?? 0;
   const maxCoinLoss = S.config.maxDailyLossPerCoin ?? 3;
-  if (checkDailyLossGuard(coinLossToday, maxCoinLoss)) {
+  if (!isFastLane && checkDailyLossGuard(coinLossToday, maxCoinLoss)) {
     logger.info(
       { sym, coinLossToday: coinLossToday.toFixed(4), maxDailyLossPerCoin: maxCoinLoss },
       "[kalshi-bot] SKIP — coin has reached its daily loss cap",
@@ -1106,7 +1112,7 @@ async function _runBotTick(
   // the bet direction. Catches intra-window reversals the snap-time model missed.
   // Bypassed in conviction mode — price alone is the signal; candle direction
   // is already encoded in the Kalshi market price crossing the lock threshold.
-  if (S.config.decisionMode !== "conviction") {
+  if (!isPriceTriggeredMode) {
     const lookbackCandles = S.config.momentumLookbackCandles ?? 8;
     const pred = getCachedPrediction(sym);
     const candles = pred?.candles ?? [];
@@ -1174,7 +1180,7 @@ async function _runBotTick(
     // Bypassed in conviction mode — at 88-92¢/8-12¢, being close to strike
     // is the whole point; blocking these bets defeats the mode entirely.
     const livePrice = pred?.price;
-    if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
+    if (!S.config.freeRunMode && !isPriceTriggeredMode && livePrice != null && livePrice > 0 && kalshiTarget > 0) {
       const STRIKE_PROXIMITY_PCT = 0.03;
       const distancePct = Math.abs((livePrice - kalshiTarget) / kalshiTarget) * 100;
       const tooClose =
@@ -1207,7 +1213,7 @@ async function _runBotTick(
     // zero crossings means price is cleanly on one side (ideal entry).
     // Bypassed in conviction mode — oscillation near the strike is normal
     // when the market is pricing at extreme probabilities.
-    if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && kalshiTarget > 0 && pred != null && pred.candles.length >= 6) {
+    if (!S.config.freeRunMode && !isPriceTriggeredMode && kalshiTarget > 0 && pred != null && pred.candles.length >= 6) {
       const recent6 = pred.candles.slice(-6);
       let crossings = 0;
       let prevSide: boolean | null = null;
@@ -1292,7 +1298,7 @@ async function _runBotTick(
   // guarantee zero fills. We still apply a hard 0.01/0.99 sanity bound.
   const _entryReturnFloor = S.config.minReturnMultiple ?? 1.45;
   const _entryMaxCost = 1 / _entryReturnFloor;
-  const isConviction = S.config.decisionMode === "conviction";
+  const isConviction = isPriceTriggeredMode;
   // Declared `let` — the conviction live-price gate (below) refreshes the
   // underlying ask/bid and may recompute this value with fresh prices.
   let orderLimitPrice: number | null = (() => {
@@ -1321,7 +1327,7 @@ async function _runBotTick(
   // We compare against the raw 1/1.45 float so a 0.69 cost (1.449x) is blocked.
   // Bypassed in conviction mode — by design the return at 88-92¢ is ~1.09-1.14×;
   // the high probability is the edge, not the payout multiple.
-  if (S.config.decisionMode !== "conviction") {
+  if (!isPriceTriggeredMode) {
     const minReturnFloor = S.config.minReturnMultiple ?? 1.45;
     const maxAllowedCost = 1 / minReturnFloor;
     if (expectedFillCost > maxAllowedCost) {
@@ -1353,7 +1359,7 @@ async function _runBotTick(
   // Uses the live ask/bid; falls back to decision yesPrice when cache is absent.
   // consensusMinCents=25 (default) → don't bet against 3:1 market odds.
   // Set to 0 to disable.
-  if (!S.config.freeRunMode && (S.config.consensusMinCents ?? 25) > 0) {
+  if (!isFastLane && !S.config.freeRunMode && (S.config.consensusMinCents ?? 25) > 0) {
     const consensusFloor = (S.config.consensusMinCents ?? 25) / 100;
     const refYesAsk = liveYesAsk ?? yesPrice ?? null;
     const consensusBlocked = refYesAsk != null && (
@@ -1774,7 +1780,7 @@ async function _runBotTick(
   //
   // secondsElapsedNow / secondsRemainingNow / nowMs / windowStartMs are declared
   // earlier (before the time-bet schedule block) so they are also available here.
-  if (!S.config.allowLateEntries && S.config.decisionMode !== "conviction") {
+  if (!S.config.allowLateEntries && !isPriceTriggeredMode) {
     const hardFloorS = (S.config.minRemainingMinutes ?? 0) * 60;
     if (hardFloorS > 0 && secondsRemainingNow < hardFloorS) {
       logger.warn(
@@ -1805,7 +1811,7 @@ async function _runBotTick(
   //   3. kalshiTarget must be non-null (should always be true at this point).
   {
     const noPrice = yesPrice == null && orderLimitPrice == null;
-    const noSignals = S.config.decisionMode !== "conviction" && (decision.signals?.signalsTotal ?? 0) < 1;
+    const noSignals = !isPriceTriggeredMode && (decision.signals?.signalsTotal ?? 0) < 1;
     const noTarget = kalshiTarget == null;
 
     if (noPrice || noSignals || noTarget) {
@@ -1878,7 +1884,7 @@ async function _runBotTick(
   // cannot also read the guard as "not fired" and place a duplicate bet.
   // The Phase-3 scheduler in kalshi-bot-loop.ts checks this same Set and skips
   // conviction coins that are already marked.  Cleared on window transition.
-  if (S.config.decisionMode === "conviction") {
+  if (S.config.decisionMode === "conviction" || isFastLane) {
     const convictionReservationKey = `${sym}:${windowKey}`;
     if (!tryClaimEntryReservation(convictionFiredThisWindow, convictionReservationKey)) {
       setTickAbortReason(sym, windowKey, "conviction entry already reserved by another dispatch");
@@ -1907,30 +1913,9 @@ async function _runBotTick(
   let freshYesBid: number | null = null;
   const convictionHotPathStartedAt = Date.now();
   let finalQuoteReadyAt = convictionHotPathStartedAt;
-  // Deterministic ticker for the current window, derived from windowKey rather
-  // than kalshiTargetCache (which can drift to the next window ticker ~10 min
-  // before close).  Hoisted outside the conviction gate block so the position-
-  // recording section (lines ~2440, ~2490) can use it for all modes.
-  //
-  // Kalshi 15-min ticker format (observed): KX${SYM}15M-${YY}${MON}${DD}${HHMM}-${MM}
-  //   • YY MON DD — date in EDT (UTC-4)
-  //   • HHMM      — window CLOSE time in EDT (= open + 15 min), NOT the open time
-  //   • MM         — close-minute of the window (15, 30, 45, or 0)
-  // Example: windowKey "2026-07-18T00:15" → close 00:30 UTC → EDT 20:30 July 17 → "KXBTC15M-26JUL172030-30"
-  //
-  // IMPORTANT: Kalshi tickers embed the CLOSE time, confirmed by pipeline observations
-  // (fetchKalshiTarget matches on close_time; windowKey "2026-07-18T00:15" returned
-  // "KXNEAR15M-26JUL172030-30" = 20:30 EDT = 00:30 UTC = window close time).
-  // Using the open time gives market_not_found 404 on every order attempt.
-  const _MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  const _windowCloseUtc = new Date(new Date(windowKey + ":00Z").getTime() + 15 * 60 * 1000); // close = open + 15 min
-  const _windowCloseEdt = new Date(_windowCloseUtc.getTime() - 4 * 60 * 60 * 1000); // EDT = UTC-4
-  const _tyy  = String(_windowCloseEdt.getUTCFullYear()).slice(-2);
-  const _tmon = _MONTHS[_windowCloseEdt.getUTCMonth()];
-  const _tdd  = String(_windowCloseEdt.getUTCDate()).padStart(2, '0');
-  const _thh  = String(_windowCloseEdt.getUTCHours()).padStart(2, '0');
-  const _tmm  = String(_windowCloseEdt.getUTCMinutes()).padStart(2, '0');
-  const expectedTicker = `KX${sym}15M-${_tyy}${_tmon}${_tdd}${_thh}${_tmm}-${_tmm}`;
+  // Deterministic exact-window ticker. Kalshi names 15-minute contracts by
+  // their New York local close time, so the conversion must honor EST/EDT.
+  const expectedTicker = computeKalshi15mTicker(sym, windowKey);
 
   if (S.config.decisionMode === "conviction") {
     if (
@@ -2281,6 +2266,77 @@ async function _runBotTick(
       return;
     }
     finalQuoteReadyAt = Date.now();
+  } else if (isFastLane) {
+    if (
+      kalshiTicker !== expectedTicker
+      || kalshiTarget == null
+      || !Number.isFinite(kalshiTarget)
+      || kalshiTarget <= 0
+    ) {
+      releaseConvictionEntryReservation("FastLane ticker/strike identity mismatch");
+      setTickAbortReason(sym, windowKey, "FastLane market identity unavailable or mismatched");
+      return;
+    }
+
+    const fastLaneZoneRaw = getEffectiveConvictionZone(sym, S.config);
+    const fastLaneZone = deriveConvictionZone(
+      fastLaneZoneRaw.lockPrice,
+      fastLaneZoneRaw.lockPriceCap,
+    );
+    const fastLaneNoAsk = _cachedKalshi?.noAsk
+      ?? (liveYesBid != null ? 1 - liveYesBid : null);
+    const observedSideCost = direction === "yes" ? liveYesAsk : fastLaneNoAsk;
+    if (
+      observedSideCost == null
+      || observedSideCost < fastLaneZone.lockPrice
+      || observedSideCost > fastLaneZone.lockPriceCap
+    ) {
+      releaseConvictionEntryReservation("FastLane price outside configured range");
+      setTickAbortReason(
+        sym,
+        windowKey,
+        `FastLane: ${direction.toUpperCase()} price ${
+          observedSideCost == null ? "unavailable" : `${(observedSideCost * 100).toFixed(1)}¢`
+        } outside ${(fastLaneZone.lockPrice * 100).toFixed(0)}¢–${(fastLaneZone.lockPriceCap * 100).toFixed(0)}¢ range`,
+      );
+      return;
+    }
+
+    orderLimitPrice = computeFastLaneLimitPrice(direction, fastLaneZone.lockPriceCap);
+    const worstCaseSideCost = direction === "yes"
+      ? orderLimitPrice
+      : 1 - orderLimitPrice;
+    expectedFillCost = worstCaseSideCost;
+    const fastLaneContractCount = computeFastLaneContractCount(
+      targetBetSize,
+      direction,
+      orderLimitPrice,
+    );
+    if (fastLaneContractCount < 1) {
+      releaseConvictionEntryReservation("FastLane sizing produced zero contracts");
+      setTickAbortReason(
+        sym,
+        windowKey,
+        `FastLane: $${targetBetSize.toFixed(2)} cannot buy one contract at ${(expectedFillCost * 100).toFixed(1)}¢`,
+      );
+      return;
+    }
+    contractCount = fastLaneContractCount;
+    finalQuoteReadyAt = Date.now();
+    logger.info(
+      {
+        sym,
+        direction,
+        windowKey,
+        observedSideCost,
+        worstCaseSideCost,
+        rangeFloor: fastLaneZone.lockPrice,
+        rangeCap: fastLaneZone.lockPriceCap,
+        orderLimitPrice,
+        contractCount,
+      },
+      "[kalshi-bot] FastLane range hit — submitting edge-capped IOC",
+    );
   }
 
   let placementCandidateId: string | null = null;
@@ -2309,7 +2365,7 @@ async function _runBotTick(
   // Trajectory gate — regular bets: block if price is trending dangerously into target.
   // Use live-patched last candle close — always fresher than predCache.price.
   if (
-    S.config.decisionMode !== "conviction"
+    !isPriceTriggeredMode
     && S.config.regularBetTrajectoryEnabled
     && kalshiTarget != null
     && candles.length >= 2
@@ -2436,7 +2492,7 @@ async function _runBotTick(
   // of the longer-horizon prediction.  Reuse computeConvictionDirectionGate
   // with only candle slope (no priceTicks — those are conviction-poller-sourced).
   // Fail-open: guard is skipped when < 2 candles are available.
-  if (S.config.decisionMode !== "conviction" &&
+  if (!isPriceTriggeredMode &&
       (S.config.convictionDirectionGuardEnabled ?? true) &&
       candles.length >= 2) {
     const _pLookback = Math.max(1, Math.min(S.config.convictionDirectionLookbackCandles ?? 3, 10));
@@ -2613,7 +2669,7 @@ async function _runBotTick(
   );
   const freefallStartedAt = Date.now();
   const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
-    enabled: S.config.convictionDirectionGuardEnabled ?? true,
+    enabled: !isFastLane && (S.config.convictionDirectionGuardEnabled ?? true),
     samples: convictionPriceTicks.get(sym) ?? [],
     side: direction,
     nowMs: freefallStartedAt,
@@ -2714,8 +2770,11 @@ async function _runBotTick(
     const convictionRequiresAuthenticatedBook =
       authorizationDecisionMode === "conviction";
     const useAuthenticatedBook =
-      convictionRequiresAuthenticatedBook
-      || S.config.liveExecutionGateway === "authenticated_book";
+      !isFastLane
+      && (
+        convictionRequiresAuthenticatedBook
+        || S.config.liveExecutionGateway === "authenticated_book"
+      );
     const authenticatedGatewayZone = S.config.decisionMode === "conviction"
       ? getEffectiveConvictionZone(sym, S.config)
       : { lockPrice: 0, lockPriceCap: 1 };

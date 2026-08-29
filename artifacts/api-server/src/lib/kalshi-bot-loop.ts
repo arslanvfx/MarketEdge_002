@@ -20,6 +20,7 @@ import {
   getConvictionMinEntryMinute,
   shouldApplyLoopGlobalQuietHours,
   getEtDow,
+  isPriceTriggeredDecisionMode,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
   type DecisionMode, type CoinStreakEntry,
 } from "./kalshi-bot-engine";
@@ -100,7 +101,7 @@ import {
 // slope, etc.) — nothing is bypassed.
 setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: number | null, ticker: string, target: number) => {
   if (!S.config.enabled || S.paused || S.dbDegradedSince !== null) return;
-  if (S.config.decisionMode !== "conviction") return;
+  if (!isPriceTriggeredDecisionMode(S.config.decisionMode)) return;
   const wk = currentWindowKey();
   if (convictionFiredThisWindow.has(`${sym}:${wk}`)) return;
   if (openPositions.has(sym)) return;
@@ -208,7 +209,7 @@ export async function runWindowOpenPrefetch(windowKey: string): Promise<void> {
   // ── Step 2: stability analysis, gated on Step 1 per coin ────────────────
   // Only coins that PASSED step 1 are dispatched here.  The shared
   // S.stabilityFiredForCoins guard prevents double-dispatch with the bot loop.
-  if (getBotDecisionMode() === "conviction" || !isAiFeatureEnabled("crypto_stability") || confirmed.length === 0) return;
+  if (isPriceTriggeredDecisionMode(getBotDecisionMode()) || !isAiFeatureEnabled("crypto_stability") || confirmed.length === 0) return;
 
   const toDispatch = confirmed.filter(sym => !S.stabilityFiredForCoins.has(sym));
   if (toDispatch.length === 0) return;
@@ -414,7 +415,7 @@ async function _firePipelineEntryForCoin(sym: string, windowKey: string): Promis
   // YES price every 5 s) handles entry whenever the threshold is actually crossed.
   // Without this guard the pipeline fires immediately on model completion while the
   // market is still pricing YES at 50¢, which bypasses the conviction price gate.
-  if (S.config.decisionMode === "conviction") {
+  if (isPriceTriggeredDecisionMode(S.config.decisionMode)) {
     pipelineEntryFiredThisWindow.delete(`${sym}:${windowKey}`);
     logger.debug({ sym, windowKey }, "[pipeline] conviction mode — pipeline-triggered entry skipped; per-tick loop handles price-cross entry");
     return;
@@ -781,7 +782,7 @@ export async function runBotLoopTick(): Promise<void> {
     const kd = getKalshiCachedData(sym);
     return kd?.value != null && kd.yesPrice != null;
   });
-  if (pendingCoins.length > 0 && isAiFeatureEnabled("crypto_stability") && getBotDecisionMode() !== "conviction") {
+  if (pendingCoins.length > 0 && isAiFeatureEnabled("crypto_stability") && !isPriceTriggeredDecisionMode(getBotDecisionMode())) {
     pendingCoins.forEach(c => S.stabilityFiredForCoins.add(c.symbol.toUpperCase()));
     void Promise.all(
       pendingCoins.map(c => {
@@ -1382,7 +1383,7 @@ export async function runBotLoopTick(): Promise<void> {
   // before evaluating them. The tracker snapshot only runs every 30 s — far too
   // stale for the 88–92¢ window. Fetching in parallel here keeps prices ≤2 s
   // fresh so the engine never skips a coin based on stale pre-gate data.
-  if (S.config.decisionMode === "conviction") {
+  if (isPriceTriggeredDecisionMode(S.config.decisionMode)) {
     await Promise.all(
       CRYPTO_COINS
         .filter(c => KALSHI_SERIES[c.symbol])
@@ -1465,7 +1466,7 @@ export async function runBotLoopTick(): Promise<void> {
     // (First 0-fill does NOT block; bot retries once more ~30s later before giving up.)
     // Conviction mode is exempt: it retries every tick indefinitely. The book can
     // become liquid at any point in the window, and blocking kills valid entries.
-    const isConvictionForCooldown = S.config.decisionMode === "conviction";
+    const isConvictionForCooldown = isPriceTriggeredDecisionMode(S.config.decisionMode);
     if (!isConvictionForCooldown && windowFailedFills.has(`${sym}:${windowKey}:${S.botMode}`)) {
       filteredByNewGuards.add(sym);
       evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: "empty-book cooldown — IOC returned 0 fills earlier this window", windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
@@ -1484,7 +1485,7 @@ export async function runBotLoopTick(): Promise<void> {
     // moment the Kalshi YES price crosses kalshiLockPrice (default $0.90).
     // The pipeline sets the lock on first completion but we deliberately
     // re-evaluate each tick so a 90¢ cross at T+8 is caught within 5 seconds.
-    const isConviction = S.config.decisionMode === "conviction";
+    const isConviction = isPriceTriggeredDecisionMode(S.config.decisionMode);
     if (pipelineEntryFiredThisWindow.has(`${sym}:${windowKey}`) && !openPositions.has(sym)) {
       if (!isConviction) {
         filteredByNewGuards.add(sym); // exclude from Phase-4 to prevent a second runBotTickForCoin call
@@ -1508,7 +1509,7 @@ export async function runBotLoopTick(): Promise<void> {
     // same coin every second while the price oscillates at the zone boundary
     // (e.g. ZEC sitting at 81.5¢ with lockPrice=82¢ — dispatched every tick,
     // rejected by live-price gate, released, dispatched again → zero bets).
-    if (isConviction) {
+    if (S.config.decisionMode === "conviction") {
       const abortedAt = convictionAbortCooldown.get(`${sym}:${windowKey}`);
       // Use per-abort cooldown duration: boundary misses (price past cap or poller
       // out of zone) use 2 s so the bot retries quickly on oscillation; direction
@@ -1543,7 +1544,7 @@ export async function runBotLoopTick(): Promise<void> {
       // is at a configured extreme — mirrors the tick.ts gate exactly.
       // Use per-market override when set; falls through to global convictionMinEntryMinutes.
       const convMinEntryMin = getConvictionMinEntryMinute(sym, S.config);
-      if (convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
+      if (S.config.decisionMode === "conviction" && convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
         const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
         const _bypassFloor = S.config.convictionEarlyBypassThreshold ?? 0.81;
         const _bypassCap   = S.config.convictionEarlyBypassCap ?? 0.95;
@@ -1937,7 +1938,7 @@ export async function runBotLoopTick(): Promise<void> {
     // Bypassed when parole accuracy for this coin/restriction meets the threshold.
     // Conviction mode: trend stability is irrelevant — price position is the signal.
     let reversingCaution = false;
-    if (S.config.decisionMode !== "conviction" && stability === "reversing" && decision.action !== "SKIP" && !paroleState.reversing.has(sym)) {
+    if (!isPriceTriggeredDecisionMode(S.config.decisionMode) && stability === "reversing" && decision.action !== "SKIP" && !paroleState.reversing.has(sym)) {
       effectiveConfidence = effectiveConfidence - 20;
       reversingCaution = true;
       if (effectiveConfidence < S.config.minConfidence) {
@@ -2100,7 +2101,7 @@ export async function runBotLoopTick(): Promise<void> {
 
         // Conviction mode: price position is the sole signal — quality gates
         // are meaningless because model directions are irrelevant.
-        if (S.config.decisionMode !== "conviction") {
+        if (!isPriceTriggeredDecisionMode(S.config.decisionMode)) {
           // Signal quality gates for YES bets (direction-neutral logic applied
           // symmetrically to NO bets below):
           //
@@ -2153,7 +2154,7 @@ export async function runBotLoopTick(): Promise<void> {
 
       if (decision.action === "BET_NO") {
         // Conviction mode: price position is the sole signal — quality gates bypass.
-        if (S.config.decisionMode !== "conviction") {
+        if (!isPriceTriggeredDecisionMode(S.config.decisionMode)) {
           // Claude and ML are the authoritative directional signals.  A NO bet
           // is only placed when neither Claude nor ML calls YES.  Stat is a
           // confidence modifier only and does not block a NO bet on its own.
@@ -2211,7 +2212,7 @@ export async function runBotLoopTick(): Promise<void> {
     // market. Historical data shows 7/7 NO losses in exactly this configuration.
     // Require ML confirmation (mlAbove === false) OR broad 3-signal agreement to
     // allow entry — otherwise skip.  Bypassed by shadow parole when accuracy qualifies.
-    if (S.config.decisionMode !== "conviction" && decision.action === "BET_NO" && kalshiData.value !== null && !paroleState.noGate.has(sym)) {
+    if (!isPriceTriggeredDecisionMode(S.config.decisionMode) && decision.action === "BET_NO" && kalshiData.value !== null && !paroleState.noGate.has(sym)) {
       const livePrice = getCachedPrediction(sym)?.price ?? null;
       const ABOVE_STRIKE_NO_GAP = 0.001; // 0.1% above strike
       if (livePrice !== null && livePrice > kalshiData.value * (1 + ABOVE_STRIKE_NO_GAP)) {
@@ -2470,7 +2471,7 @@ export async function runBotLoopTick(): Promise<void> {
   // Conviction mode: no directional cap — each coin fires independently the moment
   // its yesPrice enters the lock zone.  Capping direction would prevent valid NO
   // and YES bets from firing simultaneously when multiple coins are in zone.
-  if (!S.config.freeRunMode && S.config.decisionMode !== "conviction" && S.config.enableDirectionCap && S.config.maxSameDirectionBets > 0) {
+  if (!S.config.freeRunMode && !isPriceTriggeredDecisionMode(S.config.decisionMode) && S.config.enableDirectionCap && S.config.maxSameDirectionBets > 0) {
     // Effective cap is raised by parole when direction_cap shadow accuracy qualifies.
     const effectiveDirCap = S.config.maxSameDirectionBets + paroleState.dirCapIncrease;
     for (const dir of ["yes", "no"] as const) {
@@ -2514,7 +2515,7 @@ export async function runBotLoopTick(): Promise<void> {
   const LOW_CONVICTION_BAND = 58;
   const CHOP_MIN_COINS = 4;
   const lowConvCount = bets.filter(e => e.confidence <= LOW_CONVICTION_BAND).length;
-  if (!S.config.freeRunMode && lowConvCount >= CHOP_MIN_COINS) {
+  if (!S.config.freeRunMode && !isPriceTriggeredDecisionMode(S.config.decisionMode) && lowConvCount >= CHOP_MIN_COINS) {
     const capped = bets.splice(2); // keep top 2, remove the rest
     for (const e of capped) {
       e.action = "SKIP";
@@ -2529,7 +2530,7 @@ export async function runBotLoopTick(): Promise<void> {
   }
 
   if (bets.length > 0) {
-    if (S.config.decisionMode === "conviction") {
+    if (isPriceTriggeredDecisionMode(S.config.decisionMode)) {
       // Conviction: all qualifying coins fire in parallel — no single winner.
       // Select the first ranked item for UI focus only; this does not promote
       // size or delay the other independent submissions.
@@ -2616,7 +2617,7 @@ export async function runBotLoopTick(): Promise<void> {
   // Reversing coins that were soft-skipped (trendStability="reversing") and coins
   // blocked by momentum override / directional-cap are excluded from execution.
   const betSymbols  = bets.map(e => e.symbol);
-  const _isConvictionMode = S.config.decisionMode === "conviction";
+  const _isConvictionMode = isPriceTriggeredDecisionMode(S.config.decisionMode);
   const skipSymbols = skips
     .filter(e => (_isConvictionMode || e.trendStability !== "reversing") && !filteredByNewGuards.has(e.symbol))
     .map(e => e.symbol);
@@ -2637,7 +2638,7 @@ export async function runBotLoopTick(): Promise<void> {
     let yesPrice: number | null = kalshiData?.yesPrice ?? null;
     let tickTicker: string | null = kalshiData?.ticker ?? null;
     let tickTarget: number | null = kalshiData?.value ?? null;
-    if (S.config.decisionMode === "conviction") {
+    if (isPriceTriggeredDecisionMode(S.config.decisionMode)) {
       const pollerPrice = getConvictionLivePrice(sym);
       if (pollerPrice != null) {
         tickTicker = pollerPrice.ticker ?? null;

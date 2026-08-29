@@ -51,7 +51,7 @@ test("one persisted false disables both regular direction guard checkpoints", ()
   );
   assert.match(
     tickSource,
-    /evaluateRegularFreefallPreSubmitGuard\(\{\s*enabled: S\.config\.convictionDirectionGuardEnabled \?\? true,/,
+    /evaluateRegularFreefallPreSubmitGuard\(\{\s*enabled: !isFastLane && \(S\.config\.convictionDirectionGuardEnabled \?\? true\),/,
   );
 
   const routeSource = readFileSync(
@@ -94,7 +94,7 @@ test("one persisted false disables both conviction proximity checkpoints", () =>
   );
   assert.match(
     reservationSection,
-    /if \(S\.config\.decisionMode === "conviction"\)[\s\S]*tryClaimEntryReservation/,
+    /if \(S\.config\.decisionMode === "conviction" \|\| isFastLane\)[\s\S]*tryClaimEntryReservation/,
   );
   assert.doesNotMatch(reservationSection, /convictionProximityGuardEnabled/);
   assert.match(reservationSection, /tryClaimEntryReservation\(convictionFiredThisWindow/);

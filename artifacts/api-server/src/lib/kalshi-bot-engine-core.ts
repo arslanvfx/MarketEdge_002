@@ -956,7 +956,63 @@ export function checkMomentumOverride(
 // without pulling in the ./crypto or DB modules.
 // ---------------------------------------------------------------------------
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction" | "fastlane";
+
+/** Price-triggered modes bypass model-derived entry authorization. */
+export function isPriceTriggeredDecisionMode(mode: DecisionMode | string | null | undefined): boolean {
+  return mode === "conviction" || mode === "fastlane";
+}
+
+/** FastLane always submits at the far edge of the configured side-cost band. */
+export function computeFastLaneLimitPrice(
+  side: "yes" | "no",
+  lockPriceCap: number,
+): number {
+  const rawYesBookPrice = side === "yes" ? lockPriceCap : 1 - lockPriceCap;
+  return side === "yes"
+    ? Math.floor(rawYesBookPrice * 100) / 100
+    : Math.ceil(rawYesBookPrice * 100) / 100;
+}
+
+/** Size from the worst-case side cost represented by the edge-capped limit. */
+export function computeFastLaneContractCount(
+  targetDollars: number,
+  side: "yes" | "no",
+  yesBookLimitPrice: number,
+): number {
+  const worstCaseSideCost = side === "yes"
+    ? yesBookLimitPrice
+    : 1 - yesBookLimitPrice;
+  if (
+    !Number.isFinite(targetDollars)
+    || targetDollars <= 0
+    || !Number.isFinite(worstCaseSideCost)
+    || worstCaseSideCost <= 0
+  ) return 0;
+  return Math.floor(targetDollars / worstCaseSideCost);
+}
+
+/** Build the exact current-window ticker using DST-aware New York local time. */
+export function computeKalshi15mTicker(symbol: string, windowKey: string): string {
+  const openMs = Date.parse(`${windowKey}:00Z`);
+  if (!Number.isFinite(openMs)) {
+    throw new Error(`Invalid UTC window key: ${windowKey}`);
+  }
+  const close = new Date(openMs + 15 * 60_000);
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "2-digit",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(close).map(({ type, value }) => [type, value]),
+  );
+  const minute = parts.minute;
+  return `KX${symbol.toUpperCase()}15M-${parts.year}${parts.month.toUpperCase()}${parts.day}${parts.hour}${minute}-${minute}`;
+}
 
 /**
  * Per-hour silence / reduced-bet schedule (V2 quiet hours).

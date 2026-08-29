@@ -32,7 +32,7 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // TTL and atomically overwrites the entry once the live fetch returns, so the
 // shared cache never has a transient null gap visible to other readers.
 import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, CONVICTION_OB_CACHE_TTL_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
-import { deriveConvictionZone, getEffectiveConvictionZone } from "./kalshi-bot-engine";
+import { deriveConvictionZone, getEffectiveConvictionZone, isPriceTriggeredDecisionMode } from "./kalshi-bot-engine";
 import { CRYPTO_COINS, getTickerFreshEvidence } from "./crypto-data";
 import { logger } from "./logger";
 import {
@@ -67,6 +67,7 @@ let lastHealthLogAt = 0;
 let pollerGeneration = 0;
 let spotSamplerHandle: ReturnType<typeof setInterval> | null = null;
 const spotSamplesInFlight = new PerKeyInFlight();
+const marketPollsInFlight = new PerKeyInFlight();
 
 function healthFor(sym: string): TickFeedHealth {
   let h = tickFeedHealth.get(sym);
@@ -101,10 +102,6 @@ export interface ConvictionLivePrice {
 const convictionPriceMap = new Map<string, ConvictionLivePrice>();
 
 let pollerHandle: ReturnType<typeof setInterval> | null = null;
-// setInterval does not await async callbacks.  Keep one cycle in flight so a
-// slow Kalshi request cannot pile up concurrent force-refreshes (and, more
-// importantly, let an older cycle publish after a newer one).
-let pollOnceInFlight: Promise<void> | null = null;
 
 // Retain completed outcomes briefly so a fast failure is still recognized as
 // the prepared request and cannot trigger an immediate duplicate read.
@@ -262,8 +259,8 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
   // never wait for account I/O on the placement path.
   void prewarmRegularAccountSnapshot();
 
-  await Promise.allSettled(
-    syms.map(async (sym) => {
+  for (const sym of syms) {
+    void marketPollsInFlight.run(sym, async () => {
       // forceRefresh=true bypasses the TTL check without deleting the existing
       // cache entry.  The old entry stays readable to other callers until the
       // live fetch atomically overwrites it — no transient null gap.
@@ -387,7 +384,7 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
           // The strict ticker+freshness check in startOrderbookWarmup means a
           // late result is usable only for this exact prepared market.
           const pollerEntry = convictionPriceMap.get(sym);
-          const obPrewarming = pollerEntry?.ticker
+          const obPrewarming = S.config.decisionMode === "conviction" && pollerEntry?.ticker
             ? startOrderbookWarmup(sym, pollerEntry.ticker, generation)
             : false;
 
@@ -411,8 +408,10 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
         // ─────────────────────────────────────────────────────────────────────
       }
       // ─────────────────────────────────────────────────────────────────────
-    }),
-  );
+    }).catch((err) => {
+      logger.warn({ err, sym }, "[conviction-poller] per-symbol market poll failed");
+    });
+  }
   // ── Periodic tick-feed health summary ────────────────────────────────────
   // Once a minute, log per-coin ok/fail counts since the previous summary so
   // production logs always show whether the direction-guard tick feed is
@@ -435,14 +434,7 @@ async function pollOnceImpl(generation = pollerGeneration): Promise<void> {
 }
 
 function pollOnce(): Promise<void> {
-  if (pollOnceInFlight) return pollOnceInFlight;
-  const generation = pollerGeneration;
-  let run: Promise<void>;
-  run = pollOnceImpl(generation).finally(() => {
-    if (pollOnceInFlight === run) pollOnceInFlight = null;
-  });
-  pollOnceInFlight = run;
-  return run;
+  return pollOnceImpl(pollerGeneration);
 }
 
 /**
@@ -504,6 +496,7 @@ export function stopConvictionPoller(): void {
   pollerHandle = null;
   spotSamplerHandle = null;
   spotSamplesInFlight.clear();
+  marketPollsInFlight.clear();
   convictionPriceMap.clear();
   orderbookWarmups.clear();
   tickFeedHealth.clear();
@@ -517,7 +510,7 @@ export function stopConvictionPoller(): void {
  * at startup after loadBotConfigFromDB.
  */
 export function syncConvictionPoller(): void {
-  if (S.config.decisionMode === "conviction") {
+  if (isPriceTriggeredDecisionMode(S.config.decisionMode)) {
     startConvictionPoller();
   } else {
     stopConvictionPoller();

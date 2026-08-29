@@ -1,6 +1,6 @@
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction";
+export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction" | "fastlane";
 
 export interface RegularUnresolvedIntent {
   clientOrderId: string;

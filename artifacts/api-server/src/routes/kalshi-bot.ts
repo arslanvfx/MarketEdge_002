@@ -202,6 +202,28 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minHoldMinutes: 0,
     convictionDailyLossLimit: 50,
   },
+  fastlane: {
+    decisionMode: "fastlane",
+    minConfidence: 50,
+    minReturnMultiple: 1.00,
+    kalshiLockPrice: 0.82,
+    kalshiLockPriceCap: 0.91,
+    betDelayMinutes: 0,
+    maxEntryMinutes: 0,
+    minRemainingMinutes: 0,
+    allowLateEntries: true,
+    windowEntryBufferSeconds: 0,
+    requireMonitorReady: false,
+    enableDynamicSizing: false,
+    betSize: 1,
+    maxBetSize: 2,
+    maxBetsPerWindow: 2,
+    enableMidExit: false,
+    regimePenalty: 0,
+    enableDirectionCap: false,
+    enableMomentumFilter: false,
+    minHoldMinutes: 0,
+  },
 };
 
 async function readModePresets(): Promise<Partial<Record<DecisionMode, Partial<BotConfig>>>> {
@@ -1023,7 +1045,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof minConfidence === "number" && minConfidence >= 40 && minConfidence <= 100) {
     partial.minConfidence = minConfidence;
   }
-  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction") {
+  if (decisionMode === "classic" || decisionMode === "ml_gate" || decisionMode === "consensus" || decisionMode === "unanimous" || decisionMode === "conviction" || decisionMode === "fastlane") {
     // When switching modes: apply built-in mode defaults as a baseline, then
     // layer the saved user preset on top (if one exists), then apply any
     // explicit overrides from this request on top of that.

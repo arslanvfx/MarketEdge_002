@@ -60,14 +60,16 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
     }
   }
   const isConviction = (merged.decisionMode ?? "classic") === "conviction";
+  const isFastLane = (merged.decisionMode ?? "classic") === "fastlane";
+  const isPriceTriggeredMode = isConviction || isFastLane;
   const convictionFloor = configDraft.kalshiLockPrice ?? merged.kalshiLockPrice ?? 0.82;
   const convictionCap = configDraft.kalshiLockPriceCap ?? merged.kalshiLockPriceCap ?? 0.91;
-  const convictionGlobalZoneInvalid = isConviction && convictionFloor > convictionCap;
+  const convictionGlobalZoneInvalid = isPriceTriggeredMode && convictionFloor > convictionCap;
   const convictionOverrides = {
     ...(merged.perMarketConvictionConfig ?? {}),
     ...(configDraft.perMarketConvictionConfig ?? {}),
   };
-  const invalidPerMarketSymbols = isConviction
+  const invalidPerMarketSymbols = isPriceTriggeredMode
     ? ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"].filter(sym => {
         const ov = convictionOverrides[sym];
         if (!ov) return false;
@@ -549,6 +551,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       { id: "unanimous",        label: "Unanimous",        desc: "All 3 of [Stat, Claude, ML] must agree — highest conviction, fewest bets" },
 
                       { id: "conviction",      label: "Conviction",      desc: "Fires when Kalshi's YES price hits 90¢ (BET YES) or drops to 10¢ (BET NO) — the market itself declaring 90%+ certainty in either direction." },
+                      { id: "fastlane",        label: "FastLane Conviction", desc: "Price-only fast path: when Kalshi enters the configured band, immediately submit an IOC capped at the band's far edge. No model or order-book validation." },
                     ] as { id: DecisionMode; label: string; desc: string }[]).map(m => {
                       const isSelected = (merged.decisionMode ?? "classic") === m.id;
                       const needsML = m.id === "ml_gate" || m.id === "unanimous";
@@ -599,16 +602,16 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
 
                 {/* Conviction Settings */}
-                {isConviction && (
+                {isPriceTriggeredMode && (
                   <div className="col-span-2 flex flex-col gap-2 rounded-xl border border-violet-500/20 bg-violet-500/5 p-3">
                     <span className="text-xs font-medium text-violet-400 flex items-center gap-1.5">
                       <Zap className="w-3 h-3" />
-                      Conviction Settings
+                      {isFastLane ? "FastLane Conviction Settings" : "Conviction Settings"}
                     </span>
                     <span className="text-[11px] text-muted-foreground/80 leading-relaxed">
-                      Fires when Kalshi&apos;s contract price itself declares certainty in either direction — YES ≥ trigger (BET YES) or NO ≥ trigger meaning YES ≤ (1 − trigger) (BET NO).
-                      No spot-price math. Models are soft advisors; a bet only skips if ALL available models unanimously oppose that direction.
-                      Bot re-checks every 5 seconds so a cross at any point in the window is caught quickly.
+                      {isFastLane
+                        ? "Waits only for Kalshi's price to enter the configured range, then immediately submits an IOC order capped at the far edge of that range. It does not wait for models or authenticate the order book before submitting."
+                        : "Fires when Kalshi's contract price itself declares certainty in either direction — YES ≥ trigger (BET YES) or NO ≥ trigger meaning YES ≤ (1 − trigger) (BET NO). No spot-price math. Models are soft advisors; a bet only skips if ALL available models unanimously oppose that direction."}
                     </span>
                     {(() => {
                        const floor = convictionFloor;

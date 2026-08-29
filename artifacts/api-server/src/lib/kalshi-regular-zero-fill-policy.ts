@@ -6,13 +6,13 @@ export const REGULAR_MAX_ZERO_FILL_ATTEMPTS = 2;
 export const CONVICTION_MAX_ZERO_FILL_ATTEMPTS = 10;
 
 export function regularZeroFillRetryCooldownMs(decisionMode: string): number {
-  return decisionMode === "conviction"
+  return decisionMode === "conviction" || decisionMode === "fastlane"
     ? CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS
     : REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS;
 }
 
 export function regularZeroFillMaxAttempts(decisionMode: string): number {
-  return decisionMode === "conviction"
+  return decisionMode === "conviction" || decisionMode === "fastlane"
     ? CONVICTION_MAX_ZERO_FILL_ATTEMPTS
     : REGULAR_MAX_ZERO_FILL_ATTEMPTS;
 }

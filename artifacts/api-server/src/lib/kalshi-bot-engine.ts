@@ -99,6 +99,10 @@ import {
   checkConvictionOneSidedBook,
   shouldSuppressConvictionStopLoss,
   shouldApplyLoopGlobalQuietHours,
+  isPriceTriggeredDecisionMode,
+  computeFastLaneLimitPrice,
+  computeFastLaneContractCount,
+  computeKalshi15mTicker,
   type BetProfile,
   type BetProfileConfig,
   type DecisionMode,
@@ -120,6 +124,10 @@ import {
 // Re-export constants and types so callers only import from this file.
 export {
   computeCorePairDecision,
+  isPriceTriggeredDecisionMode,
+  computeFastLaneLimitPrice,
+  computeFastLaneContractCount,
+  computeKalshi15mTicker,
   computeConvictionDecision,
   computeMLGateDecision,
   ML_WEIGHT,
@@ -327,9 +335,9 @@ function _makeBotDecisionInner(
   // this is exactly what killed 6-coin windows where stat/ML cached data expired
   // mid-window.  Bypass ALL three null-checks for conviction.
   {
-    const convictionMode = config.decisionMode === "conviction";
-    const claudeMissing  = !convictionMode && claudeAbove === null;
-    const statMlMissing  = !convictionMode && (statAbove === null || mlAbove === null);
+    const priceTriggeredMode = isPriceTriggeredDecisionMode(config.decisionMode);
+    const claudeMissing  = !priceTriggeredMode && claudeAbove === null;
+    const statMlMissing  = !priceTriggeredMode && (statAbove === null || mlAbove === null);
     if (statMlMissing || claudeMissing) {
       const missing = (
         [statMlMissing && statAbove === null && "Stat", claudeMissing && "Claude", statMlMissing && mlAbove === null && "ML"] as Array<string | false>
@@ -539,7 +547,7 @@ function _makeBotDecisionInner(
   // ── Decision Mode: conviction ─────────────────────────────────────────────
   // Delegates to the pure computeConvictionDecision in kalshi-bot-engine-core.
   // See that function's JSDoc for the full zone map and invariant documentation.
-  if (decisionMode === "conviction") {
+  if (isPriceTriggeredDecisionMode(decisionMode)) {
     // Floor and cap are independently configurable; derive the zone from both.
     // When both fields are set, deriveConvictionZone passes them through verbatim
     // (independent-fields mode).  Falls back to 0.82/0.91 if not yet migrated.
@@ -625,7 +633,7 @@ export function makeBotDecision(
   // (53% WR at minute 0 vs 79% at minute 1+). YES bets are unaffected.
   // 0 = disabled.
   const minNoMin = config.minNoEntryMinutes ?? 1;
-  if (inner.action === "BET_NO" && minNoMin > 0 && minutesElapsed < minNoMin) {
+  if (config.decisionMode !== "fastlane" && inner.action === "BET_NO" && minNoMin > 0 && minutesElapsed < minNoMin) {
     return {
       action: "SKIP",
       confidence: inner.confidence,
@@ -648,7 +656,7 @@ export function makeBotDecision(
     // Always record roiPct so it shows in bet signals even on SKIPs below.
     inner.signals = { ...inner.signals, roiPct: parseFloat(roi.toFixed(2)) };
 
-    if (roi < MIN_ROI_PCT && config.decisionMode !== "conviction") {
+    if (roi < MIN_ROI_PCT && !isPriceTriggeredDecisionMode(config.decisionMode)) {
       return {
         action: "SKIP",
         confidence: inner.confidence,
