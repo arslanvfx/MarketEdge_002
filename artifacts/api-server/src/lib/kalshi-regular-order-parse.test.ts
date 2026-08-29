@@ -525,7 +525,7 @@ test("conviction hot path consumes only prepared orderbook and reaches durable c
     fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),
   );
   const gateStart = source.indexOf("// ─── CONVICTION LIVE-PRICE GATE");
-  const gateEnd = source.indexOf("// Orderbook fetch result handling:", gateStart);
+  const gateEnd = source.indexOf("// No public/poller fallback is allowed for conviction.", gateStart);
   const preparedGate = source.slice(gateStart, gateEnd);
   assert.ok(gateStart >= 0 && gateEnd > gateStart);
   assert.doesNotMatch(preparedGate, /await waitForConvictionOrderbookWarmup/);
@@ -551,6 +551,8 @@ test("regular conviction submits one IOC only after authenticated-book revalidat
   assert.match(source, /const useAuthenticatedBook =/);
   assert.match(source, /conviction IOC requires a fresh exact authenticated book/);
   assert.match(source, /authenticatedBookQuote\?\.revalidate\(\) \?\? true/);
+  assert.doesNotMatch(source, /fresh guarded poller fallback accepted/);
+  assert.match(source, /authenticated book required — retrying next tick/);
   const initialEntry = source.slice(
     source.indexOf("const fokResult = await placeEntryOrderWithSizeFallback"),
     source.indexOf("const exchangeResponseAt", source.indexOf("const fokResult = await placeEntryOrderWithSizeFallback")),

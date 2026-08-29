@@ -26,10 +26,8 @@ import {
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
   getConvictionMinEntryMinute,
-  evaluateConvictionPollerFallback,
   tryClaimEntryReservation,
   releaseEntryReservationOwnership,
-  type ConvictionPollerFallbackSource,
   type EntryReservationOwnership,
   resolveEntryQuietHoursDecision, resolveEntryQuietHoursDecisionForSymbol,
   applyPlacementTimeReducedPct,
@@ -72,10 +70,6 @@ import {
   CRYPTO_COINS, KALSHI_SERIES, currentWindowKey, type TrendStability,
 } from "./crypto";
 import { triggerWindowPipeline } from "./kalshi-bot-pipeline";
-import {
-  CONVICTION_LIVE_PRICE_TTL_MS,
-  getConvictionLivePriceSnapshot,
-} from "./kalshi-conviction-poller";
 import {
   computePerformanceReport, runAutoTuneRules, decrementPausedCoins,
   type PerformanceReport, type AutoTuneMutation, type SettledBetRecord,
@@ -367,25 +361,6 @@ async function _runBotTick(
 
   const pos = openPositions.get(sym);
   if (pos) {
-    const requiresOutOfBandUnwind =
-      pos.entryMode === "live"
-      && (pos.entryDecision.signals as Record<string, unknown> | null)?.["convictionOutOfBandFill"] === true;
-    if (pos.windowKey === windowKey && requiresOutOfBandUnwind) {
-      try {
-        await closePosition(pos, yesPrice, kalshiTarget, "conviction_fill_outside_entry_band");
-        openPositions.delete(sym);
-        logger.error(
-          { sym, windowKey, entryYesPrice: pos.entryYesPrice },
-          "[kalshi-bot] recovered out-of-band conviction position unwound",
-        );
-      } catch (closeError) {
-        logger.error(
-          { err: closeError, sym, windowKey, entryYesPrice: pos.entryYesPrice },
-          "[kalshi-bot] recovered out-of-band conviction position still open — re-entry remains blocked",
-        );
-      }
-      return;
-    }
     // Check if the window has changed (expired)
     if (pos.windowKey !== windowKey) {
       midExitedWindows.delete(sym); // clear flip state — new window starts fresh
@@ -1876,12 +1851,6 @@ async function _runBotTick(
   let freshYesBid: number | null = null;
   const convictionHotPathStartedAt = Date.now();
   let finalQuoteReadyAt = convictionHotPathStartedAt;
-  // True when the poller fallback path was taken (empty book or OB timeout).
-  // Hoisted here so the order placement block (outside the conviction gate
-  // block below) can read it — declaration inside `if (decisionMode===conviction)`
-  // would be out of scope at the call site.
-  let usedPollerFallback = false;
-  let pollerFallbackSource: ConvictionPollerFallbackSource | null = null;
   // Deterministic ticker for the current window, derived from windowKey rather
   // than kalshiTargetCache (which can drift to the next window ticker ~10 min
   // before close).  Hoisted outside the conviction gate block so the position-
@@ -1958,105 +1927,29 @@ async function _runBotTick(
       "[kalshi-bot] conviction live-price gate: prepared orderbook consumed",
     );
 
-    // Orderbook fetch result handling:
-    //
-    // obPrices != null with prices → real book → use directly (most trusted).
-    //
-    // obPrices == { yesBid: null, yesAsk: null } → authenticated successfully
-    // but no resting limit orders (illiquid). This is the NORMAL state for
-    // Kalshi crypto markets — market makers quote via the public REST endpoint,
-    // not as resting orders. Fall back to conviction poller price.
-    //
-    // Both a confirmed empty book and a transient authenticated-orderbook
-    // timeout may use the poller's independent quote, but ONLY through the same
-    // strict validator. The snapshot must be current, match the exact window
-    // ticker, contain both sides, have a tight spread, and remain inside this
-    // market's effective zone. Any failure releases the lock and retries later.
-    const fallbackSource: ConvictionPollerFallbackSource | null =
+    // No public/poller fallback is allowed for conviction. If this authenticated
+    // prepared book is absent, empty, or one-sided, fail closed and wait for a
+    // later tick. The final execution gateway below separately requires fresh
+    // authenticated full requested depth and revalidates it immediately before
+    // the broker POST.
+    if (
       obPrices == null
-        ? "orderbook_timeout"
-        : obPrices.yesBid == null && obPrices.yesAsk == null
-          ? "empty_book"
-          : null;
-
-    if (fallbackSource) {
-      const pollerSnap = getConvictionLivePriceSnapshot(sym);
-      const fallback = evaluateConvictionPollerFallback({
-        source: fallbackSource,
-        direction,
-        snapshot: pollerSnap,
-        expectedTicker,
-        nowMs: Date.now(),
-        maxAgeMs: CONVICTION_LIVE_PRICE_TTL_MS,
-        lockPrice,
-        lockPriceCap,
-      });
-      const sourceLabel = fallbackSource === "orderbook_timeout" ? "orderbook timeout" : "empty book";
-
-      if (!fallback.accepted || !pollerSnap || pollerSnap.yesAsk == null || pollerSnap.yesBid == null) {
-        releaseConvictionEntryReservation(`poller fallback rejected: ${fallback.reason}`);
-        if (fallback.reason === "out_of_zone") {
-          convictionAbortCooldown.set(`${sym}:${windowKey}`, Date.now());
-          convictionAbortCooldownMs.set(`${sym}:${windowKey}`, CONVICTION_BOUNDARY_MISS_COOLDOWN_MS);
-        }
-
-        const reasonDetail =
-          fallback.reason === "missing_snapshot" ? "fresh poller quote unavailable"
-          : fallback.reason === "stale_snapshot" ? `poller quote stale (${Math.round(fallback.ageMs ?? 0)}ms old)`
-          : fallback.reason === "ticker_mismatch" ? `poller ticker mismatch (expected ${expectedTicker}, got ${pollerSnap?.ticker ?? "missing"})`
-          : fallback.reason === "one_sided_quote" ? "poller quote is one-sided"
-          : fallback.reason === "invalid_quote" ? "poller quote is invalid"
-          : fallback.reason === "wide_spread" ? `poller spread ${((fallback.spread ?? 0) * 100).toFixed(1)}¢ exceeds ${fallback.maxSpread * 100}¢`
-          : fallback.reason === "out_of_zone" ? `poller price ${((fallback.refPrice ?? 0) * 100).toFixed(1)}¢ outside zone`
-          : "poller fallback rejected";
-
-        logger.warn(
-          {
-            sym, direction, windowKey, expectedTicker, fallbackSource,
-            reason: fallback.reason, ageMs: fallback.ageMs,
-            pollerTicker: pollerSnap?.ticker ?? null,
-            pYesAsk: pollerSnap?.yesAsk ?? null,
-            pYesBid: pollerSnap?.yesBid ?? null,
-            spread: fallback.spread,
-            maxSpread: fallback.maxSpread,
-            pollerRefPrice: fallback.refPrice,
-            lockPrice, lockPriceCap,
-          },
-          `[kalshi-bot] conviction live-price gate: ${sourceLabel} — safe poller fallback blocked; retrying next tick`,
-        );
-        setTickAbortReason(sym, windowKey, `${sourceLabel}: ${reasonDetail} — retrying next tick`);
-        return;
-      }
-
-      freshYesAsk = pollerSnap.yesAsk;
-      freshYesBid = pollerSnap.yesBid;
-      usedPollerFallback = true;
-      pollerFallbackSource = fallbackSource;
-      logger.info(
-        {
-          sym, direction, windowKey, expectedTicker, fallbackSource,
-          ageMs: fallback.ageMs,
-          pYesAsk: pollerSnap.yesAsk,
-          pYesBid: pollerSnap.yesBid,
-          spread: fallback.spread,
-          pollerRefPrice: fallback.refPrice,
-          lockPrice, lockPriceCap,
-        },
-        `[kalshi-bot] conviction live-price gate: ${sourceLabel} — fresh guarded poller fallback accepted; will use FOK order`,
+      || obPrices.yesAsk == null
+      || obPrices.yesBid == null
+    ) {
+      const reason = obPrices == null
+        ? "authenticated orderbook unavailable"
+        : "authenticated orderbook incomplete";
+      releaseConvictionEntryReservation(reason);
+      logger.warn(
+        { sym, direction, windowKey, expectedTicker, reason },
+        "[kalshi-bot] conviction live-price gate: authenticated book required — retrying next tick",
       );
-      setTickAbortReason(sym, windowKey, `${sourceLabel}: safe live poller quote accepted — attempting FOK entry`);
-    } else if (obPrices) {
-      freshYesAsk = obPrices.yesAsk;
-      freshYesBid = obPrices.yesBid;
-
-      // Depth gate removed: Kalshi market makers don't leave resting in-zone
-      // orders, so inZoneContracts was always 0 → gate blocked every tick for
-      // the entire window.  If the book is thin at zone price, the FOK order
-      // simply returns 409 fill_or_kill_insufficient_resting_volume and the
-      // bot retries on the next tick.  The limit price (set below) is the
-      // actual guard against out-of-zone fills — it caps the fill price at the
-      // zone boundary regardless of what resting orders exist.
+      setTickAbortReason(sym, windowKey, `${reason} — retrying next tick`);
+      return;
     }
+    freshYesAsk = obPrices.yesAsk;
+    freshYesBid = obPrices.yesBid;
 
     // NO orders require freshYesAsk for the cross-check.  If it is null (one-sided
     // book — bids present but no YES asks), we cannot confirm the spread is tight
@@ -2240,12 +2133,6 @@ async function _runBotTick(
     // impossible on Kalshi).  So a fill below the zone floor becomes
     // physically impossible, regardless of any race between gate and fill.
     //
-    // EXCEPTION (usedPollerFallback = true): the authenticated book is
-    // unavailable, but the poller supplied a fresh, exact-ticker, two-sided,
-    // tight-spread quote in-zone. The bid-floor check is irrelevant here; the
-    // guarded poller ask check already confirmed the executable side is in
-    // [lockPrice, lockPriceCap].
-    //
     // Example (target 0.90 → lockPrice 0.88, book has resting orders):
     //   freshYesBid = 0.87 → 0.87 < 0.88 → abort ✓  (book has depth below zone)
     //   freshYesBid = 0.88 → 0.88 ≥ 0.88 → proceed ✓ (entire book in zone)
@@ -2253,7 +2140,7 @@ async function _runBotTick(
       const bidAbort = evaluateYesBidFloorAbort(
         freshYesBid,
         lockPrice,
-        usedPollerFallback,
+        false,
         false,
       );
       if (bidAbort.abort) {
@@ -2963,32 +2850,23 @@ async function _runBotTick(
       // "gtc" and "good_till_cancelled" are rejected with a 400 oneof error.
       //
       // Time-in-force selection (changed 2026-08-15 — the $10 sizing regression):
-      //   • Real-book (usedPollerFallback=false): IOC.  At 12–18 contracts an
+      //   • Authenticated real-book only: IOC. At 12–18 contracts an
       //     all-or-nothing FOK was rejected with 409 insufficient_resting_volume
       //     even when MOST contracts are available (e.g. 11 of 12).  IOC fills
       //     whatever the book has at our limit and cancels the rest — the
       //     partial-fill correction below tracks the position by ACTUAL fill
       //     count.  The limit price still hard-caps the fill price, so zone
       //     enforcement is unchanged.
-      //   • Guarded poller fallback (usedPollerFallback=true): IOC as well. The
-      //     quote is accepted only after exact ticker, freshness, complete
-      //     bid/ask, tight-spread, and effective-zone checks pass. IOC prevents
-      //     thin liquidity from rejecting the entire position all-or-nothing.
-      //
       // Regular conviction uses single-attempt mode. A definitive immediate
       // volume rejection becomes a 0-fill and returns to the guarded next-tick
       // lifecycle; this call never emits a second broker request.
       let result: { filledCount: number; avgPrice: number | null; orderId: string | null };
 
       const entryTimeInForce: "immediate_or_cancel" = "immediate_or_cancel";
-      const pollerFallbackLabel =
-        pollerFallbackSource === "orderbook_timeout" ? "orderbook-timeout fallback"
-        : pollerFallbackSource === "empty_book" ? "empty-book fallback"
-        : null;
 
       logger.info(
-        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, usedPollerFallback, pollerFallbackSource, timeInForce: entryTimeInForce },
-        `[kalshi-bot] conviction entry: placing IOC order${pollerFallbackLabel ? ` (${pollerFallbackLabel})` : ""}`,
+        { sym, direction, windowKey, ticker: expectedTicker, limitPrice: orderLimitPrice, contractCount, timeInForce: entryTimeInForce },
+        "[kalshi-bot] conviction entry: placing authenticated-book IOC order",
       );
 
       const exchangeSubmitStartedAt = Date.now();
@@ -3066,23 +2944,23 @@ async function _runBotTick(
         const MAX_ZERO_FILL_ATTEMPTS = regularZeroFillMaxAttempts(S.config.decisionMode);
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(
-            { sym, ticker: kalshiTicker, direction, attempts, usedPollerFallback },
+            { sym, ticker: kalshiTicker, direction, attempts },
             "[kalshi-bot] IOC returned 0 fills after max attempts — blocking for rest of window",
           );
           windowFailedFills.add(attemptKey);
           // Conviction lock intentionally left set — coin is blocked for rest of window.
           setTickAbortReason(sym, windowKey,
-            `${pollerFallbackLabel ?? "order"} returned 0 fills after ${attempts} attempts — book empty at our price; blocked for rest of window`);
+            `order returned 0 fills after ${attempts} attempts — book empty at our price; blocked for rest of window`);
         } else {
           logger.warn(
-            { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS, usedPollerFallback },
+            { sym, ticker: kalshiTicker, direction, attempts, maxAttempts: MAX_ZERO_FILL_ATTEMPTS },
             "[kalshi-bot] IOC returned 0 fills — book empty, will retry next tick",
           );
           // Release conviction lock so the next tick can retry this coin.
           // Without this, the coin stays locked for the whole window after one 0-fill.
           releaseConvictionEntryReservation("entry order returned zero fills; retry allowed");
           setTickAbortReason(sym, windowKey,
-            `${pollerFallbackLabel ?? "order"} returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${zeroFillRetryCooldownMs / 1_000}s cooldown`);
+            `order returned 0 fills (attempt ${attempts}/${MAX_ZERO_FILL_ATTEMPTS}) — book empty at our price, retrying after ${zeroFillRetryCooldownMs / 1_000}s cooldown`);
         }
         // Confirmed zero fill (dead) — release the durable reservation so the
         // next tick may re-claim. This is a DEFINITE outcome, safe to release.
@@ -3133,7 +3011,7 @@ async function _runBotTick(
         const _remMinLeft = isNaN(_remWkMs) ? 0 : (15 - (Date.now() - _remWkMs) / 60000);
 
         const remDecision = decideRemainderAttempt({
-          usedPollerFallback,
+          usedPollerFallback: false,
           timeInForce: entryTimeInForce,
           requestedCount,
           attemptedCount: fokResult.attemptedCount,
@@ -3198,7 +3076,7 @@ async function _runBotTick(
           }
         } else {
           logger.warn(
-            { sym, direction, requested: requestedCount, attempted: fokResult.attemptedCount, filled: firstFill, usedPollerFallback, skipReason: remDecision.skipReason, minLeft: +_remMinLeft.toFixed(2) },
+            { sym, direction, requested: requestedCount, attempted: fokResult.attemptedCount, filled: firstFill, skipReason: remDecision.skipReason, minLeft: +_remMinLeft.toFixed(2) },
             "[kalshi-bot] partial fill — no remainder re-attempt; updating contractCount to actual fill",
           );
         }
@@ -3243,10 +3121,12 @@ async function _runBotTick(
       // so the dashboard shows the placed bet, not a superseded abort.
       clearTickAbort(tickAbortReasons, sym, windowKey);
 
-      // Layer 3: validate the authoritative fill, not the quote that authorized
+      // Audit the authoritative fill, not only the quote that authorized the
       // submission. A BUY limit caps the worst price but Kalshi can legally fill
-      // against a much cheaper resting offer. That "improvement" destroys the
-      // conviction premise and must be unwound after it is durably recorded.
+      // against a cheaper resting offer that appeared after final revalidation.
+      // Record that exchange price improvement, but never auto-sell it: an
+      // opposite IOC cannot undo the fill and can convert a winner into a
+      // guaranteed spread loss. This restores the pre-2026-08-29 behavior.
       if (authorizationDecisionMode === "conviction" && result.avgPrice != null && authorizationConvictionZone) {
         const { lockPrice: _lp, lockPriceCap: _lpCap } = authorizationConvictionZone;
         const fillZone = evaluateConvictionFillZone(direction, result.avgPrice, _lp, _lpCap);
@@ -3265,7 +3145,7 @@ async function _runBotTick(
               lockPrice: _lp, lockPriceCap: _lpCap,
               contractCount, ticker: expectedTicker,
             },
-            "[kalshi-bot] conviction fill outside entry band — emergency unwind required",
+            "[kalshi-bot] conviction fill outside entry band — audit recorded; position will be held",
           );
         }
       }
@@ -3578,35 +3458,10 @@ async function _runBotTick(
   }
 
   if (entryMode === "live" && convictionOutOfBandFill != null) {
-    try {
-      await closePosition(
-        newPosition,
-        actualFillYesPrice,
-        kalshiTarget,
-        "conviction_fill_outside_entry_band",
-      );
-      openPositions.delete(sym);
-      setTickAbortReason(
-        sym,
-        windowKey,
-        `actual fill ${(convictionOutOfBandFill.sideCost * 100).toFixed(0)}¢ was outside the conviction band and was unwound`,
-      );
-      logger.error(
-        { sym, direction, windowKey, ...convictionOutOfBandFill },
-        "[kalshi-bot] out-of-band conviction fill unwound immediately",
-      );
-    } catch (closeError) {
-      setTickAbortReason(
-        sym,
-        windowKey,
-        "out-of-band conviction fill could not be unwound; position retained and re-entry blocked",
-      );
-      logger.error(
-        { err: closeError, sym, direction, windowKey, ...convictionOutOfBandFill },
-        "[kalshi-bot] emergency unwind failed — position remains tracked and re-entry stays blocked",
-      );
-    }
-    return;
+    logger.warn(
+      { sym, direction, windowKey, ...convictionOutOfBandFill },
+      "[kalshi-bot] exchange price-improved conviction fill below/away from authorization quote — holding position; no automatic unwind",
+    );
   }
 
   // Shadow paper bet: when live mode is active and shadowPaperBets is enabled,

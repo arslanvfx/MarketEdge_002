@@ -1,6 +1,6 @@
 ---
-name: Conviction zone enforcement — fail-closed gate + cross-check bugs fixed
-description: Three cross-check bugs blocked valid YES/NO conviction bets; architecture of the live-price gate and cross-checks.
+name: Conviction zone enforcement and price-improved fills
+description: Authenticated-book authorization and the hold-not-sell policy for exchange price improvements.
 ---
 
 ## Zone definition (current)
@@ -30,15 +30,10 @@ entry even when `no_ask_dollars` is clearly in zone.
 `convictionPriceMap`. `ConvictionInputs` gains a `noAsk` field; `computeConvictionDecision`
 prefers `noAsk` over `1 - yesBid` as the primary NO trigger.
 
-### Bug 2 — YES cross-check too strict when `usedPollerFallback=true`
-Cross-check aborts when `freshYesBid < lockPrice`. When the book is empty and we use the
-poller-fallback path, the FOK order is placed at exactly `freshYesAsk` — the fill is
-guaranteed to be `freshYesAsk` or no fill. The bid position is irrelevant; only the ask
-matters. The bid check was blocking SOL/ZEC with ask=0.921 (in zone) and bid=0.90 (1¢ below
-floor due to normal spread straddling the zone boundary).
-
-**Fix**: guard with `&& !usedPollerFallback`. When book has resting orders the bid check
-still applies (a low bid means sub-zone asks could exist and fill the FOK at below-zone prices).
+### Poller fallback is not authorization
+Public/poller prices can help detect candidates, but they cannot authorize a conviction
+submission. A timed-out, empty, incomplete, stale, or insufficient-depth authenticated book
+must fail closed and wait for a later tick.
 
 ### Bug 3 — NO cross-check float bug: threshold computed as 0.09999... instead of 0.10
 `(1 - 0.91) + 0.01` evaluates to `0.09999...` in IEEE 754 double precision (because
@@ -47,31 +42,35 @@ greater than `0.09999...`, so BNB with `freshYesAsk=0.10` was falsely aborted.
 
 **Fix**: `Math.round(((1 - lockPrice) + 0.01) * 100) / 100` — rounds to 2 decimal places.
 
-## Current layered design (kalshi-bot-tick.ts conviction block)
-- **Layer 0 — fail closed**: freshYesAsk/freshYesBid come ONLY from authenticated orderbook
-  (`orderbook_fp` parser) or poller fallback (empty book only). Fetch failure → ABORT.
+## Current layered design
+- **Layer 0 — fail closed**: live entry evidence comes only from authenticated order books.
+  Public/poller fallback may not authorize an order.
 - **Main zone gate**: fresh ref price must be in [lockPrice, lockPriceCap].
   - YES: freshYesAsk in zone
-  - NO: (1 - freshYesBid) in zone  (the poller zone check at this point uses noAsk directly)
+  - NO: (1 - freshYesBid) in zone
 - **Cross-checks**:
   - NO side: `freshYesAsk > round((1−lockPrice)+0.01)` → abort. Threshold = 10¢ for 0.91.
-  - YES side: `freshYesBid < lockPrice && !usedPollerFallback` → abort.
+  - YES side: `freshYesBid < lockPrice` → abort.
 - **Order limit = exact verified ask/bid**, clamped inside the zone. No crossing buffer.
-- **Layer 3 — authoritative fill enforcement**: every positive conviction fill is checked
+- **Final authenticated gateway**: the exact ticker must expose fresh full requested depth
+  inside the band, and the same immutable book version must still be current at the broker
+  boundary.
+- **Authoritative fill audit**: every positive conviction fill is checked
   against the immutable, canonical per-symbol band captured before the live intent claim.
   This must never use mutable post-await config or the stale decision quote.
-- An out-of-band fill is persisted at the actual exchange price, then immediately unwound
-  through the durable exit-intent lifecycle. The entry lock remains claimed after a positive
-  fill, so a successful unwind cannot restart a buy→sell loop in the same window.
-- If the unwind is rejected or ambiguous, the actual exposure remains tracked and blocks
-  re-entry; never clear ownership or pretend the position is gone.
+- An out-of-band exchange price improvement is persisted at the actual price and tagged for
+  audit, but held through normal position settlement. Never submit an automatic opposite-side
+  order solely because a BUY filled more cheaply than the authorization floor.
 - Durable intents store the authorization mode/floor/cap. Restart reconciliation tags an
-  out-of-band recovered fill before hydration so position management retries the unwind.
+  out-of-band recovered fill before hydration; that tag is audit-only and must not trigger
+  an automatic unwind.
 - `windowFailedFills` Set still prevents rebuy bleed after FOK exhaustion.
 
-**Why:** An 81¢ IOC BUY was legally price-improved to a 41¢ resting offer during a rapid
-collapse after two zero fills. Audit-only handling then held the invalid conviction position
-to a full loss. A BUY limit is only a maximum price, never a minimum.
+**Why:** A BUY limit is only a maximum price, never a minimum. During a slow exchange request,
+Kalshi can legally match a newly cheaper offer after final validation. Selling immediately
+cannot undo the entry and can turn a position that later wins into a guaranteed spread loss.
+The immediate-unwind regression was introduced after the previously working hold behavior.
 
-**How to apply:** Any execution or reconciliation path that accepts a positive conviction
-fill must validate the actual winning-side cost against the pre-submit authorization snapshot.
+**How to apply:** Require authenticated full-depth evidence at every submission boundary.
+Audit actual fills against the authorization snapshot, retain ownership after every positive
+or ambiguous result, and let normal risk/settlement policy manage a price-improved position.
