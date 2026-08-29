@@ -37,6 +37,8 @@ export function mergePerSymbolQuietHoursForDisplay(server: Record<string, QuietH
 export interface PerSymbolQuietHoursPanelProps {
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   masterEnabled: boolean;
+  calibrationThreshold?: number;
+  onCalibrationThresholdChange?: (threshold: number) => void;
   onChange: (symbol: string, value: QuietHoursV2) => void;
   onCalibrationApplied?: () => void;
   onImmediateSaveError?: (message: string) => void;
@@ -48,6 +50,7 @@ export interface PerSymbolQuietHoursPanelProps {
 
 export function PerSymbolQuietHoursPanel({
   perSymbolQuietHours, masterEnabled, onChange, onCalibrationApplied, onImmediateSaveError, authPost,
+  calibrationThreshold = 84.5, onCalibrationThresholdChange,
   dgCap: dgCapProp = 1, dgEnabled: dgEnabledProp = true,
   symbolSmartHoursModes,
 }: PerSymbolQuietHoursPanelProps) {
@@ -55,13 +58,14 @@ export function PerSymbolQuietHoursPanel({
   const [calibrating, setCalibrating] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
   const [messageOk, setMessageOk] = React.useState(true);
-  const [threshold, setThreshold] = React.useState(85);
+  const [threshold, setThreshold] = React.useState(calibrationThreshold);
   const [dgCap, setDgCap] = React.useState(dgCapProp);
   const [dgEnabled, setDgEnabled] = React.useState(dgEnabledProp);
   const schedulesRef = React.useRef(perSymbolQuietHours);
   React.useEffect(() => { schedulesRef.current = perSymbolQuietHours; }, [perSymbolQuietHours]);
   React.useEffect(() => { setDgCap(dgCapProp); }, [dgCapProp]);
   React.useEffect(() => { setDgEnabled(dgEnabledProp); }, [dgEnabledProp]);
+  React.useEffect(() => { setThreshold(calibrationThreshold); }, [calibrationThreshold]);
 
   const post = async (body: object) => {
     try { await authPost("/crypto/bot/config", body); }
@@ -115,7 +119,16 @@ export function PerSymbolQuietHoursPanel({
     <div className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <label className="flex shrink-0 items-center gap-1.5"><span className="text-[11px] text-muted-foreground">Silence below</span>
-          <select className="rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground" value={threshold} onChange={e => setThreshold(parseFloat(e.target.value))} disabled={calibrating}>
+          <select
+            className="rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground"
+            value={threshold}
+            onChange={e => {
+              const nextThreshold = parseFloat(e.target.value);
+              setThreshold(nextThreshold);
+              onCalibrationThresholdChange?.(nextThreshold);
+            }}
+            disabled={calibrating}
+          >
             {Array.from({ length: 31 }, (_, i) => parseFloat((90 - i * .5).toFixed(1))).map(value => <option key={value} value={value}>{value}% win rate</option>)}
           </select>
         </label>

@@ -19,3 +19,4 @@ Per-market Smart Hours must recalibrate on exact UTC-hour boundaries without era
 - The global Smart Hours enable flag is the visible master for per-market enforcement. Master off means every symbol is active; master on applies only that symbol's enabled schedule. Missing/disabled symbols never fall back to global or legacy schedules.
 - Loop-level global schedule shortcuts must not run in per-market mode; only symbol-level placement checks may block or reduce entries there. UI status summaries must obey the same master state.
 - Explicit manual “Calibrate & Apply” may enable the master after saving schedules. Automatic hourly recalibration preserves an operator’s intentional master-off choice.
+- The operator-selected calibration win-rate threshold is durable shared configuration, not component-local state. Manual Apply persists it before computing; hourly and restart catch-up runs reuse that exact saved value.

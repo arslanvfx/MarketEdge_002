@@ -131,6 +131,17 @@ export function SmartQuietHoursControls({
           <PerSymbolQuietHoursPanel
             perSymbolQuietHours={visiblePerSymbolQuietHours}
             masterEnabled={merged.quietHoursV2?.enabled ?? false}
+            calibrationThreshold={merged.quietHoursV2?.autoTuneThreshold ?? 84.5}
+            onCalibrationThresholdChange={threshold => {
+              const quietHoursV2 = {
+                ...(merged.quietHoursV2 ?? EMPTY_QUIET_HOURS),
+                autoTuneThreshold: threshold,
+              };
+              setDraft(current => ({ ...current, quietHoursV2 }));
+              authPost("/crypto/bot/config", { quietHoursV2 }).catch(error => {
+                onImmediateSaveError?.(error instanceof Error ? error.message : "Unable to save Smart Hours threshold");
+              });
+            }}
             onChange={(symbol, schedule) => setDraft(current => ({
               ...current,
               perSymbolQuietHours: {

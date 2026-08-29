@@ -19,6 +19,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   resolveQuietHoursV2State,
@@ -27,6 +30,22 @@ import {
   type BotConfig,
 } from "./kalshi-bot-engine-core.ts";
 import { CRYPTO_COINS, KALSHI_SERIES } from "./market-defs.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const botDbSource = readFileSync(join(here, "kalshi-bot-db.ts"), "utf8");
+
+test("manual Smart Hours threshold is persisted for subsequent hourly calibrations", () => {
+  assert.match(
+    botDbSource,
+    /autoTuneThreshold:\s*opts\.thresholdOverride/,
+    "manual calibration must save its threshold into durable bot config",
+  );
+  assert.match(
+    botDbSource,
+    /thresholdOverride \?\? qhv2\?\.autoTuneThreshold \?\? 84\.5/,
+    "hourly calibration must reuse the saved threshold when no override is supplied",
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Helpers — mirrors the symbolSmartHoursModes computation in getBotState()

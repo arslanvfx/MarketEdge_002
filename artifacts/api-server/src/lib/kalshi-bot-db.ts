@@ -1145,6 +1145,25 @@ async function _runSmartHoursCalibrationInner(opts?: {
   skippedSymbols: string[];
 }> {
   const nowMs = opts?.nowMs ?? Date.now();
+  // The threshold selected for a manual calibration is also the durable
+  // threshold for every subsequent hourly/catch-up calibration. Persist it
+  // before computing schedules so the operation and saved configuration can
+  // never disagree, including after a restart.
+  if (
+    opts?.thresholdOverride !== undefined
+    && S.config.quietHoursV2?.autoTuneThreshold !== opts.thresholdOverride
+  ) {
+    await updateBotConfig({
+      quietHoursV2: {
+        ...(S.config.quietHoursV2 ?? {
+          enabled: false,
+          silencedUtcHours: [],
+          reducedBetUtcHours: {},
+        }),
+        autoTuneThreshold: opts.thresholdOverride,
+      },
+    });
+  }
   const result = await recomputeAllSymbolQuietHours(opts?.thresholdOverride, { forceEnable: true });
   const isCompleteRun = result.calibratedSymbols.length > 0 && result.skippedSymbols.length === 0;
   const shouldActivateMaster =

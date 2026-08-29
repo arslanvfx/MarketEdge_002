@@ -22,6 +22,7 @@ const headerSource   = readFileSync(join(here, "bot-header.tsx"), "utf8");
 const condSource     = readFileSync(join(here, "conditions-panel.tsx"), "utf8");
 const typesSource    = readFileSync(join(here, "types.ts"), "utf8");
 const perSymbolSource = readFileSync(join(here, "per-symbol-quiet-hours-panel.tsx"), "utf8");
+const controlsSource = readFileSync(join(here, "smart-quiet-hours-controls.tsx"), "utf8");
 
 // ---------------------------------------------------------------------------
 // bot-header.tsx
@@ -172,5 +173,17 @@ describe("per-market Smart Hours tabs", () => {
 
   it("prefers canonical server-resolved market modes", () => {
     assert.match(perSymbolSource, /symbolSmartHoursModes\?\.\[symbol\]/);
+  });
+
+  it("loads the calibration threshold from persisted config instead of a hard-coded local default", () => {
+    assert.match(controlsSource, /calibrationThreshold=\{merged\.quietHoursV2\?\.autoTuneThreshold \?\? 84\.5\}/);
+    assert.match(perSymbolSource, /useState\(calibrationThreshold\)/);
+    assert.doesNotMatch(perSymbolSource, /useState\(85\)/);
+  });
+
+  it("saves threshold changes so hourly calibration reuses the operator setting", () => {
+    assert.match(perSymbolSource, /onCalibrationThresholdChange\?\.\(nextThreshold\)/);
+    assert.match(controlsSource, /authPost\("\/crypto\/bot\/config", \{ quietHoursV2 \}\)/);
+    assert.match(controlsSource, /autoTuneThreshold: threshold/);
   });
 });
