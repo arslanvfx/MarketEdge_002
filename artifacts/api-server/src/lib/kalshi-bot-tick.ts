@@ -2734,12 +2734,21 @@ async function _runBotTick(
   }
 
   if (entryMode === "live") {
-    // The authenticated gateway is intentionally opt-in. Legacy pricing and
-    // submission remain byte-for-byte on the existing path unless selected.
+    // Conviction IOC orders MUST use the authenticated execution book even
+    // when the operator's general gateway setting is legacy. A buy limit only
+    // caps the worst price; Kalshi may legally improve into cheaper offers.
+    // The authenticated quote proves every currently executable contract is
+    // inside the conviction band and revalidates that exact book version at
+    // the final pre-POST boundary. Without that proof, do not submit.
+    const convictionRequiresAuthenticatedBook =
+      authorizationDecisionMode === "conviction";
+    const useAuthenticatedBook =
+      convictionRequiresAuthenticatedBook
+      || S.config.liveExecutionGateway === "authenticated_book";
     const authenticatedGatewayZone = S.config.decisionMode === "conviction"
       ? getEffectiveConvictionZone(sym, S.config)
       : { lockPrice: 0, lockPriceCap: 1 };
-    const authenticatedBookQuote = S.config.liveExecutionGateway === "authenticated_book"
+    const authenticatedBookQuote = useAuthenticatedBook
       ? quoteAuthenticatedBookExecution({
           ticker: expectedTicker,
           side: direction,
@@ -2748,8 +2757,10 @@ async function _runBotTick(
           sideCostCeiling: authenticatedGatewayZone.lockPriceCap,
         }, dashboard2KalshiOrderbookService)
       : null;
-    if (S.config.liveExecutionGateway === "authenticated_book" && !authenticatedBookQuote) {
-      const reason = "authenticated book gateway requires a fresh exact book with full requested depth";
+    if (useAuthenticatedBook && !authenticatedBookQuote) {
+      const reason = convictionRequiresAuthenticatedBook
+        ? "conviction IOC requires a fresh exact authenticated book with every executable level inside the entry band"
+        : "authenticated book gateway requires a fresh exact book with full requested depth";
       releaseConvictionEntryReservation(reason);
       setTickAbortReason(sym, windowKey, `gateway abort: ${reason}`);
       regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);
@@ -2854,6 +2865,15 @@ async function _runBotTick(
             regularZeroFillRetryKey("live", sym, windowKey),
             Date.now() + zeroFillRetryCooldownMs,
           );
+        }
+        if (claim.reason === "authoritative_zero_fill_terminal") {
+          // Preserve the in-memory conviction reservation as a fast path. The
+          // durable zero-fill row remains authoritative across process restarts.
+          windowFailedFills.add(`${sym}:${windowKey}:${entryMode}`);
+          setTickAbortReason(sym, windowKey, "confirmed conviction zero fill — no retry allowed this window");
+          regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
+          markPlacementTerminal("intent_denied", claim.reason);
+          return;
         }
         regularPlacementFunnel.reservation(ensurePlacementCandidate(), false, Date.now(), claim.reason);
         markPlacementTerminal("intent_denied", claim.reason ?? "durable reservation denied");
@@ -3005,9 +3025,9 @@ async function _runBotTick(
         regularPlacementFunnel.fill(ensurePlacementCandidate(), 0, exchangeResponseAt);
         markPlacementTerminal("zero_fill", "entry order returned zero fills");
         // IOC returned 0 fills — no resting contracts at our exact price.
-        // Allow up to 2 attempts (spaced by the authoritative cooldown) before blocking the
-        // coin for the rest of the window. Gives the book time to build
-        // liquidity (especially early in a window) without hammering empty book.
+        // Conviction gets one attempt only. Retrying a fast-moving band entry
+        // can act on a materially different book after the original quote has
+        // disappeared. Other modes retain their bounded retry policy.
         // Capture the original order ownership before releasing anything. This
         // synchronous timestamp closes the gap where another poller dispatch
         // could re-enter before the durable zero-fill update completes.
@@ -3022,9 +3042,8 @@ async function _runBotTick(
         const prev = windowZeroFillAttempts.get(attemptKey) ?? 0;
         const attempts = prev + 1;
         windowZeroFillAttempts.set(attemptKey, attempts);
-        // Conviction opportunities can cross the full entry band in seconds.
-        // Retry confirmed zero fills after the short conviction cooldown, while
-        // unresolved/unknown outcomes remain durably locked by the intent table.
+        // A confirmed conviction zero fill ends this symbol/window. Unknown
+        // outcomes remain durably locked by the intent table in every mode.
         const MAX_ZERO_FILL_ATTEMPTS = regularZeroFillMaxAttempts(S.config.decisionMode);
         if (attempts >= MAX_ZERO_FILL_ATTEMPTS) {
           logger.warn(

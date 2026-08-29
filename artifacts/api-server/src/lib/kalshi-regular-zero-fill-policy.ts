@@ -1,7 +1,11 @@
 export const REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS = 30_000;
-export const CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS = 1_000;
+export const CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS = 30_000;
 export const REGULAR_MAX_ZERO_FILL_ATTEMPTS = 2;
-export const CONVICTION_MAX_ZERO_FILL_ATTEMPTS = 10;
+// Conviction is a fast-moving price-band strategy. A confirmed zero fill ends
+// the symbol's entry attempt for that window: retrying later can act on a
+// materially different book even when the original poller signal still looks
+// in-range.
+export const CONVICTION_MAX_ZERO_FILL_ATTEMPTS = 1;
 
 export function regularZeroFillRetryCooldownMs(decisionMode: string): number {
   return decisionMode === "conviction"

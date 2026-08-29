@@ -34,15 +34,16 @@ test("authoritative regular zero-fill cooldown blocks through 29.999s and opens 
   assert.equal(regularZeroFillRetryRemainingMs(retryAfter, retryAfter), 0);
 });
 
-test("conviction retries an authoritative zero fill after one second", () => {
+test("conviction zero fill ends the window attempt instead of retrying a changed book", () => {
   const startedAt = 1_000_000;
   const cooldown = regularZeroFillRetryCooldownMs("conviction");
   assert.equal(cooldown, CONVICTION_ZERO_FILL_RETRY_COOLDOWN_MS);
   const retryAfter = startedAt + cooldown;
-  assert.equal(regularZeroFillRetryRemainingMs(retryAfter, startedAt), 1_000);
+  assert.equal(regularZeroFillRetryRemainingMs(retryAfter, startedAt), 30_000);
   assert.equal(regularZeroFillRetryRemainingMs(retryAfter, retryAfter - 1), 1);
   assert.equal(regularZeroFillRetryRemainingMs(retryAfter, retryAfter), 0);
   assert.equal(regularZeroFillRetryCooldownMs("ml_gate"), REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS);
   assert.equal(regularZeroFillMaxAttempts("conviction"), CONVICTION_MAX_ZERO_FILL_ATTEMPTS);
+  assert.equal(CONVICTION_MAX_ZERO_FILL_ATTEMPTS, 1);
   assert.equal(regularZeroFillMaxAttempts("ml_gate"), REGULAR_MAX_ZERO_FILL_ATTEMPTS);
 });

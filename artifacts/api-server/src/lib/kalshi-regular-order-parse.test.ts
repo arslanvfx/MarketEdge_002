@@ -515,6 +515,8 @@ test("regular intent migrations declare claim-predicate indexes", async () => {
   );
   assert.match(claim, /migration is not ready; refusing live claim/);
   assert.doesNotMatch(claim, /await ensureMigrated\(\)/);
+  assert.match(claim, /authorization_decision_mode = 'conviction'/);
+  assert.match(claim, /authoritative_zero_fill_terminal/);
 });
 
 test("conviction hot path consumes only prepared orderbook and reaches durable claim without candidate I/O", async () => {
@@ -537,13 +539,17 @@ test("conviction hot path consumes only prepared orderbook and reaches durable c
   assert.doesNotMatch(hotPath, /await fetchOrderbookPrices/);
 });
 
-test("regular conviction submits one IOC at the exact verified quote", async () => {
+test("regular conviction submits one IOC only after authenticated-book revalidation", async () => {
   const source = await import("node:fs/promises").then((fs) =>
     fs.readFile(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8"),
   );
   assert.match(source, /Math\.floor\(Math\.min\(freshYesAsk, lockPriceCap\) \* 100\) \/ 100/);
   assert.match(source, /Math\.ceil\(Math\.max\(freshYesBid, 1 - lockPriceCap\) \* 100\) \/ 100/);
   assert.match(source, /const entryTimeInForce: "immediate_or_cancel" = "immediate_or_cancel"/);
+  assert.match(source, /authorizationDecisionMode === "conviction"/);
+  assert.match(source, /const useAuthenticatedBook =/);
+  assert.match(source, /conviction IOC requires a fresh exact authenticated book/);
+  assert.match(source, /authenticatedBookQuote\?\.revalidate\(\) \?\? true/);
   const initialEntry = source.slice(
     source.indexOf("const fokResult = await placeEntryOrderWithSizeFallback"),
     source.indexOf("const exchangeResponseAt", source.indexOf("const fokResult = await placeEntryOrderWithSizeFallback")),

@@ -250,6 +250,7 @@ function claimBatchGroupKey(key: RegularOrderIntentKey): string {
     key.maxOrdersPerWindow ?? "",
     key.maxTotalExposure ?? "",
     key.zeroFillRetryCooldownMs ?? REGULAR_ZERO_FILL_RETRY_COOLDOWN_MS,
+    key.authorizationDecisionMode ?? "",
   ].join("\u0000");
 }
 
@@ -323,8 +324,10 @@ async function claimRegularOrderIntentBatch(
       status: string;
       reserved_cost: string | number | null;
       resolved_at: Date | string | null;
+      authorization_decision_mode: string | null;
     }>(
-      `SELECT symbol, window_key, status, reserved_cost, resolved_at
+      `SELECT symbol, window_key, status, reserved_cost, resolved_at,
+              authorization_decision_mode
          FROM kalshi_regular_order_intents
         WHERE mode = $1
           AND (
@@ -333,15 +336,29 @@ async function claimRegularOrderIntentBatch(
             OR (
               window_key = $2
               AND status = 'zero_fill'
-              AND resolved_at > NOW() - ($3::double precision * INTERVAL '1 millisecond')
+               AND (
+                 authorization_decision_mode = 'conviction'
+                 OR $4::text = 'conviction'
+                 OR resolved_at > NOW() - ($3::double precision * INTERVAL '1 millisecond')
+               )
             )
           )`,
-      [first.mode, first.windowKey, zeroFillRetryCooldownMs],
+      [first.mode, first.windowKey, zeroFillRetryCooldownMs, first.authorizationDecisionMode ?? null],
     );
     const blockedSymbols = new Set(facts.rows.map((row) => row.symbol.toUpperCase()));
     const cooldownSymbols = new Set(
       facts.rows
-        .filter((row) => row.status === "zero_fill")
+        .filter((row) => row.status === "zero_fill" && row.authorization_decision_mode !== "conviction")
+        .map((row) => row.symbol.toUpperCase()),
+    );
+    const terminalZeroFillSymbols = new Set(
+      facts.rows
+        .filter((row) =>
+          row.status === "zero_fill"
+          && (
+            row.authorization_decision_mode === "conviction"
+            || first.authorizationDecisionMode === "conviction"
+          ))
         .map((row) => row.symbol.toUpperCase()),
     );
     const economicallyActive = facts.rows.filter((row) => row.status !== "zero_fill");
@@ -358,9 +375,11 @@ async function claimRegularOrderIntentBatch(
       if (blockedSymbols.has(symbol)) {
         results.set(key.clientOrderId, {
           claimed: false,
-          reason: cooldownSymbols.has(symbol)
-            ? "authoritative_zero_fill_cooldown"
-            : "unresolved_intent_exists",
+          reason: terminalZeroFillSymbols.has(symbol)
+            ? "authoritative_zero_fill_terminal"
+            : cooldownSymbols.has(symbol)
+              ? "authoritative_zero_fill_cooldown"
+              : "unresolved_intent_exists",
         });
         continue;
       }

@@ -249,6 +249,26 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
     assert.equal((await mod.claimRegularOrderIntent(fastKey("cid-z3"))).claimed, true);
   });
 
+  it("conviction zero_fill permanently blocks another claim in the same window", async () => {
+    const wk = "DBTEST-Z-CONVICTION";
+    const convictionKey = (clientOrderId: string) => ({
+      ...key(clientOrderId, wk),
+      zeroFillRetryCooldownMs: 1,
+      authorizationDecisionMode: "conviction",
+    });
+    assert.equal((await mod.claimRegularOrderIntent(convictionKey("cid-zc1"))).claimed, true);
+    await mod.resolveRegularOrderIntent({
+      clientOrderId: "cid-zc1",
+      status: "zero_fill",
+      filledCount: 0,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(
+      await mod.claimRegularOrderIntent(convictionKey("cid-zc2")),
+      { claimed: false, reason: "authoritative_zero_fill_terminal" },
+    );
+  });
+
   it("resolve detects a missing intent row instead of reporting success", async () => {
     await assert.rejects(
       mod.resolveRegularOrderIntent({
