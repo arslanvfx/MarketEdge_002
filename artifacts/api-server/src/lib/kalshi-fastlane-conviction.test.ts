@@ -94,6 +94,19 @@ test("FastLane bypasses authenticated-book quote and revalidation while retainin
   assert.match(source, /authenticatedBookQuote\?\.revalidate\(\) \?\? true/);
 });
 
+test("FastLane honors the configured per-window minimum entry wait with no early-price bypass", () => {
+  const tickSource = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
+  const loopSource = readFileSync(new URL("./kalshi-bot-loop.ts", import.meta.url), "utf8");
+  assert.match(tickSource, /if \(isPriceTriggeredMode\) \{[\s\S]*getConvictionMinEntryMinute\(sym, S\.config\)/);
+  assert.match(
+    tickSource,
+    /S\.config\.decisionMode === "conviction" &&[\s\S]*S\.config\.convictionEarlyBypassEnabled !== false/,
+  );
+  assert.match(tickSource, /const modeLabel = isFastLane \? "fastlane" : "conviction"/);
+  assert.match(loopSource, /if \(isPriceTriggeredMode\) \{[\s\S]*getConvictionMinEntryMinute\(sym, S\.config\)/);
+  assert.match(loopSource, /const _isExtreme = isConviction && _bypassEnabled/);
+});
+
 test("one slow market poll cannot serialize every FastLane symbol", () => {
   const source = readFileSync(new URL("./kalshi-conviction-poller.ts", import.meta.url), "utf8");
   assert.match(source, /const marketPollsInFlight = new PerKeyInFlight\(\)/);

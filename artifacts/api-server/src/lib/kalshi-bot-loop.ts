@@ -1539,12 +1539,13 @@ export async function runBotLoopTick(): Promise<void> {
         evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: warmup (${Math.ceil(CONVICTION_WARMUP_S - clockElapsedS)}s)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
         continue;
       }
-      // Minimum entry wait: block dispatch until N minutes have elapsed.
-      // Bypassed when extreme-price bypass is enabled and the live YES price
-      // is at a configured extreme — mirrors the tick.ts gate exactly.
-      // Use per-market override when set; falls through to global convictionMinEntryMinutes.
+    }
+    if (isPriceTriggeredMode) {
+      // Minimum entry wait: both price-triggered modes wait until N minutes
+      // have elapsed. Existing Conviction may use its configured extreme-price
+      // bypass; FastLane treats the wait as an unconditional hard floor.
       const convMinEntryMin = getConvictionMinEntryMinute(sym, S.config);
-      if (S.config.decisionMode === "conviction" && convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
+      if (convMinEntryMin > 0 && clockElapsedS < convMinEntryMin * 60) {
         const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
         const _bypassFloor = S.config.convictionEarlyBypassThreshold ?? 0.81;
         const _bypassCap   = S.config.convictionEarlyBypassCap ?? 0.95;
@@ -1552,13 +1553,14 @@ export async function runBotLoopTick(): Promise<void> {
         const _liveYes = _pollerPrice?.yesAsk ?? _pollerPrice?.yesBid ?? null;
         const _lNoFloor = +(1 - _bypassCap).toFixed(4);
         const _lNoCap   = +(1 - _bypassFloor).toFixed(4);
-        const _isExtreme = _bypassEnabled &&
+        const _isExtreme = isConviction && _bypassEnabled &&
           _liveYes !== null && (
             (_liveYes >= _bypassFloor && _liveYes <= _bypassCap) ||
             (_liveYes >= _lNoFloor && _liveYes <= _lNoCap)
           );
         if (!_isExtreme) {
-          evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `conviction: min entry wait (${convMinEntryMin}min — ${(clockElapsedS / 60).toFixed(1)}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
+          const modeLabel = isFastLane ? "fastlane" : "conviction";
+          evalResults.push({ symbol: sym, action: "SKIP", confidence: 0, score: 0, reason: `${modeLabel}: min entry wait (${convMinEntryMin}min — ${(clockElapsedS / 60).toFixed(1)}min elapsed)`, windowKey, selected: false, evaluatedAt: now, trendStability: null, regime });
           continue;
         }
       }

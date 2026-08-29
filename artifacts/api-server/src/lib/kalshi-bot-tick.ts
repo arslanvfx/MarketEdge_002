@@ -1837,15 +1837,19 @@ async function _runBotTick(
   // The bot polls continuously — the instant the floor clears and price is in
   // zone ([lockPrice-2¢, lockPrice+2¢]), the next tick fires the bet.
   //
-  // ONE exception: if convictionEarlyBypassEnabled=true and the live price
+  // Conviction-only exception: if convictionEarlyBypassEnabled=true and the live price
   // crosses the extreme bypass threshold (default 0.92, currently set to 0.95
   // in config), entry is allowed immediately — that's an outsized move that
   // justifies jumping the queue.  Any price within the normal zone waits.
-  if (S.config.decisionMode === "conviction") {
+  // FastLane never receives the early-price bypass: its configured wait is a
+  // hard placement-time floor even when the contract is already in range.
+  if (isPriceTriggeredMode) {
     // Use per-market override when set; falls through to global convictionMinEntryMinutes.
     const _convMinEntry = getConvictionMinEntryMinute(sym, S.config);
     if (_convMinEntry > 0 && secondsElapsedNow < _convMinEntry * 60) {
-      const _bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
+      const _bypassEnabled =
+        S.config.decisionMode === "conviction" &&
+        S.config.convictionEarlyBypassEnabled !== false;
       const _bypassFloor = S.config.convictionEarlyBypassThreshold ?? 0.81;
       const _bypassCap   = S.config.convictionEarlyBypassCap ?? 0.95;
       // Same spread-side fix as the minWindowEntryMinutes bypass above:
@@ -1867,13 +1871,14 @@ async function _runBotTick(
           "[kalshi-bot] conviction: min entry wait bypassed — price in extreme range",
         );
       } else {
+        const modeLabel = isFastLane ? "fastlane" : "conviction";
         logger.info(
           { sym, windowKey, elapsedMin: +(secondsElapsedNow / 60).toFixed(1), convictionMinEntryMinutes: _convMinEntry },
-          "[kalshi-bot] conviction: min entry time not yet reached — skipping",
+          `[kalshi-bot] ${modeLabel}: min entry time not yet reached — skipping`,
         );
         setTickAbortReason(sym, windowKey,
-          `conviction: min entry wait (${_convMinEntry}min — ${(secondsElapsedNow / 60).toFixed(1)}min elapsed, price not in extreme bypass range)`);
-        releaseConvictionEntryReservation("conviction minimum entry wait");
+          `${modeLabel}: min entry wait (${_convMinEntry}min — ${(secondsElapsedNow / 60).toFixed(1)}min elapsed${isFastLane ? "" : ", price not in extreme bypass range"})`);
+        releaseConvictionEntryReservation(`${modeLabel} minimum entry wait`);
         return;
       }
     }
