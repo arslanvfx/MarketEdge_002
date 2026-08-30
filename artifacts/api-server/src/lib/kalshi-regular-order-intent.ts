@@ -89,6 +89,7 @@ export interface RegularExitIntentKey {
   ticker: string;
   side: "yes" | "no";
   requestedCount: number;
+  submittedYesLimitPrice: number;
 }
 
 let _migrated = false;
@@ -169,6 +170,7 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
         ticker           TEXT NOT NULL,
         side             TEXT NOT NULL,
         requested_count  NUMERIC(12,2) NOT NULL,
+        submitted_yes_limit_price NUMERIC(12,8),
         status           TEXT NOT NULL DEFAULT 'reserved',
         reason           TEXT,
         filled_count     NUMERIC(12,2),
@@ -201,7 +203,11 @@ export async function runRegularOrderIntentMigrations(): Promise<void> {
       ALTER TABLE kalshi_regular_exit_intents
         ALTER COLUMN requested_count TYPE NUMERIC(12,2) USING requested_count::numeric,
         ALTER COLUMN filled_count TYPE NUMERIC(12,2) USING filled_count::numeric,
-        ALTER COLUMN avg_fill_price TYPE NUMERIC(12,8) USING avg_fill_price::numeric
+        ALTER COLUMN avg_fill_price TYPE NUMERIC(12,8) USING avg_fill_price::numeric,
+        ADD COLUMN IF NOT EXISTS submitted_yes_limit_price NUMERIC(12,8),
+        ADD COLUMN IF NOT EXISTS reconciliation_reason TEXT,
+        ADD COLUMN IF NOT EXISTS reconciliation_evidence JSONB,
+        ADD COLUMN IF NOT EXISTS last_reconciled_at TIMESTAMPTZ
     `);
     _migrated = true;
     logger.info("[kalshi-regular-intent] DB migration complete");
@@ -762,8 +768,8 @@ export async function claimRegularExitIntent(
     await client.query(
       `INSERT INTO kalshi_regular_exit_intents
          (client_order_id, mode, position_id, symbol, window_key, ticker, side,
-          requested_count, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'reserved',NOW())`,
+           requested_count, submitted_yes_limit_price, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',NOW())`,
       [
         key.clientOrderId,
         key.mode,
@@ -773,6 +779,7 @@ export async function claimRegularExitIntent(
         key.ticker,
         key.side,
         key.requestedCount,
+        key.submittedYesLimitPrice,
       ],
     );
     await client.query("COMMIT");
@@ -815,6 +822,31 @@ export async function resolveRegularExitIntent(params: {
   }
 }
 
+/**
+ * Mark a broker-confirmed exit terminal only after its matching local position
+ * row has been durably closed. A crash between those two writes is restart-safe:
+ * status='filled' remains active and the local finalizer retries without
+ * submitting another broker order.
+ */
+export async function markRegularExitIntentFinalized(
+  clientOrderId: string,
+): Promise<boolean> {
+  await ensureMigrated();
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE kalshi_regular_exit_intents
+       SET status = 'finalized', resolved_at = NOW()
+       WHERE client_order_id = $1 AND status = 'filled'
+       RETURNING client_order_id`,
+      [clientOrderId],
+    );
+    return (result.rowCount ?? 0) === 1;
+  } finally {
+    client.release();
+  }
+}
+
 export async function markRegularExitIntentUnknown(params: {
   clientOrderId: string;
   reason: string;
@@ -828,6 +860,28 @@ export async function markRegularExitIntentUnknown(params: {
        WHERE client_order_id = $2`,
       [params.reason, params.clientOrderId],
     );
+  } finally {
+    client.release();
+  }
+}
+
+/** True while a live position has an exit whose terminal exposure is not locally settled. */
+export async function hasActiveRegularExitIntent(
+  mode: "live",
+  positionId: string,
+): Promise<boolean> {
+  await ensureMigrated();
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `SELECT 1
+       FROM kalshi_regular_exit_intents
+       WHERE mode = $1 AND position_id = $2
+         AND status IN ('reserved','unknown','filled')
+       LIMIT 1`,
+      [mode, positionId],
+    );
+    return res.rows.length > 0;
   } finally {
     client.release();
   }

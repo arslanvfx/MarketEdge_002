@@ -1375,6 +1375,7 @@ export interface BotConfig {
   convictionEarlyBypassCap?: number;        // upper bound of the YES bypass range (default 0.95 = 95¢); bypass fires when floor ≤ yesPrice ≤ cap
   allowLateEntries?: boolean;         // when true, all late-entry time floors are bypassed (only the early-window lockout remains); designed for conviction mode
   kalshiLockPrice?: number;           // conviction only: entry floor (default 0.82; BET fires when Kalshi YES ≥ this value)
+  fastLaneEmergencyExitThresholdCents?: number; // FastLane only: immediately exit when confirmed side-cost is this many cents below the snapshotted entry floor (default 15)
   lockPrice091Migrated?: boolean;     // legacy one-time migration marker: 0.90 → 0.91 target bump (superseded)
   lockPrice090Migrated?: boolean;     // one-time startup migration marker: 0.91 → 0.90 target (zone [88¢, 92¢])
   lockPrice093Bootstrap?: boolean;    // one-time startup bootstrap: nudge the old 0.90 default → 0.93 user preference (superseded by 092)
@@ -1841,6 +1842,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   coinStreakLossLimit: 2,
   coinStreakPauseWindows: 2,
   maxSlippageCents: 10,
+  fastLaneEmergencyExitThresholdCents: 15,
   minReturnMultiple: 1.45,
   minNoEntryMinutes: 1,
   betDelayMinutes: 0,
@@ -2025,6 +2027,15 @@ export interface ConvictionFillZoneResult {
 }
 
 export const CONVICTION_EMERGENCY_EXIT_FLOOR = 0.70;
+export const FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS = 15;
+
+export function resolveFastLaneEmergencyExitThresholdCents(
+  value: number | null | undefined,
+): number {
+  return Number.isInteger(value) && value! >= 1 && value! <= 99
+    ? value!
+    : FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS;
+}
 
 /**
  * Post-fill disaster exception only. Entry authorization still uses the
@@ -2039,6 +2050,31 @@ export function shouldEmergencyExitConvictionFill(
     && emergencyFloor > 0
     && sideCost! > 0
     && sideCost! < emergencyFloor;
+}
+
+/**
+ * FastLane post-fill safety rule. Both values are expressed in winning-side
+ * contract cost, while the operator setting is stored in whole cents.
+ */
+export function shouldEmergencyExitFastLaneFill(
+  sideCost: number | null | undefined,
+  configuredFloor: number | null | undefined,
+  thresholdCents = FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS,
+): boolean {
+  if (
+    !Number.isFinite(sideCost)
+    || !Number.isFinite(configuredFloor)
+    || !Number.isFinite(thresholdCents)
+    || sideCost! <= 0
+    || sideCost! >= 1
+    || configuredFloor! <= 0
+    || configuredFloor! >= 1
+    || thresholdCents < 1
+    || thresholdCents > 99
+  ) {
+    return false;
+  }
+  return configuredFloor! - sideCost! + 1e-9 >= thresholdCents / 100;
 }
 
 /**

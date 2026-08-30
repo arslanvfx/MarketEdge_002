@@ -67,7 +67,10 @@ export {
   runSmartHoursCalibration, ensureSmartHoursCalibrationCurrent, runSmartHoursCalibrationCatchUpIfNeeded,
 } from "./kalshi-bot-db";
 export { runBotLoopTick, runWindowOpenPrefetch } from "./kalshi-bot-loop";
-export { runBotTickForCoin } from "./kalshi-bot-tick";
+export {
+  runBotTickForCoin,
+  finalizeReconciledFastLaneExit,
+} from "./kalshi-bot-tick";
 export { placeManualOrder, closeManualPosition, type ManualOrderResult } from "./kalshi-bot-manual";
 export { evalShadowBets } from "./kalshi-bot-shadow";
 export { evalClosedBets, reEvaluateSettledBets, fixCommodityOutcomes } from "./kalshi-bot-eval";

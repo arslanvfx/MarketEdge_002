@@ -12,6 +12,7 @@ export interface RegularOrderReconciliationInput {
   requestedCount: number;
   submittedYesLimitPrice: number;
   createdAt: Date;
+  action?: "buy" | "sell";
 }
 
 export type RegularExchangeReconciliation =
@@ -36,6 +37,16 @@ export type RegularExchangeReconciliation =
       orderMatches?: number;
       fillMatches?: number;
     };
+
+export function isCompleteRegularExitFill(
+  requestedCount: number,
+  evidence: RegularExchangeReconciliation,
+): boolean {
+  if (evidence.outcome !== "confirmed_fill") return false;
+  const requested = regularCountHundredths(requestedCount);
+  const filled = regularCountHundredths(evidence.filledCount);
+  return requested != null && requested > 0n && filled === requested;
+}
 
 function object(value: unknown): Record<string, unknown> | null {
   return value != null && typeof value === "object" && !Array.isArray(value)
@@ -193,13 +204,17 @@ export function regularOrderIdentityMatches(
   const directSide = text(order["side"]);
   const outcomeSide = text(order["outcome_side"]);
   const bookSide = text(order["book_side"]);
-  const expectedBookSide = input.side === "yes" ? "bid" : "ask";
+  const action = input.action ?? "buy";
+  const wantYesExposure =
+    (action === "buy" && input.side === "yes")
+    || (action === "sell" && input.side === "no");
+  const expectedBookSide = wantYesExposure ? "bid" : "ask";
   if (directSide != null && directSide !== input.side) return false;
   if (outcomeSide != null && outcomeSide !== input.side) return false;
   if (bookSide != null && bookSide !== expectedBookSide) return false;
   if (directSide == null && outcomeSide == null && bookSide == null) return false;
-  const action = text(order["action"]);
-  if (action != null && action !== "buy") return false;
+  const orderAction = text(order["action"]);
+  if (orderAction != null && orderAction !== action) return false;
   const requested = regularCountHundredths(input.requestedCount);
   const initial = countAliases(order, "initial_count_fp", "initial_count");
   if (requested == null || initial == null || requested !== initial) return false;
@@ -287,7 +302,11 @@ export function resolveRegularReconciliationEvidence(args: {
     fillIds.add(fillId);
     const side = text(fill["side"]) ?? text(fill["outcome_side"]);
     const bookSide = text(fill["book_side"]);
-    const expectedBookSide = args.input.side === "yes" ? "bid" : "ask";
+    const expectedAction = args.input.action ?? "buy";
+    const wantYesExposure =
+      (expectedAction === "buy" && args.input.side === "yes")
+      || (expectedAction === "sell" && args.input.side === "no");
+    const expectedBookSide = wantYesExposure ? "bid" : "ask";
     if ((side != null && side !== args.input.side) || (bookSide != null && bookSide !== expectedBookSide)) {
       return { outcome: "ambiguous", reason: "fill_side_mismatch", orderMatches: 1 };
     }
@@ -295,7 +314,7 @@ export function resolveRegularReconciliationEvidence(args: {
       return { outcome: "ambiguous", reason: "fill_side_missing", orderMatches: 1 };
     }
     const action = text(fill["action"]);
-    if (action != null && action !== "buy") {
+    if (action != null && action !== expectedAction) {
       return { outcome: "ambiguous", reason: "fill_action_mismatch", orderMatches: 1 };
     }
     const count = countAliases(fill, "count_fp", "count");
@@ -303,7 +322,9 @@ export function resolveRegularReconciliationEvidence(args: {
     if (count == null || count <= 0n || price == null) {
       return { outcome: "ambiguous", reason: "malformed_fill_record", orderMatches: 1 };
     }
-    const crossesLimit = args.input.side === "yes" ? price <= submitted : price >= submitted;
+    const crossesLimit = expectedAction === "buy"
+      ? (args.input.side === "yes" ? price <= submitted : price >= submitted)
+      : (args.input.side === "yes" ? price >= submitted : price <= submitted);
     if (!crossesLimit) {
       return { outcome: "ambiguous", reason: "fill_outside_submitted_limit", orderMatches: 1 };
     }

@@ -55,16 +55,20 @@ export function BotRegularIntentPanel({ authPost, getToken }: Props) {
     ) : null;
   }
 
-  async function reconcile(clientOrderId: string) {
+  async function reconcile(intent: RegularUnresolvedIntent) {
     if (busyId) return;
-    setBusyId(clientOrderId);
+    setBusyId(intent.clientOrderId);
     setMessage(null);
     try {
-      const result = await authPost("/crypto/bot/reconcile-intent", { clientOrderId }) as ReconcileResponse;
+      const result = await authPost("/crypto/bot/reconcile-intent", {
+        clientOrderId: intent.clientOrderId,
+      }) as ReconcileResponse;
       if (result.ok && result.outcome === "confirmed_fill") {
         setMessage({
           ok: true,
-          text: `Recovered ${fmtContracts(result.filledCount)} contracts from authenticated Kalshi fills.`,
+          text: intent.intentKind === "exit"
+            ? `Kalshi confirmed the ${fmtContracts(result.filledCount)}-contract exit; the local position will finalize safely.`
+            : `Recovered ${fmtContracts(result.filledCount)} contracts from authenticated Kalshi fills.`,
         });
       } else if (result.ok && result.outcome === "zero_fill") {
         setMessage({ ok: true, text: "Kalshi confirmed this order had zero fills; the reservation was released." });
@@ -164,26 +168,32 @@ export function BotRegularIntentPanel({ authPost, getToken }: Props) {
                     <span className="rounded bg-orange-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-orange-300">
                       {intent.status}
                     </span>
+                    <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-sky-300">
+                      {intent.intentKind ?? "entry"}
+                    </span>
                     <span className="text-xs text-muted-foreground">{wkToEstRange(intent.windowKey)} ET</span>
                   </div>
                   <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{intent.ticker}</div>
                   <div className="mt-1 text-xs text-orange-100/70">
                     {fmtContracts(intent.requestedCount)} requested
                     {intent.limitPrice != null ? ` at ${(intent.limitPrice * 100).toFixed(0)}¢ YES limit` : ""}
+                    {intent.intentKind === "exit" && intent.filledCount != null
+                      ? ` · ${fmtContracts(intent.filledCount)} sold · ${fmtContracts(intent.residualCount)} residual`
+                      : ""}
                     {" · "}{displayReason(intent)}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => void reconcile(intent.clientOrderId)}
+                     onClick={() => void reconcile(intent)}
                     disabled={busyId != null}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-orange-400/35 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-200 transition hover:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
                     Reconcile with Kalshi
                   </button>
-                  {intent.status === "unknown" && (
+                   {intent.intentKind !== "exit" && intent.status === "unknown" && (
                     <button
                       type="button"
                       onClick={() => void clearIntent(intent)}

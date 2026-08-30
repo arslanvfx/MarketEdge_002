@@ -460,6 +460,7 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
       ticker: "KXBTC-TEST",
       side: "yes" as const,
       requestedCount: 3,
+      submittedYesLimitPrice: 0.01,
     };
     assert.equal((await mod.claimRegularExitIntent(exitKey)).claimed, true);
     await mod.markRegularExitIntentUnknown({
@@ -482,6 +483,7 @@ describe("regular order intent (DB concurrency)", { skip: !RUN_DB_TESTS ? "set R
       ticker: "KXBTC-TEST",
       side: "yes" as const,
       requestedCount: 3,
+      submittedYesLimitPrice: 0.01,
     };
     assert.equal((await mod.claimRegularExitIntent(exitKey)).claimed, true);
     await mod.resolveRegularExitIntent({

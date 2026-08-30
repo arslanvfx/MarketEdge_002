@@ -17,6 +17,9 @@ import {
   evaluateConvictionFillZone,
   CONVICTION_EMERGENCY_EXIT_FLOOR,
   shouldEmergencyExitConvictionFill,
+  FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS,
+  resolveFastLaneEmergencyExitThresholdCents,
+  shouldEmergencyExitFastLaneFill,
   getEffectiveConvictionZone,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
@@ -38,7 +41,7 @@ import {
   resolveEntryQuietHoursDecision, resolveEntryQuietHoursDecisionForSymbol,
   applyPlacementTimeReducedPct,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
-  type DecisionMode, type CoinStreakEntry,
+  type DecisionMode, type CoinStreakEntry, type SignalSnapshot,
 } from "./kalshi-bot-engine";
 import { isSmartHoursCalibrationCurrent } from "./kalshi-quiet-hours-scheduler";
 import {
@@ -58,6 +61,7 @@ import {
   claimRegularOrderIntent, resolveRegularOrderIntent, markRegularOrderIntentUnknown,
   hasUnresolvedRegularIntent,
 } from "./kalshi-regular-order-intent";
+import { reconcileActiveRegularExitIntent } from "./kalshi-regular-order-reconcile";
 import { quoteAuthenticatedBookExecution } from "./kalshi-bot-authenticated-book-gateway";
 import { dashboard2KalshiOrderbookService } from "./kalshi-orderbook-service";
 import {
@@ -331,6 +335,87 @@ export async function runBotTickForCoin(
   }
 }
 
+export async function finalizeReconciledFastLaneExit(params: {
+  clientOrderId: string;
+  positionId: string;
+  filledCount: number;
+  avgYesPrice: number;
+}): Promise<boolean> {
+  const entry = [...openPositions.entries()].find(([, position]) => position.id === params.positionId);
+  let sym: string;
+  let pos: OpenPosition;
+  let reconstructedFromDb = false;
+  if (entry) {
+    [sym, pos] = entry;
+  } else {
+    const rows = await db
+      .select()
+      .from(kalshiBotBetsTable)
+      .where(eq(kalshiBotBetsTable.id, params.positionId))
+      .limit(1);
+    const row = rows[0];
+    if (
+      !row
+      || !row.direction
+      || !row.ticker
+      || row.entryPrice == null
+      || row.contractCount == null
+      || row.betAmount == null
+      || row.kalshiTarget == null
+    ) {
+      return false;
+    }
+    sym = row.symbol;
+    const entryYesPrice = Number(row.entryPrice);
+    pos = {
+      id: row.id,
+      symbol: row.symbol,
+      windowKey: row.windowKey,
+      ticker: row.ticker,
+      direction: row.direction as "yes" | "no",
+      entryYesPrice,
+      contractCount: Number(row.contractCount),
+      betAmount: Number(row.betAmount),
+      kalshiTarget: Number(row.kalshiTarget),
+      openedAt: row.createdAt instanceof Date
+        ? row.createdAt.getTime()
+        : new Date(String(row.createdAt)).getTime(),
+      cryptoPriceAtEntry: row.cryptoPriceAtEntry == null
+        ? null
+        : Number(row.cryptoPriceAtEntry),
+      exitState: makeInitialExitState(entryYesPrice),
+      entryDecision: {
+        action: row.direction === "yes" ? "BET_YES" : "BET_NO",
+        confidence: 0,
+        signals: (row.signals ?? {}) as unknown as SignalSnapshot,
+      } as BotDecision,
+      phase2Activated: row.phase2Activated ?? false,
+      entryMode: "live",
+      source: "bot",
+    };
+    reconstructedFromDb = true;
+  }
+  await closePosition(
+    pos,
+    params.avgYesPrice,
+    pos.kalshiTarget,
+    "fastlane_fill_below_configured_floor_threshold",
+    false,
+    {
+      reconciledLiveFill: {
+        clientOrderId: params.clientOrderId,
+        filledCount: params.filledCount,
+        avgYesPrice: params.avgYesPrice,
+        reconstructedFromDb,
+      },
+    },
+  );
+  if (!reconstructedFromDb && openPositions.get(sym)?.id === pos.id) {
+    openPositions.delete(sym);
+  }
+  return true;
+}
+
 async function _runBotTick(
   sym: string,
   kalshiTicker: string | null,
@@ -341,6 +426,28 @@ async function _runBotTick(
   resetDailyIfNeeded();
   const isFastLane = S.config.decisionMode === "fastlane";
   const isPriceTriggeredMode = isPriceTriggeredDecisionMode(S.config.decisionMode);
+
+  // Recovery must run before pause and daily-loss gates. A confirmed broker
+  // sell is accounting work, not a new trading decision, and must finalize even
+  // while entries are disabled.
+  const recoveryPos = openPositions.get(sym);
+  if (recoveryPos?.entryMode === "live") {
+    const recoverySignals =
+      recoveryPos.entryDecision.signals as unknown as Record<string, unknown> | null;
+    if (recoverySignals?.["fastLaneEmergencyExit"] === true) {
+      const recovery = await reconcileActiveRegularExitIntent(recoveryPos.id);
+      if (recovery.outcome === "confirmed_fill") {
+        await finalizeReconciledFastLaneExit({
+          clientOrderId: recovery.clientOrderId,
+          positionId: recoveryPos.id,
+          filledCount: recovery.filledCount,
+          avgYesPrice: recovery.avgYesPrice,
+        });
+        return;
+      }
+      if (recovery.outcome === "ambiguous") return;
+    }
+  }
 
   // Daily loss limit check (uses conviction-specific limit when in conviction mode)
   if (S.dailyPnl <= -getEffectiveDailyLossLimit()) {
@@ -370,7 +477,98 @@ async function _runBotTick(
 
   const pos = openPositions.get(sym);
   if (pos) {
-    const positionSignals = pos.entryDecision.signals as Record<string, unknown> | null;
+    const positionSignals =
+      pos.entryDecision.signals as unknown as Record<string, unknown> | null;
+    const fastLaneEmergencyDetails =
+      positionSignals?.["fastLaneEmergencyExitDetails"] as Record<string, unknown> | null | undefined;
+    const fastLaneSideCost = Number(fastLaneEmergencyDetails?.["sideCost"]);
+    const fastLaneFloor = Number(fastLaneEmergencyDetails?.["lockPrice"]);
+    const fastLaneThresholdCents = Number(fastLaneEmergencyDetails?.["thresholdCents"]);
+    const requiresFastLaneEmergencyExit =
+      pos.entryMode === "live"
+      && positionSignals?.["fastLaneEmergencyExit"] === true
+      && shouldEmergencyExitFastLaneFill(
+        fastLaneSideCost,
+        fastLaneFloor,
+        fastLaneThresholdCents,
+      );
+    if (requiresFastLaneEmergencyExit) {
+      try {
+        const reconciliation = await reconcileActiveRegularExitIntent(pos.id);
+        if (reconciliation.outcome === "confirmed_fill") {
+          await finalizeReconciledFastLaneExit({
+            clientOrderId: reconciliation.clientOrderId,
+            positionId: pos.id,
+            filledCount: reconciliation.filledCount,
+            avgYesPrice: reconciliation.avgYesPrice,
+          });
+          logger.error(
+            {
+              sym,
+              positionId: pos.id,
+              clientOrderId: reconciliation.clientOrderId,
+              filledCount: reconciliation.filledCount,
+              avgYesPrice: reconciliation.avgYesPrice,
+            },
+            "[kalshi-bot] reconciled FastLane emergency exit fill — local position finalized",
+          );
+          return;
+        }
+        if (reconciliation.outcome === "ambiguous") {
+          setTickAbortReason(
+            sym,
+            windowKey,
+            "FastLane emergency exit remains unresolved; position retained pending reconciliation",
+          );
+          return;
+        }
+      } catch (reconciliationError) {
+        setTickAbortReason(
+          sym,
+          windowKey,
+          "FastLane emergency exit reconciliation unavailable; position retained fail-closed",
+        );
+        logger.error(
+          { err: reconciliationError, sym, positionId: pos.id },
+          "[kalshi-bot] FastLane emergency-exit reconciliation failed",
+        );
+        return;
+      }
+    }
+    if (pos.windowKey === windowKey && requiresFastLaneEmergencyExit) {
+      try {
+        await closePosition(
+          pos,
+          yesPrice,
+          kalshiTarget,
+          "fastlane_fill_below_configured_floor_threshold",
+        );
+        openPositions.delete(sym);
+        logger.error(
+          {
+            sym,
+            windowKey,
+            sideCost: fastLaneSideCost,
+            configuredFloor: fastLaneFloor,
+            thresholdCents: fastLaneThresholdCents,
+          },
+          "[kalshi-bot] recovered FastLane adverse fill — emergency exit confirmed",
+        );
+      } catch (closeError) {
+        logger.error(
+          {
+            err: closeError,
+            sym,
+            windowKey,
+            sideCost: fastLaneSideCost,
+            configuredFloor: fastLaneFloor,
+            thresholdCents: fastLaneThresholdCents,
+          },
+          "[kalshi-bot] recovered FastLane adverse fill exit failed — position remains tracked",
+        );
+      }
+      return;
+    }
     const outOfBandDetails =
       positionSignals?.["convictionOutOfBandFillDetails"] as Record<string, unknown> | null | undefined;
     const recoveredSideCost = Number(outOfBandDetails?.["sideCost"]);
@@ -2550,11 +2748,29 @@ async function _runBotTick(
     const effective = getEffectiveConvictionZone(sym, S.config);
     return deriveConvictionZone(effective.lockPrice, effective.lockPriceCap);
   })();
+  const authorizationFastLaneZone = (() => {
+    if (authorizationDecisionMode !== "fastlane") return null;
+    const effective = getEffectiveConvictionZone(sym, S.config);
+    return deriveConvictionZone(effective.lockPrice, effective.lockPriceCap);
+  })();
+  const authorizationFastLaneEmergencyThresholdCents =
+    authorizationDecisionMode === "fastlane"
+      ? resolveFastLaneEmergencyExitThresholdCents(
+        S.config.fastLaneEmergencyExitThresholdCents,
+      )
+      : null;
   let convictionOutOfBandFill: {
     sideCost: number;
     reason: "below_floor" | "above_cap";
     lockPrice: number;
     lockPriceCap: number;
+  } | null = null;
+  let fastLaneEmergencyExit: {
+    sideCost: number;
+    lockPrice: number;
+    lockPriceCap: number;
+    thresholdCents: number;
+    shortfallCents: number;
   } | null = null;
 
   // ── DURABLE INTENT LIFECYCLE (live mode only) ────────────────────────────
@@ -3281,7 +3497,11 @@ async function _runBotTick(
       if (authorizationDecisionMode === "conviction" && result.avgPrice != null && authorizationConvictionZone) {
         const { lockPrice: _lp, lockPriceCap: _lpCap } = authorizationConvictionZone;
         const fillZone = evaluateConvictionFillZone(direction, result.avgPrice, _lp, _lpCap);
-        if (!fillZone.allowed && fillZone.sideCost != null && fillZone.reason !== "invalid") {
+        if (
+          !fillZone.allowed
+          && fillZone.sideCost != null
+          && (fillZone.reason === "below_floor" || fillZone.reason === "above_cap")
+        ) {
           convictionOutOfBandFill = {
             sideCost: fillZone.sideCost,
             reason: fillZone.reason,
@@ -3299,6 +3519,43 @@ async function _runBotTick(
             shouldEmergencyExitConvictionFill(fillZone.sideCost)
               ? "[kalshi-bot] conviction fill below 70¢ emergency floor — audit recorded; unwind required"
               : "[kalshi-bot] conviction fill outside entry band but inside hold buffer — audit recorded; position will be held",
+          );
+        }
+      }
+      if (
+        authorizationDecisionMode === "fastlane"
+        && result.avgPrice != null
+        && authorizationFastLaneZone
+        && authorizationFastLaneEmergencyThresholdCents != null
+      ) {
+        const { lockPrice: _lp, lockPriceCap: _lpCap } = authorizationFastLaneZone;
+        const fillZone = evaluateConvictionFillZone(direction, result.avgPrice, _lp, _lpCap);
+        if (
+          fillZone.sideCost != null
+          && shouldEmergencyExitFastLaneFill(
+            fillZone.sideCost,
+            _lp,
+            authorizationFastLaneEmergencyThresholdCents,
+          )
+        ) {
+          fastLaneEmergencyExit = {
+            sideCost: fillZone.sideCost,
+            lockPrice: _lp,
+            lockPriceCap: _lpCap,
+            thresholdCents: authorizationFastLaneEmergencyThresholdCents,
+            shortfallCents: +((_lp - fillZone.sideCost) * 100).toFixed(4),
+          };
+          logger.error(
+            {
+              sym,
+              direction,
+              windowKey,
+              avgPrice: +result.avgPrice.toFixed(4),
+              ...fastLaneEmergencyExit,
+              contractCount,
+              ticker: expectedTicker,
+            },
+            "[kalshi-bot] FastLane fill exceeded configured adverse-fill gap — immediate exit required",
           );
         }
       }
@@ -3547,12 +3804,21 @@ async function _runBotTick(
     reasoning: decision.reasoning ?? null,
     convictionOutOfBandFill: convictionOutOfBandFill != null,
     convictionOutOfBandFillDetails: convictionOutOfBandFill,
+    fastLaneEmergencyExit: fastLaneEmergencyExit != null,
+    fastLaneEmergencyExitDetails: fastLaneEmergencyExit,
     // Conviction-stability metrics at entry — null for non-conviction modes.
     stabilityEr:     _stabilitySnap?.er     ?? null,
     stabilityOsc:    _stabilitySnap?.osc    ?? null,
     stabilityVolPct: _stabilitySnap?.volPct ?? null,
     stabilityMlConf: _stabilitySnap?.mlConf ?? null,
     stabilityStable: _stabilitySnap?.stable ?? null,
+  };
+  // Keep the in-memory position's signals identical to the durable bet row.
+  // This lets a failed FastLane emergency exit retry on the very next tick
+  // without requiring a process restart and DB rehydration.
+  newPosition.entryDecision = {
+    ...newPosition.entryDecision,
+    signals: enrichedSignals as unknown as SignalSnapshot,
   };
 
   await persistBetRecord({
@@ -3608,6 +3874,49 @@ async function _runBotTick(
         "[kalshi-bot] confirmed fill persisted but intent resolve failed — reservation remains fail-closed",
       );
     }
+  }
+
+  if (entryMode === "live" && fastLaneEmergencyExit != null) {
+    try {
+      await closePosition(
+        newPosition,
+        actualFillYesPrice,
+        kalshiTarget,
+        "fastlane_fill_below_configured_floor_threshold",
+      );
+      openPositions.delete(sym);
+      setTickAbortReason(
+        sym,
+        windowKey,
+        `FastLane fill ${(fastLaneEmergencyExit.sideCost * 100).toFixed(0)}¢ was ${fastLaneEmergencyExit.shortfallCents.toFixed(0)}¢ below the configured ${Math.round(fastLaneEmergencyExit.lockPrice * 100)}¢ floor and was sold immediately`,
+      );
+      logger.error(
+        {
+          sym,
+          direction,
+          windowKey,
+          ...fastLaneEmergencyExit,
+        },
+        "[kalshi-bot] FastLane adverse fill sold immediately",
+      );
+    } catch (closeError) {
+      setTickAbortReason(
+        sym,
+        windowKey,
+        "FastLane adverse-fill emergency sell failed; position retained and re-entry blocked",
+      );
+      logger.error(
+        {
+          err: closeError,
+          sym,
+          direction,
+          windowKey,
+          ...fastLaneEmergencyExit,
+        },
+        "[kalshi-bot] FastLane emergency sell failed — position remains tracked",
+      );
+    }
+    return;
   }
 
   if (entryMode === "live" && convictionOutOfBandFill != null) {

@@ -82,6 +82,9 @@ import {
   evaluateConvictionFillZone,
   CONVICTION_EMERGENCY_EXIT_FLOOR,
   shouldEmergencyExitConvictionFill,
+  FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS,
+  resolveFastLaneEmergencyExitThresholdCents,
+  shouldEmergencyExitFastLaneFill,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
   computeConvictionCandleSlopeGate,
@@ -178,6 +181,9 @@ export {
   evaluateConvictionFillZone,
   CONVICTION_EMERGENCY_EXIT_FLOOR,
   shouldEmergencyExitConvictionFill,
+  FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS,
+  resolveFastLaneEmergencyExitThresholdCents,
+  shouldEmergencyExitFastLaneFill,
   // Adverse momentum gate math — pure, exported for unit tests and callers.
   computeAdverseMomentumGate,
   // Direction guard — pure, exported for unit tests and callers.

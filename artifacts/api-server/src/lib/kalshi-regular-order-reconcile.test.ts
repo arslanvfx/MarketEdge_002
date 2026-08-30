@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   mergeRegularHistoryRows,
+  isCompleteRegularExitFill,
   regularHistoryHasDuplicateIds,
   resolveRegularReconciliationEvidence,
   type RegularOrderReconciliationInput,
@@ -216,4 +217,112 @@ test("strict reconciliation rejects a missing terminal-order VWAP", () => {
   });
   assert.equal(result.outcome, "ambiguous");
   assert.equal(result.reason, "missing_or_malformed_order_vwap");
+});
+
+test("strict reconciliation confirms a FastLane YES emergency sell fill", () => {
+  const input: RegularOrderReconciliationInput = {
+    ...INPUT,
+    side: "yes",
+    action: "sell",
+    submittedYesLimitPrice: 0.01,
+  };
+  const result = resolveRegularReconciliationEvidence({
+    input,
+    orders: [{
+      order_id: "fastlane-exit-yes",
+      client_order_id: input.clientOrderId,
+      ticker: input.ticker,
+      outcome_side: "yes",
+      book_side: "ask",
+      action: "sell",
+      status: "executed",
+      initial_count_fp: "4.00",
+      fill_count_fp: "4.00",
+      remaining_count_fp: "0.00",
+      yes_price_dollars: "0.010000",
+      average_fill_price_dollars: "0.680000",
+    }],
+    fills: [{
+      trade_id: "fastlane-exit-yes-fill",
+      order_id: "fastlane-exit-yes",
+      ticker: input.ticker,
+      outcome_side: "yes",
+      book_side: "ask",
+      action: "sell",
+      count_fp: "4.00",
+      yes_price_dollars: "0.680000",
+    }],
+  });
+  assert.equal(result.outcome, "confirmed_fill");
+  if (result.outcome === "confirmed_fill") assert.equal(result.avgYesPrice, 0.68);
+});
+
+test("strict reconciliation confirms a FastLane NO emergency sell fill", () => {
+  const input: RegularOrderReconciliationInput = {
+    ...INPUT,
+    side: "no",
+    action: "sell",
+    submittedYesLimitPrice: 0.99,
+  };
+  const result = resolveRegularReconciliationEvidence({
+    input,
+    orders: [{
+      order_id: "fastlane-exit-no",
+      client_order_id: input.clientOrderId,
+      ticker: input.ticker,
+      outcome_side: "no",
+      book_side: "bid",
+      action: "sell",
+      status: "executed",
+      initial_count_fp: "4.00",
+      fill_count_fp: "4.00",
+      remaining_count_fp: "0.00",
+      yes_price_dollars: "0.990000",
+      average_fill_price_dollars: "0.320000",
+    }],
+    fills: [{
+      trade_id: "fastlane-exit-no-fill",
+      order_id: "fastlane-exit-no",
+      ticker: input.ticker,
+      outcome_side: "no",
+      book_side: "bid",
+      action: "sell",
+      count_fp: "4.00",
+      yes_price_dollars: "0.320000",
+    }],
+  });
+  assert.equal(result.outcome, "confirmed_fill");
+  if (result.outcome === "confirmed_fill") assert.equal(result.avgYesPrice, 0.32);
+});
+
+test("partial FastLane emergency sells are not complete exits", () => {
+  const partial = resolveRegularReconciliationEvidence({
+    input: { ...INPUT, side: "yes", action: "sell", submittedYesLimitPrice: 0.01 },
+    orders: [{
+      order_id: "fastlane-partial-exit",
+      client_order_id: INPUT.clientOrderId,
+      ticker: INPUT.ticker,
+      outcome_side: "yes",
+      book_side: "ask",
+      action: "sell",
+      status: "canceled",
+      initial_count_fp: "4.00",
+      fill_count_fp: "1.50",
+      remaining_count_fp: "2.50",
+      yes_price_dollars: "0.010000",
+      average_fill_price_dollars: "0.680000",
+    }],
+    fills: [{
+      trade_id: "fastlane-partial-exit-fill",
+      order_id: "fastlane-partial-exit",
+      ticker: INPUT.ticker,
+      outcome_side: "yes",
+      book_side: "ask",
+      action: "sell",
+      count_fp: "1.50",
+      yes_price_dollars: "0.680000",
+    }],
+  });
+  assert.equal(partial.outcome, "confirmed_fill");
+  assert.equal(isCompleteRegularExitFill(4, partial), false);
 });

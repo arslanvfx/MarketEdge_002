@@ -3,8 +3,9 @@
 export type DecisionMode = "classic" | "ml_gate" | "consensus" | "unanimous" | "conviction" | "fastlane";
 
 export interface RegularUnresolvedIntent {
+  intentKind?: "entry" | "exit";
   clientOrderId: string;
-  status: "reserved" | "unknown";
+  status: "reserved" | "unknown" | "filled";
   symbol: string;
   windowKey: string;
   ticker: string;
@@ -15,6 +16,9 @@ export interface RegularUnresolvedIntent {
   reconciliationReason: string | null;
   createdAt: string;
   lastReconciledAt: string | null;
+  positionId?: string;
+  filledCount?: number | null;
+  residualCount?: number | null;
 }
 
 export interface QuietHoursV2 {
@@ -109,6 +113,7 @@ export interface BotConfig {
   coinStreakLossLimit: number;
   coinStreakPauseWindows: number;
   maxSlippageCents: number;
+  fastLaneEmergencyExitThresholdCents?: number;
   minReturnMultiple: number;
   enableDynamicSizing: boolean;
   dynamicSizingMaxConfidence: number;

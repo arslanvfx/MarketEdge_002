@@ -13,6 +13,7 @@ import { loadOpenPositionFromDB } from "./kalshi-bot-db.ts";
 import { ensureRegularOrderIntentMigrations } from "./kalshi-regular-order-intent.ts";
 import {
   mergeRegularHistoryRows,
+  isCompleteRegularExitFill,
   regularHistoryHasDuplicateIds,
   regularOrderIdentityMatches,
   resolveRegularReconciliationEvidence,
@@ -82,6 +83,39 @@ export interface RegularUnresolvedIntent {
   createdAt: string;
   lastReconciledAt: string | null;
 }
+
+export interface RegularUnresolvedExitIntent
+  extends Omit<RegularUnresolvedIntent, "status"> {
+  intentKind: "exit";
+  positionId: string;
+  status: "reserved" | "unknown" | "filled";
+  filledCount: number | null;
+  residualCount: number | null;
+}
+
+export type RegularExitIntentReconciliationResult =
+  | {
+      outcome: "confirmed_fill";
+      clientOrderId: string;
+      positionId: string;
+      filledCount: number;
+      avgYesPrice: number;
+      orderId: string;
+    }
+  | {
+      outcome: "zero_fill";
+      clientOrderId: string;
+      orderId: string;
+    }
+  | {
+      outcome: "ambiguous";
+      clientOrderId: string;
+      reason: string;
+    }
+  | {
+      outcome: "none";
+      clientOrderId: null;
+    };
 
 export type RegularIntentReconciliationResult =
   | {
@@ -450,6 +484,277 @@ export async function listUnresolvedRegularIntents(limit = 50): Promise<RegularU
     createdAt: row.created_at.toISOString(),
     lastReconciledAt: row.last_reconciled_at?.toISOString() ?? null,
   }));
+}
+
+export async function listUnresolvedRegularExitIntents(
+  limit = 50,
+): Promise<RegularUnresolvedExitIntent[]> {
+  await ensureRegularOrderIntentMigrations();
+  const result = await pool.query<{
+    client_order_id: string;
+    status: "reserved" | "unknown" | "filled";
+    position_id: string;
+    symbol: string;
+    window_key: string;
+    ticker: string;
+    side: Direction;
+    requested_count: string;
+    submitted_yes_limit_price: string | null;
+    reason: string | null;
+    reconciliation_reason: string | null;
+    created_at: Date;
+    last_reconciled_at: Date | null;
+    filled_count: string | null;
+  }>(
+    `SELECT client_order_id, status, position_id, symbol, window_key, ticker, side,
+            requested_count, submitted_yes_limit_price, reason,
+            reconciliation_reason, created_at, last_reconciled_at, filled_count
+       FROM kalshi_regular_exit_intents
+      WHERE mode = 'live'
+        AND (
+          status IN ('reserved','unknown')
+          OR (
+            status = 'filled'
+            AND EXISTS (
+              SELECT 1 FROM kalshi_bot_bets b
+               WHERE b.id = kalshi_regular_exit_intents.position_id
+                 AND b.exited_at IS NULL
+            )
+          )
+        )
+      ORDER BY
+        CASE status WHEN 'filled' THEN 0 WHEN 'unknown' THEN 1 ELSE 2 END,
+        created_at DESC
+      LIMIT $1`,
+    [Math.max(1, Math.min(200, Math.floor(limit)))],
+  );
+  return result.rows.map((row) => {
+    const filledCount = row.filled_count == null ? null : Number(row.filled_count);
+    const requestedCount = Number(row.requested_count);
+    return {
+    intentKind: "exit",
+    clientOrderId: row.client_order_id,
+    status: row.status,
+    positionId: row.position_id,
+    symbol: row.symbol,
+    windowKey: row.window_key,
+    ticker: row.ticker,
+    side: row.side,
+    requestedCount,
+    filledCount,
+    residualCount: filledCount == null ? null : Math.max(0, requestedCount - filledCount),
+    limitPrice: row.submitted_yes_limit_price == null
+      ? null
+      : Number(row.submitted_yes_limit_price),
+    reason: row.reason,
+    reconciliationReason: row.reconciliation_reason,
+    createdAt: row.created_at.toISOString(),
+    lastReconciledAt: row.last_reconciled_at?.toISOString() ?? null,
+    };
+  });
+}
+
+async function readExitIntent(clientOrderId: string): Promise<{
+  clientOrderId: string;
+  status: "reserved" | "unknown" | "filled";
+  positionId: string;
+  ticker: string;
+  side: Direction;
+  requestedCount: number;
+  submittedYesLimitPrice: number | null;
+  filledCount: number | null;
+  avgYesPrice: number | null;
+  orderId: string | null;
+  createdAt: Date;
+  lastReconciledAt: Date | null;
+} | null> {
+  await ensureRegularOrderIntentMigrations();
+  const result = await pool.query<{
+    client_order_id: string;
+    status: "reserved" | "unknown" | "filled";
+    position_id: string;
+    ticker: string;
+    side: Direction;
+    requested_count: string;
+    submitted_yes_limit_price: string | null;
+    filled_count: string | null;
+    avg_fill_price: string | null;
+    order_id: string | null;
+    created_at: Date;
+    last_reconciled_at: Date | null;
+  }>(
+    `SELECT client_order_id, status, position_id, ticker, side, requested_count,
+            submitted_yes_limit_price, filled_count, avg_fill_price, order_id,
+            created_at, last_reconciled_at
+       FROM kalshi_regular_exit_intents
+      WHERE client_order_id = $1 AND mode = 'live'
+        AND status IN ('reserved','unknown','filled')
+      LIMIT 1`,
+    [clientOrderId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    clientOrderId: row.client_order_id,
+    status: row.status,
+    positionId: row.position_id,
+    ticker: row.ticker,
+    side: row.side,
+    requestedCount: Number(row.requested_count),
+    submittedYesLimitPrice: row.submitted_yes_limit_price == null
+      ? null
+      : Number(row.submitted_yes_limit_price),
+    filledCount: row.filled_count == null ? null : Number(row.filled_count),
+    avgYesPrice: row.avg_fill_price == null ? null : Number(row.avg_fill_price),
+    orderId: row.order_id,
+    createdAt: row.created_at,
+    lastReconciledAt: row.last_reconciled_at,
+  };
+}
+
+export async function reconcileRegularExitIntent(
+  clientOrderId: string,
+): Promise<RegularExitIntentReconciliationResult> {
+  const intent = await readExitIntent(clientOrderId);
+  if (!intent) {
+    return { outcome: "ambiguous", clientOrderId, reason: "active_exit_intent_not_found" };
+  }
+  if (intent.status === "filled") {
+    if (
+      intent.filledCount != null
+      && intent.filledCount > 0
+      && intent.avgYesPrice != null
+      && intent.avgYesPrice > 0
+      && intent.avgYesPrice < 1
+      && intent.orderId
+    ) {
+      return {
+        outcome: "confirmed_fill",
+        clientOrderId,
+        positionId: intent.positionId,
+        filledCount: intent.filledCount,
+        avgYesPrice: intent.avgYesPrice,
+        orderId: intent.orderId,
+      };
+    }
+    return { outcome: "ambiguous", clientOrderId, reason: "filled_exit_intent_missing_fill_metadata" };
+  }
+  if (intent.submittedYesLimitPrice == null) {
+    return { outcome: "ambiguous", clientOrderId, reason: "exit_intent_missing_submitted_limit" };
+  }
+  if (
+    intent.lastReconciledAt
+    && Date.now() - intent.lastReconciledAt.getTime() < 10_000
+  ) {
+    return { outcome: "ambiguous", clientOrderId, reason: "exit_reconciliation_recently_attempted" };
+  }
+
+  let evidence: RegularExchangeReconciliation;
+  try {
+    evidence = await reconcileRegularOrderStrict({
+      clientOrderId,
+      ticker: intent.ticker,
+      side: intent.side,
+      requestedCount: intent.requestedCount,
+      submittedYesLimitPrice: intent.submittedYesLimitPrice,
+      createdAt: intent.createdAt,
+      action: "sell",
+    });
+  } catch (error) {
+    evidence = {
+      outcome: "ambiguous",
+      reason: `exchange_lookup_failed:${String((error as Error)?.message ?? error).slice(0, 240)}`,
+    };
+  }
+  if (evidence.outcome === "ambiguous") {
+    await pool.query(
+      `UPDATE kalshi_regular_exit_intents
+          SET reconciliation_reason = $2,
+              reconciliation_evidence = $3::jsonb,
+              last_reconciled_at = NOW()
+        WHERE client_order_id = $1 AND status IN ('reserved','unknown')`,
+      [clientOrderId, evidence.reason, JSON.stringify(evidence)],
+    );
+    return { outcome: "ambiguous", clientOrderId, reason: evidence.reason };
+  }
+  if (evidence.outcome === "zero_fill") {
+    await pool.query(
+      `UPDATE kalshi_regular_exit_intents
+          SET status = 'zero_fill', filled_count = 0, order_id = $2,
+              reconciliation_reason = 'authoritative_zero_fill',
+              reconciliation_evidence = $3::jsonb,
+              last_reconciled_at = NOW(), resolved_at = NOW()
+        WHERE client_order_id = $1 AND status IN ('reserved','unknown')`,
+      [clientOrderId, evidence.orderId, JSON.stringify(evidence)],
+    );
+    return { outcome: "zero_fill", clientOrderId, orderId: evidence.orderId };
+  }
+  if (!isCompleteRegularExitFill(intent.requestedCount, evidence)) {
+    await pool.query(
+      `UPDATE kalshi_regular_exit_intents
+          SET status = 'unknown', filled_count = $2, avg_fill_price = $3,
+              order_id = $4,
+              reason = 'partial exit fill; residual exposure requires authoritative closure',
+              reconciliation_reason = 'partial_exit_fill_residual_exposure',
+              reconciliation_evidence = $5::jsonb,
+              last_reconciled_at = NOW(), resolved_at = NULL
+        WHERE client_order_id = $1 AND status IN ('reserved','unknown')`,
+      [
+        clientOrderId,
+        evidence.filledCount,
+        evidence.avgYesPrice,
+        evidence.orderId,
+        JSON.stringify(evidence),
+      ],
+    );
+    return {
+      outcome: "ambiguous",
+      clientOrderId,
+      reason: "partial_exit_fill_residual_exposure",
+    };
+  }
+  await pool.query(
+    `UPDATE kalshi_regular_exit_intents
+        SET status = 'filled', filled_count = $2, avg_fill_price = $3,
+            order_id = $4, reconciliation_reason = 'authoritative_exit_fill',
+            reconciliation_evidence = $5::jsonb,
+            last_reconciled_at = NOW(), resolved_at = NOW()
+      WHERE client_order_id = $1 AND status IN ('reserved','unknown')`,
+    [
+      clientOrderId,
+      evidence.filledCount,
+      evidence.avgYesPrice,
+      evidence.orderId,
+      JSON.stringify(evidence),
+    ],
+  );
+  return {
+    outcome: "confirmed_fill",
+    clientOrderId,
+    positionId: intent.positionId,
+    filledCount: evidence.filledCount,
+    avgYesPrice: evidence.avgYesPrice,
+    orderId: evidence.orderId,
+  };
+}
+
+export async function reconcileActiveRegularExitIntent(
+  positionId: string,
+): Promise<RegularExitIntentReconciliationResult> {
+  await ensureRegularOrderIntentMigrations();
+  const result = await pool.query<{ client_order_id: string }>(
+    `SELECT client_order_id
+       FROM kalshi_regular_exit_intents
+      WHERE mode = 'live' AND position_id = $1
+        AND status IN ('reserved','unknown','filled')
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [positionId],
+  );
+  const clientOrderId = result.rows[0]?.client_order_id;
+  return clientOrderId
+    ? reconcileRegularExitIntent(clientOrderId)
+    : { outcome: "none", clientOrderId: null };
 }
 
 async function readIntent(clientOrderId: string): Promise<(RegularOrderReconciliationInput & {

@@ -64,6 +64,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
   const isPriceTriggeredMode = isConviction || isFastLane;
   const convictionFloor = configDraft.kalshiLockPrice ?? merged.kalshiLockPrice ?? 0.82;
   const convictionCap = configDraft.kalshiLockPriceCap ?? merged.kalshiLockPriceCap ?? 0.91;
+  const fastLaneEmergencyExitThresholdCents =
+    configDraft.fastLaneEmergencyExitThresholdCents
+    ?? merged.fastLaneEmergencyExitThresholdCents
+    ?? 15;
   const convictionGlobalZoneInvalid = isPriceTriggeredMode && convictionFloor > convictionCap;
   const convictionOverrides = {
     ...(merged.perMarketConvictionConfig ?? {}),
@@ -654,6 +658,37 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                               Maximum allowed Kalshi YES price. Above this the margin is too thin — bet is skipped. Entry zone: <span className="text-violet-400/80">{floorYes}¢–{capYes}¢ YES</span> · <span className="text-violet-400/60">{floorNo}¢–{capNo}¢ NO</span>.
                             </span>
                           </label>
+                           {isFastLane && (
+                             <label className="flex flex-col gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5">
+                               <span className="text-xs text-muted-foreground">
+                                 Emergency Sell Gap — <span className="font-mono text-amber-400">{fastLaneEmergencyExitThresholdCents}¢</span>
+                               </span>
+                               <div className="flex items-center gap-3">
+                                 <input
+                                   type="number"
+                                   min={1}
+                                   max={99}
+                                   step={1}
+                                   className="w-24 rounded-md border border-border bg-background px-2 py-1 text-xs font-mono"
+                                   value={fastLaneEmergencyExitThresholdCents}
+                                   onChange={e => {
+                                     const value = Number(e.target.value);
+                                     if (Number.isInteger(value)) {
+                                       setConfigDraft(d => ({ ...d, fastLaneEmergencyExitThresholdCents: value }));
+                                     }
+                                   }}
+                                 />
+                                 <span className="text-[10px] text-muted-foreground/70">1–99¢ below the entry floor</span>
+                               </div>
+                               <span className="text-[10px] text-muted-foreground/70">
+                                 With the current {floorYes}¢ floor, a confirmed FastLane fill at{" "}
+                                 <span className="font-mono text-amber-400">
+                                   {Math.max(0, floorYes - fastLaneEmergencyExitThresholdCents)}¢
+                                 </span>{" "}
+                                 or lower is sold immediately. This is the global floor; markets with a floor override use their own effective floor. The entry range and this gap are snapshotted before submission.
+                               </span>
+                             </label>
+                           )}
                         </div>
                       );
                     })()}
@@ -724,10 +759,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                   Invalid entry zone for {invalidPerMarketSymbols.join(", ")}. Floor must not exceed cap; fix these rows before saving.
                                 </div>
                               )}
-                              <div className="grid min-w-[520px] grid-cols-[auto_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]">
+                              <div className={isFastLane
+                                ? "grid min-w-[660px] grid-cols-[auto_1fr_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]"
+                                : "grid min-w-[520px] grid-cols-[auto_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]"
+                              }>
                                 <span className="text-muted-foreground/50">Market</span>
                                 <span className="text-muted-foreground/50">Floor</span>
                                 <span className="text-muted-foreground/50">Cap</span>
+                                {isFastLane && <span className="text-muted-foreground/50">Emergency sell</span>}
                                 <span className="text-muted-foreground/50">Wait until</span>
                                 <span className="text-muted-foreground/50">Reset</span>
                                 {["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"].map(sym => {
@@ -735,6 +774,9 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                   const hasOverride = Object.values(ov).some(value => value != null);
                                   const floorPlaceholder = String(Math.round((merged.kalshiLockPrice ?? 0.82) * 100));
                                   const capPlaceholder = String(Math.round((merged.kalshiLockPriceCap ?? 0.91) * 100));
+                                   const effectiveFloorCents = Math.round(
+                                     ((ov.lockPrice ?? convictionFloor) as number) * 100,
+                                   );
                                   return (
                                     <React.Fragment key={sym}>
                                       <span className="font-semibold text-foreground/75">{sym}</span>
@@ -754,6 +796,11 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                         className="w-full min-w-0 bg-background border border-border/60 rounded px-1.5 py-1 text-[11px] text-foreground"
                                         aria-label={`${sym} entry cap in cents`}
                                       />
+                                       {isFastLane && (
+                                         <span className="rounded border border-amber-500/15 bg-amber-500/5 px-1.5 py-1 font-mono text-[10px] text-amber-300">
+                                           {Math.max(0, effectiveFloorCents - fastLaneEmergencyExitThresholdCents)}¢ or lower
+                                         </span>
+                                       )}
                                       <input
                                         type="number" min={0} max={13} step={1}
                                         placeholder="0"

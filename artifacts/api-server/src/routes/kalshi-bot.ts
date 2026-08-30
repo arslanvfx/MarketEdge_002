@@ -31,6 +31,7 @@ import {
   fixCommodityOutcomes,
   runQuietHoursAutoTune,
   runSmartHoursCalibration,
+  finalizeReconciledFastLaneExit,
 } from "../lib/kalshi-bot";
 import type { BotMode } from "../lib/kalshi-bot";
 import type { BotConfig, DecisionMode } from "../lib/kalshi-bot-engine-core";
@@ -44,7 +45,9 @@ import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@wo
 import { eq, sql } from "drizzle-orm";
 import {
   isValidRegularClientOrderId,
+  listUnresolvedRegularExitIntents,
   listUnresolvedRegularIntents,
+  reconcileRegularExitIntent,
   reconcileRegularIntent,
 } from "../lib/kalshi-regular-order-reconcile";
 import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
@@ -207,6 +210,7 @@ export const BUILT_IN_MODE_DEFAULTS: Partial<Record<DecisionMode, Partial<BotCon
     minReturnMultiple: 1.00,
     kalshiLockPrice: 0.82,
     kalshiLockPriceCap: 0.91,
+    fastLaneEmergencyExitThresholdCents: 15,
     betDelayMinutes: 0,
     maxEntryMinutes: 0,
     minRemainingMinutes: 0,
@@ -709,7 +713,16 @@ router.get("/crypto/bot/daily-pnl-simulation", async (req, res) => {
 // regular-bot live orders whose exchange outcome is not yet locally resolved.
 router.get("/crypto/bot/unresolved-intents", requireAuth, async (_req, res) => {
   try {
-    res.json({ intents: await listUnresolvedRegularIntents(100) });
+    const [entryIntents, exitIntents] = await Promise.all([
+      listUnresolvedRegularIntents(100),
+      listUnresolvedRegularExitIntents(100),
+    ]);
+    res.json({
+      intents: [
+        ...entryIntents.map((intent) => ({ ...intent, intentKind: "entry" as const })),
+        ...exitIntents,
+      ].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });
@@ -726,7 +739,28 @@ router.post("/crypto/bot/reconcile-intent", requireAuth, async (req, res) => {
     return;
   }
   try {
-    const result = await reconcileRegularIntent(clientOrderId);
+    const entryResult = await reconcileRegularIntent(clientOrderId);
+    const result =
+      entryResult.outcome === "ambiguous"
+      && entryResult.reason === "unresolved_intent_not_found_or_missing_limit"
+        ? await reconcileRegularExitIntent(clientOrderId)
+        : entryResult;
+    if (result.outcome === "confirmed_fill" && "positionId" in result) {
+      const finalized = await finalizeReconciledFastLaneExit({
+        clientOrderId,
+        positionId: result.positionId,
+        filledCount: result.filledCount,
+        avgYesPrice: result.avgYesPrice,
+      });
+      if (!finalized) {
+        res.status(409).json({
+          ok: false,
+          ...result,
+          reason: "exit_fill_confirmed_local_position_not_found",
+        });
+        return;
+      }
+    }
     if (result.outcome === "ambiguous") {
       res.status(409).json({ ok: false, ...result });
       return;
@@ -869,6 +903,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     priceBufferPct,
     kalshiLockPrice,
     kalshiLockPriceCap,
+    fastLaneEmergencyExitThresholdCents,
     strikeProximityMinPct,
     strikeProximityAtrScale,
     convictionProximityGuardEnabled,
@@ -935,6 +970,7 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
     minNoEntryMinutes?: number;
     kalshiLockPrice?: number;
     kalshiLockPriceCap?: number;
+    fastLaneEmergencyExitThresholdCents?: number;
     strikeProximityMinPct?: number;
     strikeProximityAtrScale?: boolean;
     convictionProximityGuardEnabled?: boolean;
@@ -1365,6 +1401,14 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof coinStreakLossLimit === "number" && coinStreakLossLimit >= 0 && coinStreakLossLimit <= 10) partial.coinStreakLossLimit = coinStreakLossLimit;
   if (typeof coinStreakPauseWindows === "number" && coinStreakPauseWindows >= 1 && coinStreakPauseWindows <= 10) partial.coinStreakPauseWindows = coinStreakPauseWindows;
   if (typeof maxSlippageCents === "number" && maxSlippageCents >= 0 && maxSlippageCents <= 50) partial.maxSlippageCents = maxSlippageCents;
+  if (
+    typeof fastLaneEmergencyExitThresholdCents === "number"
+    && Number.isInteger(fastLaneEmergencyExitThresholdCents)
+    && fastLaneEmergencyExitThresholdCents >= 1
+    && fastLaneEmergencyExitThresholdCents <= 99
+  ) {
+    partial.fastLaneEmergencyExitThresholdCents = fastLaneEmergencyExitThresholdCents;
+  }
   if (typeof minReturnMultiple === "number" && minReturnMultiple >= 1 && minReturnMultiple <= 10) partial.minReturnMultiple = minReturnMultiple;
   if (typeof requireMonitorReady === "boolean") partial.requireMonitorReady = requireMonitorReady;
   // Confidence-based dynamic bet sizing

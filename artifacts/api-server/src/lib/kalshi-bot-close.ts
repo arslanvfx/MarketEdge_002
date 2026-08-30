@@ -30,6 +30,7 @@ import {
   claimRegularExitIntent,
   markRegularExitIntentUnknown,
   resolveRegularExitIntent,
+  markRegularExitIntentFinalized,
 } from "./kalshi-regular-order-intent";
 import { regularCountsEqual } from "./kalshi-regular-fixed-point";
 import { calculateKalshiSettlementPnl } from "./kalshi-contract-pnl";
@@ -95,6 +96,14 @@ export async function closePosition(
       yesSideLimitPrice: number;
       minimumWinningPrice: number;
     };
+    /** Authoritative exchange reconciliation already proved this exact exit fill. */
+    reconciledLiveFill?: {
+      clientOrderId: string;
+      filledCount: number;
+      avgYesPrice: number;
+      /** Reconstructed, already-closed rows are included in startup DB counters. */
+      reconstructedFromDb?: boolean;
+    };
   },
 ): Promise<ClosePositionResult> {
   const isExpiry = reason === "window_expired";
@@ -108,9 +117,25 @@ export async function closePosition(
   // price before window change to compute estimated settlement.
   // This will be corrected by the evaluator job (task #112) once Kalshi settles.
   let fillPrice: number | null = isExpiry ? null : currentYesPrice;
+  const reconciledLiveFill = _options?.reconciledLiveFill;
+  let completedLiveExitIntentId: string | null = null;
 
-  if (pos.entryMode === "live" && !isExpiry) {
+  if (pos.entryMode === "live" && !isExpiry && reconciledLiveFill) {
+    if (
+      !regularCountsEqual(reconciledLiveFill.filledCount, pos.contractCount)
+      || !Number.isFinite(reconciledLiveFill.avgYesPrice)
+      || reconciledLiveFill.avgYesPrice <= 0
+      || reconciledLiveFill.avgYesPrice >= 1
+    ) {
+      throw new Error("reconciled live exit fill does not match the tracked position");
+    }
+    fillPrice = reconciledLiveFill.avgYesPrice;
+    completedLiveExitIntentId = reconciledLiveFill.clientOrderId;
+  } else if (pos.entryMode === "live" && !isExpiry) {
     const exitClientOrderId = randomUUID();
+    const submittedYesLimitPrice =
+      _options?.smartExitLimit?.yesSideLimitPrice
+      ?? (pos.direction === "yes" ? 0.01 : 0.99);
     const claim = await claimRegularExitIntent({
       clientOrderId: exitClientOrderId,
       mode: "live",
@@ -120,6 +145,7 @@ export async function closePosition(
       ticker: pos.ticker,
       side: pos.direction,
       requestedCount: pos.contractCount,
+      submittedYesLimitPrice,
     });
     if (!claim.claimed) {
       throw new Error(
@@ -174,6 +200,7 @@ export async function closePosition(
         avgFillPrice: result.avgPrice,
         orderId: result.orderId,
       });
+      completedLiveExitIntentId = exitClientOrderId;
     } catch (err) {
       if (isUncertainOrderError(err)) {
         await markRegularExitIntentUnknown({
@@ -236,6 +263,71 @@ export async function closePosition(
       } else {
         pnl = -pos.betAmount;
       }
+    }
+  }
+
+  // A confirmed live sell must durably close the position before any in-memory
+  // P&L, streak, or circuit-breaker mutation. The conditional update is the
+  // idempotency boundary: only its winner may apply accounting. If a process
+  // fails after this update but before finalizing the intent, the next recovery
+  // sees exitedAt and finalizes the intent without counting the close again.
+  const cryptoPriceAtExit = getCachedPrediction(pos.symbol)?.price ?? null;
+  if (completedLiveExitIntentId) {
+    const exitedAt = new Date();
+    const updated = await db
+      .update(kalshiBotBetsTable)
+      .set({
+        exitPrice: fillPrice != null ? String(fillPrice) : undefined,
+        pnl: String(pnl),
+        exitReason: reason,
+        action: isLateRecovery ? "late_recovery_exit" : "exit",
+        phase2Activated: pos.phase2Activated,
+        phase2RecoveredAmount:
+          isLateRecovery && pnl > -pos.betAmount
+            ? String(pnl - (-pos.betAmount))
+            : undefined,
+        cryptoPriceAtExit:
+          cryptoPriceAtExit != null ? String(cryptoPriceAtExit) : undefined,
+        exitedAt,
+      })
+      .where(
+        and(
+          eq(kalshiBotBetsTable.id, pos.id),
+          isNull(kalshiBotBetsTable.exitedAt),
+        ),
+      )
+      .returning({ id: kalshiBotBetsTable.id });
+    const localCloseApplied = updated.length === 1;
+
+    let durableExitedAt = exitedAt;
+    if (updated.length === 0) {
+      const existing = await db
+        .select({ exitedAt: kalshiBotBetsTable.exitedAt })
+        .from(kalshiBotBetsTable)
+        .where(eq(kalshiBotBetsTable.id, pos.id))
+        .limit(1);
+      if (!existing[0]?.exitedAt) {
+        throw new Error("confirmed live exit could not find its persisted position");
+      }
+      durableExitedAt = existing[0].exitedAt;
+    }
+
+    // The filled→finalized transition is the durable accounting claim.
+    // Exactly one recovery attempt may mutate the process-local P&L and guards.
+    const accountingClaimed =
+      await markRegularExitIntentFinalized(completedLiveExitIntentId);
+    if (
+      !accountingClaimed
+      || (!localCloseApplied && reconciledLiveFill?.reconstructedFromDb === true)
+    ) {
+      return {
+        fillYesPrice: fillPrice,
+        winningFillPrice:
+          fillPrice == null ? null : pos.direction === "yes" ? fillPrice : 1 - fillPrice,
+        quantity: pos.contractCount,
+        pnl,
+        soldAt: durableExitedAt.toISOString(),
+      };
     }
   }
 
@@ -338,14 +430,14 @@ export async function closePosition(
     ? pnl - (-pos.betAmount)  // how much we recovered vs riding to zero
     : null;
 
-  // Capture the live coin price at the moment the position is closed.
-  const cryptoPriceAtExit = getCachedPrediction(pos.symbol)?.price ?? null;
-
   // Non-throwing: all in-memory state (P&L, balance, circuit-breaker,
   // recentKalshiTargets) is already updated above. A DB failure here must
   // NOT prevent openPositions.delete() from running — otherwise the position
   // stays stuck in memory across windows and no further bets can be placed.
   try {
+    if (completedLiveExitIntentId) {
+      // The conditional idempotency update above already persisted this close.
+    } else {
     await persistBetRecord({
       symbol: pos.symbol,
       windowKey: pos.windowKey,
@@ -365,6 +457,7 @@ export async function closePosition(
       existingId: pos.id,
       cryptoPriceAtExit,
     });
+    }
 
     // Shadow paper bet closes with the same contract economics and outcome.
     if (pos.shadowPaperId) {
@@ -397,7 +490,8 @@ export async function closePosition(
       );
     }
   } catch (err) {
-    logger.warn({ err, sym: pos.symbol }, "[kalshi-bot] closePosition: DB persist error (non-fatal) — position cleared from memory regardless");
+    logger.warn({ err, sym: pos.symbol }, "[kalshi-bot] closePosition: DB persist error");
+    if (reconciledLiveFill) throw err;
   }
 
   // Update recent Kalshi strike history for momentum/regime tracking.

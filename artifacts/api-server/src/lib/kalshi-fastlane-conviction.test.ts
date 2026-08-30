@@ -6,7 +6,11 @@ import {
   computeFastLaneContractCount,
   computeConvictionDecision,
   computeKalshi15mTicker,
+  evaluateConvictionFillZone,
+  FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS,
   isPriceTriggeredDecisionMode,
+  resolveFastLaneEmergencyExitThresholdCents,
+  shouldEmergencyExitFastLaneFill,
 } from "./kalshi-bot-engine-core.ts";
 import {
   CONVICTION_MAX_ZERO_FILL_ATTEMPTS,
@@ -62,6 +66,39 @@ test("FastLane contract sizing cannot spend above the target at the band edge", 
   assert.ok(computeFastLaneContractCount(10, "no", noLimit) * 0.91 <= 10);
 });
 
+test("FastLane emergency-exit gap is configurable and includes the exact boundary", () => {
+  assert.equal(FASTLANE_EMERGENCY_EXIT_THRESHOLD_CENTS, 15);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.68, 0.83, 15), true);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.6801, 0.83, 15), false);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.73, 0.83, 10), true);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.72, 0.83, 12), false);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.67, 0.82, 15), true);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.68, 0.82, 15), false);
+});
+
+test("FastLane emergency-exit gap uses normalized side cost for YES and NO", () => {
+  const yesFill = evaluateConvictionFillZone("yes", 0.68, 0.83, 0.95);
+  const noFill = evaluateConvictionFillZone("no", 0.32, 0.83, 0.95);
+  assert.equal(yesFill.sideCost, 0.68);
+  assert.ok(Math.abs((noFill.sideCost ?? 0) - 0.68) < 1e-9);
+  assert.equal(shouldEmergencyExitFastLaneFill(yesFill.sideCost, 0.83, 15), true);
+  assert.equal(shouldEmergencyExitFastLaneFill(noFill.sideCost, 0.83, 15), true);
+});
+
+test("FastLane emergency-exit threshold rejects invalid configuration values", () => {
+  assert.equal(shouldEmergencyExitFastLaneFill(0.68, 0.83, 0), false);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.68, 0.83, 100), false);
+  assert.equal(shouldEmergencyExitFastLaneFill(null, 0.83, 15), false);
+  assert.equal(shouldEmergencyExitFastLaneFill(0.68, null, 15), false);
+});
+
+test("FastLane invalid or missing persisted thresholds restore the safe default", () => {
+  assert.equal(resolveFastLaneEmergencyExitThresholdCents(undefined), 15);
+  assert.equal(resolveFastLaneEmergencyExitThresholdCents(0), 15);
+  assert.equal(resolveFastLaneEmergencyExitThresholdCents(100), 15);
+  assert.equal(resolveFastLaneEmergencyExitThresholdCents(9), 9);
+});
+
 test("exact Kalshi ticker conversion honors both EST and EDT", () => {
   assert.equal(
     computeKalshi15mTicker("btc", "2026-01-15T00:15"),
@@ -92,6 +129,67 @@ test("FastLane bypasses authenticated-book quote and revalidation while retainin
   assert.match(source, /claimRegularOrderIntent\(/);
   assert.match(source, /markRegularOrderIntentUnknown\(/);
   assert.match(source, /authenticatedBookQuote\?\.revalidate\(\) \?\? true/);
+});
+
+test("FastLane persists a bad fill before dispatching its emergency sell inline", () => {
+  const source = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
+  const closeSource = readFileSync(new URL("./kalshi-bot-close.ts", import.meta.url), "utf8");
+  const persistIndex = source.indexOf("await persistBetRecord({", source.indexOf("const newPosition"));
+  const emergencyIndex = source.indexOf(
+    'if (entryMode === "live" && fastLaneEmergencyExit != null)',
+    persistIndex,
+  );
+  const closeIndex = source.indexOf(
+    '"fastlane_fill_below_configured_floor_threshold"',
+    emergencyIndex,
+  );
+  assert.ok(persistIndex >= 0, "FastLane entry must be persisted");
+  assert.ok(emergencyIndex > persistIndex, "emergency exit must follow durable entry persistence");
+  assert.ok(closeIndex > emergencyIndex, "emergency close must run inline in the fill flow");
+  assert.match(source, /fastLaneEmergencyExitDetails: fastLaneEmergencyExit/);
+  assert.match(source, /reconcileActiveRegularExitIntent\(pos\.id\)/);
+  assert.match(source, /reconciledLiveFill:/);
+  assert.match(
+    source,
+    /"fastlane_fill_below_configured_floor_threshold",\s*false,\s*\{\s*reconciledLiveFill:/,
+  );
+  assert.match(
+    closeSource,
+    /if \(pos\.entryMode === "live" && !isExpiry && reconciledLiveFill\)[\s\S]*else if \(pos\.entryMode === "live" && !isExpiry\)/,
+  );
+  assert.match(closeSource, /markRegularExitIntentFinalized\(completedLiveExitIntentId\)/);
+  assert.match(source, /position remains tracked/);
+});
+
+test("confirmed emergency exits finalize before pause and daily-loss gates", () => {
+  const tickSource = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
+  const routeSource = readFileSync(new URL("../routes/kalshi-bot.ts", import.meta.url), "utf8");
+  const reconcileSource = readFileSync(
+    new URL("./kalshi-regular-order-reconcile.ts", import.meta.url),
+    "utf8",
+  );
+  const recoveryIndex = tickSource.indexOf("const recoveryPos = openPositions.get(sym)");
+  const dailyLimitIndex = tickSource.indexOf("if (S.dailyPnl <= -getEffectiveDailyLossLimit())");
+  const pauseIndex = tickSource.indexOf("if (S.paused) return");
+  assert.ok(recoveryIndex >= 0 && recoveryIndex < dailyLimitIndex);
+  assert.ok(recoveryIndex < pauseIndex);
+  assert.match(routeSource, /await finalizeReconciledFastLaneExit\(/);
+  assert.match(
+    routeSource,
+    /result\.outcome === "confirmed_fill" && "positionId" in result/,
+  );
+  assert.doesNotMatch(
+    routeSource,
+    /result\.outcome === "confirmed_fill" && "avgYesPrice" in result/,
+  );
+  assert.match(
+    tickSource,
+    /\.where\(eq\(kalshiBotBetsTable\.id, params\.positionId\)\)[\s\S]*reconstructedFromDb = true/,
+  );
+  assert.match(tickSource, /reconstructedFromDb,/);
+  assert.match(routeSource, /positionId: result\.positionId/);
+  assert.match(reconcileSource, /status IN \('reserved','unknown'\)[\s\S]*status = 'filled'[\s\S]*b\.exited_at IS NULL/);
+  assert.match(reconcileSource, /created_at DESC/);
 });
 
 test("FastLane honors the configured per-window minimum entry wait with no early-price bypass", () => {
