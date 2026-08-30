@@ -229,6 +229,26 @@ test("FastLane honors the configured per-window minimum entry wait with no early
   const timingGate = loopSource.indexOf("if (isPriceTriggeredMode) {", modeDeclaration);
   assert.ok(modeDeclaration >= 0, "scheduler must declare its price-triggered mode flag");
   assert.ok(timingGate > modeDeclaration, "scheduler timing gate must use the declared mode flag");
+  assert.match(
+    tickSource,
+    /if \(!isPriceTriggeredMode && minWindowEntryMinutes > 0/,
+    "the legacy lockout must not contradict the price-triggered Min Entry Wait",
+  );
+});
+
+test("price-triggered settings expose one entry timer and one applicable daily-loss control", () => {
+  const source = readFileSync(
+    new URL("../../../market-edge/src/pages/bot/bot-config-section.tsx", import.meta.url),
+    "utf8",
+  );
+  const priceTimer = source.indexOf("Single price-triggered entry timer");
+  const legacyTimer = source.indexOf("Legacy lockout remains available");
+  assert.ok(priceTimer >= 0);
+  assert.ok(legacyTimer > priceTimer);
+  assert.match(source.slice(priceTimer, legacyTimer), /Allow extreme-price bypass/);
+  assert.match(source.slice(legacyTimer), /\{!isPriceTriggeredMode && \(\(\) =>/);
+  assert.match(source, /value=\{isConviction \? \(merged\.convictionDailyLossLimit \?\? 50\) : \(merged\.dailyLossLimit \?\? 20\)\}/);
+  assert.match(source, /\{isConviction && <label[\s\S]*Daily Total Spend Limit/);
 });
 
 test("FastLane has no cross-symbol bets-per-window cap", () => {

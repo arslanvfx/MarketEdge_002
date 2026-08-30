@@ -21,6 +21,12 @@ FastLane’s emergency close is only a one-time bad-fill safeguard. After a vali
 
 **How to apply:** Keep bad-fill evaluation at entry, then manage every active position with the shared floor, activation-minute, and suppression parameters regardless of entry decision mode.
 
+Price-triggered modes have one authoritative entry timer: the global/per-market Conviction Min Entry Wait. The legacy model-driven early-window lockout must not also apply. The extreme-price bypass belongs with that timer and is available only to legacy Conviction; FastLane always respects its configured wait. Risk controls must likewise display only the field the active mode actually enforces: Conviction uses its dedicated daily-loss limit, while FastLane uses the canonical shared daily-loss limit and never shows Conviction’s gross-spend cap.
+
+**Why:** Showing overlapping timers and mode-inapplicable loss/spend inputs made operators believe hidden or ignored values controlled FastLane, while stale legacy values could contradict the visible slider.
+
+**How to apply:** Keep price-triggered timing and bypass UI together, keep legacy lockout UI exclusive to non-price-triggered modes, and condition risk controls by their real backend decision-mode scope.
+
 If an authoritative fill breaches the snapshotted emergency threshold, record the entry before beginning the emergency exit. Normalize NO fills to winning-side cost. Full exits finalize through an idempotent durable lifecycle; unknown or partial exits remain blocked with residual exposure visible, and recovery must work across pauses and restarts without another broker order.
 
 **Why:** A buy limit caps the worst price but cannot impose a lower execution bound. Immediate post-fill mitigation reduces abnormal price-improvement exposure, while durable exit identity prevents a timeout or partial sell from causing an oversell or silently dropping residual contracts.

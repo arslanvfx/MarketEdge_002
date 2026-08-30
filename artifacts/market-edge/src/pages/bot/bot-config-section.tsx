@@ -497,13 +497,23 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 </label>
                 {/* ──────────────────────────────────────────────────────── */}
 
-                {/* Daily Loss Limit — visible in all modes */}
+                {/* One authoritative daily-loss control for the active mode. */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Daily Loss Limit ($)</span>
                   <input type="number" min={1} max={500} step={1}
                     className="bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground"
-                    value={merged.dailyLossLimit ?? 20}
-                    onChange={e => setConfigDraft(d => ({ ...d, dailyLossLimit: parseFloat(e.target.value) }))} />
+                    value={isConviction ? (merged.convictionDailyLossLimit ?? 50) : (merged.dailyLossLimit ?? 20)}
+                    onChange={e => {
+                      const value = parseFloat(e.target.value);
+                      setConfigDraft(d => isConviction
+                        ? ({ ...d, convictionDailyLossLimit: value })
+                        : ({ ...d, dailyLossLimit: value }));
+                    }} />
+                  <span className="text-[10px] text-muted-foreground/60">
+                    {isConviction
+                      ? "Conviction's net daily-loss pause limit."
+                      : "Net daily-loss pause limit for the active bot mode."}
+                  </span>
                 </label>
 
                 {!isPriceTriggeredMode && (<>
@@ -870,57 +880,90 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       </label>
                     )}
 
-                    {/* Min Entry Wait */}
+                    {/* Single price-triggered entry timer */}
                     {(() => {
                       const minEntry = merged.convictionMinEntryMinutes ?? 0;
+                      const bypassOn = merged.convictionEarlyBypassEnabled !== false;
+                      const bypassFloor = merged.convictionEarlyBypassThreshold ?? 0.81;
+                      const bypassCap = merged.convictionEarlyBypassCap ?? 0.95;
+                      const floorPct = Math.round(bypassFloor * 100);
+                      const capPct = Math.round(bypassCap * 100);
+                      const noFloorPct = 100 - capPct;
+                      const noCapPct = 100 - floorPct;
                       return (
-                        <label className="flex flex-col gap-1.5 mt-1">
-                          <span className="text-xs text-muted-foreground flex items-center gap-2">
-                            Min Entry Wait —{" "}
-                            {minEntry === 0
-                              ? <span className="text-muted-foreground/50">No minimum</span>
-                              : <span className="text-amber-400 font-mono">Wait {minEntry} min before first bet</span>}
-                          </span>
-                          <div className="flex items-center gap-3">
-                            <input type="range" min={0} max={14} step={1}
-                              className="flex-1 accent-amber-500"
-                              value={minEntry}
-                              onChange={e => setConfigDraft(d => ({ ...d, convictionMinEntryMinutes: parseInt(e.target.value, 10) }))} />
-                            <span className="text-xs font-mono w-20 text-right">
+                        <div className="flex flex-col gap-2 mt-1 rounded-lg border border-amber-500/15 bg-amber-500/5 p-3">
+                          <label className="flex flex-col gap-1.5">
+                            <span className="text-xs text-muted-foreground flex items-center gap-2">
+                              Min Entry Wait —{" "}
                               {minEntry === 0
-                                ? <span className="text-muted-foreground/50">Off</span>
-                                : <span className="text-amber-400">min {minEntry}</span>}
+                                ? <span className="text-muted-foreground/50">No minimum</span>
+                                : <span className="text-amber-400 font-mono">Wait {minEntry} min before first bet</span>}
                             </span>
-                          </div>
-                          <span className="text-[10px] text-muted-foreground/70">
-                            {minEntry === 0
-                              ? "Bot starts watching for price crossing immediately when window opens."
-                              : `Bot waits ${minEntry} minute${minEntry !== 1 ? 's' : ''} after window open before placing any conviction bet. Useful to let the market settle before committing.`}
-                          </span>
-                        </label>
+                            <div className="flex items-center gap-3">
+                              <input type="range" min={0} max={14} step={1}
+                                className="flex-1 accent-amber-500"
+                                value={minEntry}
+                                onChange={e => setConfigDraft(d => ({ ...d, convictionMinEntryMinutes: parseInt(e.target.value, 10) }))} />
+                              <span className="text-xs font-mono w-20 text-right">
+                                {minEntry === 0
+                                  ? <span className="text-muted-foreground/50">Off</span>
+                                  : <span className="text-amber-400">T+{minEntry}m</span>}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-muted-foreground/70">
+                              {minEntry === 0
+                                ? "Bot starts watching for a qualifying price immediately when the window opens."
+                                : `Earliest entry is T+${minEntry}m${minEntry === 14 ? " — the final minute only." : "."}`}
+                            </span>
+                          </label>
+
+                          {isConviction && minEntry > 0 && (
+                            <div className="flex flex-col gap-2 border-t border-amber-500/15 pt-2">
+                              <label className="flex items-center justify-between gap-3 cursor-pointer select-none">
+                                <div>
+                                  <div className="text-xs text-foreground/80">Allow extreme-price bypass</div>
+                                  <div className="text-[10px] text-muted-foreground/60">Let a qualifying extreme price enter before T+{minEntry}m.</div>
+                                </div>
+                                <input type="checkbox"
+                                  className="accent-amber-400"
+                                  checked={bypassOn}
+                                  onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassEnabled: e.target.checked }))} />
+                              </label>
+                              {bypassOn && (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  <label className="flex flex-col gap-1">
+                                    <span className="text-[10px] text-muted-foreground/70">YES bypass floor</span>
+                                    <select className="bg-background border border-border/60 rounded-md px-2 py-1 text-xs text-foreground"
+                                      value={bypassFloor}
+                                      onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassThreshold: parseFloat(e.target.value) }))}>
+                                      {[0.75, 0.78, 0.80, 0.81, 0.82, 0.83, 0.84, 0.85, 0.86, 0.87, 0.88, 0.90].map(v => (
+                                        <option key={v} value={v}>{Math.round(v * 100)}¢</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                  <label className="flex flex-col gap-1">
+                                    <span className="text-[10px] text-muted-foreground/70">YES bypass cap</span>
+                                    <select className="bg-background border border-border/60 rounded-md px-2 py-1 text-xs text-foreground"
+                                      value={bypassCap}
+                                      onChange={e => setConfigDraft(d => ({ ...d, convictionEarlyBypassCap: parseFloat(e.target.value) }))}>
+                                      {[0.90, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98].map(v => (
+                                        <option key={v} value={v}>{Math.round(v * 100)}¢</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                  <span className="sm:col-span-2 text-[10px] text-muted-foreground/50">
+                                    Bypass zone: {floorPct}–{capPct}¢ YES or {noFloorPct}–{noCapPct}¢ NO.
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       );
                     })()}
 
-                    {/* Conviction daily loss limit */}
-                    <label className="flex flex-col gap-1.5 mt-1">
-                      <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                        <DollarSign className="w-3 h-3 text-red-400" />
-                        Daily Loss Limit ($)
-                      </span>
-                      <input type="number" min={1} max={500} step={1}
-                        className="bg-background border border-red-500/30 rounded-md px-3 py-1.5 text-sm text-foreground"
-                        value={merged.convictionDailyLossLimit ?? 50}
-                        onChange={e => {
-                          const v = parseFloat(e.target.value);
-                          if (!Number.isNaN(v) && v > 0) setConfigDraft(d => ({ ...d, convictionDailyLossLimit: v }));
-                        }} />
-                      <span className="text-[10px] text-muted-foreground/60">
-                        Bot pauses for the day once net losses hit this amount. Separate from the global daily loss limit.
-                      </span>
-                    </label>
-
-                    {/* Conviction daily spend limit */}
-                    <label className="flex flex-col gap-1.5 mt-1">
+                    {/* Legacy Conviction-only gross spend limit. FastLane does not use it. */}
+                    {isConviction && <label className="flex flex-col gap-1.5 mt-1">
                       <span className="text-xs text-muted-foreground flex items-center gap-1.5">
                         <DollarSign className="w-3 h-3 text-amber-400" />
                         Daily Total Spend Limit ($)
@@ -938,7 +981,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       <span className="text-[10px] text-muted-foreground/60">
                         Hard cap on total $ placed as bets today (wins don't reduce this — it only goes up). 0 = no limit.
                       </span>
-                    </label>
+                    </label>}
 
                     {/* Operator-tunable safety controls */}
                     <div className="flex flex-col gap-2 mt-2 border-t border-violet-500/10 pt-2">
@@ -1580,8 +1623,8 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
                 </>)}
 
-                {/* Early-Window Lockout (minWindowEntryMinutes) — always visible, applies to all modes */}
-                {(() => {
+                {/* Legacy lockout remains available only where the price-triggered slider is absent. */}
+                {!isPriceTriggeredMode && (() => {
                   const lockMin = merged.minWindowEntryMinutes ?? 0;
                   const bypassOn = merged.convictionEarlyBypassEnabled !== false;
                   const bypassFloor = merged.convictionEarlyBypassThreshold ?? 0.81;

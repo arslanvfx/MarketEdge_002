@@ -936,13 +936,12 @@ async function _runBotTick(
     setTickAbortReason(sym, windowKey, `past entry ceiling (>${S.config.maxEntryMinutes}min elapsed)`);
     return;
   }
-  // Early-window lockout: hard block on new bets for the first N minutes of the window.
-  // Only bypassed at true market extremes (≥92¢ or ≤8¢) regardless of mode.
-  // Conviction mode respects minWindowEntryMinutes just like any other mode —
-  // the separate maxBetMinWindowEntryMinutes gate controls when max bets are eligible.
+  // Legacy early-window lockout for model-driven modes. Price-triggered modes
+  // use the single convictionMinEntryMinutes control near their entry settings,
+  // so a stale legacy value cannot silently contradict that slider.
   {
     const minWindowEntryMinutes = S.config.minWindowEntryMinutes ?? 0;
-    if (!isFastLane && minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
+    if (!isPriceTriggeredMode && minWindowEntryMinutes > 0 && secondsElapsed < minWindowEntryMinutes * 60) {
       // Bypass: configurable — disabled means the timer is ALWAYS respected.
       // When enabled, the threshold is user-adjustable (default 0.92).
       const bypassEnabled = S.config.convictionEarlyBypassEnabled !== false;
