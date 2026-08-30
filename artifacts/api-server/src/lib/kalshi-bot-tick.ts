@@ -89,7 +89,7 @@ import {
   persistCoinStreakState, loadCoinStreakState, type StreakDbStore,
 } from "./kalshi-bot-streak-db";
 import {
-  S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
+  S, openPositions, historicalExitRecoveryPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   windowZeroFillRetryAfter, windowZeroFillBookVersions,
@@ -659,8 +659,7 @@ async function _runBotTick(
       // and misfires badly in conviction mode (17% win rate on exits).
       // When disableMidExitForConviction is true (the default), all mid-exit
       // evaluation is suppressed for conviction positions so they always hold
-      // to window expiry.  The conviction stop-loss in kalshi-bot-loop.ts is
-      // unaffected — it runs before this path and handles catastrophic losses.
+      // to window expiry. The shared stop-loss above is unaffected.
       if (S.config.decisionMode === "conviction" && S.config.disableMidExitForConviction !== false) {
         logger.debug({ sym }, "[kalshi-bot] conviction mode — mid-exit suppressed, holding to expiry");
         return;
@@ -992,6 +991,17 @@ async function _runBotTick(
       setTickAbortReason(sym, windowKey, `min-remaining floor: <${minRemaining}min left in window`);
       return;
     }
+  }
+  if (
+    Array.from(historicalExitRecoveryPositions.values())
+      .some((recovering) => recovering.symbol === sym)
+  ) {
+    setTickAbortReason(
+      sym,
+      windowKey,
+      "historical exit recovery: older live exit is still reconciling",
+    );
+    return;
   }
   if (!kalshiTicker || kalshiTarget === null) {
     logger.info(

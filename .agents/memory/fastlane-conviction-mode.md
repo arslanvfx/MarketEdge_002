@@ -15,6 +15,12 @@ Do not apply legacy Conviction’s gross daily-spend throttle to FastLane. FastL
 
 **How to apply:** Any Conviction-specific throttle must explicitly require `decisionMode === "conviction"`; shared execution-safety boundaries continue to apply to both modes.
 
+FastLane’s emergency close is only a one-time bad-fill safeguard. After a valid fill is persisted, the position must use the same configured stop-loss module as every other decision mode.
+
+**Why:** Entry-time fill validation and ongoing market-risk protection have different lifecycles; treating emergency validation as the only exit protection can leave valid fills unmanaged.
+
+**How to apply:** Keep bad-fill evaluation at entry, then manage every active position with the shared floor, activation-minute, and suppression parameters regardless of entry decision mode.
+
 If an authoritative fill breaches the snapshotted emergency threshold, record the entry before beginning the emergency exit. Normalize NO fills to winning-side cost. Full exits finalize through an idempotent durable lifecycle; unknown or partial exits remain blocked with residual exposure visible, and recovery must work across pauses and restarts without another broker order.
 
 **Why:** A buy limit caps the worst price but cannot impose a lower execution bound. Immediate post-fill mitigation reduces abnormal price-improvement exposure, while durable exit identity prevents a timeout or partial sell from causing an oversell or silently dropping residual contracts.

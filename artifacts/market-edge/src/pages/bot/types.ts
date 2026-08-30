@@ -149,6 +149,7 @@ export interface BotConfig {
   convictionMaxDailySpend?: number;
   convictionStopLossFloor?: number;
   convictionStopLossActivationMinute?: number;
+  convictionStopLossSuppressionMarginPct?: number;
   convictionMinEntryMinutes?: number;
   perMarketConvictionConfig?: Record<string, {
     lockPrice?: number | null;

@@ -71,6 +71,7 @@ import {
   isValidConvictionZoneBounds,
   checkConvictionOneSidedBook,
   shouldSuppressConvictionStopLoss,
+  evaluatePositionStopLoss,
   type BotConfig,
   type CorePairInputs,
   type CircuitBreakerState,
@@ -2626,6 +2627,62 @@ test("stop-loss suppression (margin 2%): NO bet — livePrice exactly at strike 
     direction: "no", livePrice: 0.072927, kalshiStrike: 0.072927, marginPct: 0.02,
   });
   assert.equal(result, true, "2% margin: at-strike should be suppressed (within buffer zone)");
+});
+
+test("shared stop-loss triggers for a YES position at the configured floor", () => {
+  const result = evaluatePositionStopLoss({
+    direction: "yes",
+    currentYesPrice: 0.35,
+    floor: 0.35,
+    minutesElapsed: 13,
+    activationMinute: 13,
+  });
+  assert.deepEqual(result, {
+    triggered: true,
+    winningSidePrice: 0.35,
+    reason: "at_or_below_floor",
+  });
+});
+
+test("shared stop-loss normalizes a NO position to winning-side price", () => {
+  const result = evaluatePositionStopLoss({
+    direction: "no",
+    currentYesPrice: 0.66,
+    floor: 0.35,
+    minutesElapsed: 13,
+    activationMinute: 13,
+  });
+  assert.equal(result.triggered, true);
+  assert.ok(Math.abs(result.winningSidePrice! - 0.34) < 1e-9);
+});
+
+test("shared stop-loss respects the configured activation minute", () => {
+  const result = evaluatePositionStopLoss({
+    direction: "no",
+    currentYesPrice: 0.99,
+    floor: 0.35,
+    minutesElapsed: 12.99,
+    activationMinute: 13,
+  });
+  assert.equal(result.triggered, false);
+  assert.equal(result.reason, "not_armed");
+});
+
+test("shared stop-loss is disabled by a zero floor and fails closed on missing price", () => {
+  assert.equal(evaluatePositionStopLoss({
+    direction: "yes",
+    currentYesPrice: 0.10,
+    floor: 0,
+    minutesElapsed: 14,
+    activationMinute: 13,
+  }).reason, "disabled");
+  assert.equal(evaluatePositionStopLoss({
+    direction: "yes",
+    currentYesPrice: null,
+    floor: 0.35,
+    minutesElapsed: 14,
+    activationMinute: 13,
+  }).reason, "price_unavailable");
 });
 
 // ── applyLockPrice082Migration tests ─────────────────────────────────────────

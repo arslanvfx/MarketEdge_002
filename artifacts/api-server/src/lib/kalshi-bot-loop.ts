@@ -19,6 +19,8 @@ import {
   getEffectiveConvictionZone,
   getConvictionMinEntryMinute,
   shouldApplyLoopGlobalQuietHours,
+  shouldSuppressConvictionStopLoss,
+  evaluatePositionStopLoss,
   getEtDow,
   isPriceTriggeredDecisionMode,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
@@ -32,6 +34,7 @@ import {
   getCachedKalshiBalance, invalidateBalanceCache, computeMarketableLimitPrice,
   fetchKalshiMarketResult, fetchKalshiSettledMarkets, cancelOrder, getOrder,
 } from "./kalshi-trader";
+import { reconcileActiveRegularExitIntent } from "./kalshi-regular-order-reconcile";
 import {
   getKalshiWindowContext, getWindowBetSignal, getTimingAnalysis, intraWindowMetrics,
   getCachedPrediction, getKalshiCachedData, fetchKalshiTarget, fetchLiveDirection,
@@ -47,7 +50,7 @@ import {
   persistCoinStreakState, loadCoinStreakState, type StreakDbStore,
 } from "./kalshi-bot-streak-db";
 import {
-  S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
+  S, openPositions, historicalExitRecoveryPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   windowZeroFillRetryAfter,
@@ -582,6 +585,111 @@ export async function runBotLoopTick(): Promise<void> {
     }).catch(() => {});
   }
 
+  // Reconciliation is accounting/recovery work, not a new trading decision.
+  // It must run before expiry and before paused/disabled gates. Otherwise an
+  // unknown broker sell could be misbooked as expiry or remain unfinalized.
+  const positionsWithBlockedExitLifecycle = new Set<string>();
+  const exitRecoveryCandidates = [
+    ...Array.from(openPositions.entries()).map(([sym, pos]) => ({
+      sym,
+      pos,
+      historical: false,
+    })),
+    ...Array.from(historicalExitRecoveryPositions.values()).map((pos) => ({
+      sym: pos.symbol,
+      pos,
+      historical: true,
+    })),
+  ];
+  for (const { sym, pos, historical } of exitRecoveryCandidates) {
+    if (pos.entryMode !== "live") continue;
+    let reconciliation;
+    try {
+      reconciliation = await reconcileActiveRegularExitIntent(pos.id);
+    } catch (err) {
+      positionsWithBlockedExitLifecycle.add(pos.id);
+      logger.error(
+        { err, sym, positionId: pos.id },
+        "[kalshi-bot] active exit reconciliation unavailable — position management blocked fail-closed",
+      );
+      continue;
+    }
+    if (reconciliation.outcome === "confirmed_fill") {
+      if (historical) historicalExitRecoveryPositions.delete(pos.id);
+      else openPositions.delete(sym);
+      try {
+        await closePosition(
+          pos,
+          reconciliation.avgYesPrice,
+          getKalshiCachedData(sym)?.value ?? pos.kalshiTarget,
+          "reconciled_live_exit",
+          false,
+          {
+            reconciledLiveFill: {
+              clientOrderId: reconciliation.clientOrderId,
+              filledCount: reconciliation.filledCount,
+              avgYesPrice: reconciliation.avgYesPrice,
+            },
+          },
+        );
+        logger.warn(
+          {
+            sym,
+            positionId: pos.id,
+            clientOrderId: reconciliation.clientOrderId,
+            filledCount: reconciliation.filledCount,
+            avgYesPrice: reconciliation.avgYesPrice,
+          },
+          "[kalshi-bot] reconciled active live exit — local position finalized",
+        );
+      } catch (err) {
+        if (historical) historicalExitRecoveryPositions.set(pos.id, pos);
+        else openPositions.set(sym, pos);
+        positionsWithBlockedExitLifecycle.add(pos.id);
+        logger.error(
+          { err, sym, positionId: pos.id, clientOrderId: reconciliation.clientOrderId },
+          "[kalshi-bot] reconciled active exit could not finalize locally — position restored",
+        );
+      }
+      continue;
+    }
+    if (reconciliation.outcome === "ambiguous") {
+      positionsWithBlockedExitLifecycle.add(pos.id);
+      logger.warn(
+        {
+          sym,
+          positionId: pos.id,
+          clientOrderId: reconciliation.clientOrderId,
+          reason: reconciliation.reason,
+        },
+        "[kalshi-bot] active live exit remains ambiguous — no additional exit or expiry settlement allowed",
+      );
+      continue;
+    }
+    if (historical) {
+      // A historical recovery reaches this branch only after its prior exit is
+      // authoritatively zero-filled or no longer active. It is now safe to
+      // settle the expired position without risking double accounting.
+      historicalExitRecoveryPositions.delete(pos.id);
+      try {
+        await closePosition(
+          pos,
+          null,
+          pos.kalshiTarget,
+          "window_expired",
+        );
+      } catch (err) {
+        historicalExitRecoveryPositions.set(pos.id, pos);
+        logger.error(
+          { err, sym, positionId: pos.id },
+          "[kalshi-bot] historical zero-fill recovery could not settle expiry — retaining for retry",
+        );
+      }
+    }
+    // An authoritative zero fill is safe to retry if the current exit evidence
+    // still authorizes it. "none" means no prior live exit intent exists.
+  }
+
   // Always run window-expiry check, even when S.paused or disabled.
   // If the 15-minute window rolls over while a position is still open (e.g.
   // the bot was S.paused, or the tick was slow), we must mark it expired and
@@ -592,6 +700,13 @@ export async function runBotLoopTick(): Promise<void> {
     // but a snapshot makes the control flow easier to reason about.
     for (const [posSymbol, stalePos] of Array.from(openPositions.entries())) {
       if (stalePos.windowKey !== currentKey) {
+        if (positionsWithBlockedExitLifecycle.has(stalePos.id)) {
+          logger.warn(
+            { sym: posSymbol, positionId: stalePos.id, oldKey: stalePos.windowKey, newKey: currentKey },
+            "[kalshi-bot] window expired with unresolved live exit — retaining position for reconciliation",
+          );
+          continue;
+        }
         logger.info(
           { sym: posSymbol, oldKey: stalePos.windowKey, newKey: currentKey },
           "[kalshi-bot] window expired — auto-closing open position",
@@ -806,7 +921,96 @@ export async function runBotLoopTick(): Promise<void> {
   // _runBotTick returns early after managing an existing position so the
   // same coin does not immediately re-enter in Phase 4 of this tick.
   if (openPositions.size > 0) {
+    // Shared stop-loss module — entry mode never changes position protection.
+    // A FastLane emergency close handles only a bad initial fill. Once a valid
+    // fill is open, it is managed here with the same floor, activation minute,
+    // near-zero rule, and underlying-price suppression as every other mode.
+    const NEAR_ZERO_STOP_LOSS_FLOOR = 0.05;
+    for (const [sym, pos] of Array.from(openPositions.entries())) {
+      if (positionsWithBlockedExitLifecycle.has(pos.id)) continue;
+      const kd = getKalshiCachedData(sym);
+      const yesPrice = kd?.yesPrice ?? null;
+      const windowOpenedAt = Date.parse(`${pos.windowKey}:00.000Z`);
+      const clockMinutesElapsed = Number.isFinite(windowOpenedAt)
+        ? Math.max(0, (Date.now() - windowOpenedAt) / 60_000)
+        : Number.NaN;
+      const stopLoss = evaluatePositionStopLoss({
+        direction: pos.direction,
+        currentYesPrice: yesPrice,
+        floor: S.config.convictionStopLossFloor,
+        minutesElapsed: clockMinutesElapsed,
+        activationMinute: S.config.convictionStopLossActivationMinute,
+      });
+      if (
+        !stopLoss.triggered
+        || stopLoss.winningSidePrice == null
+        || stopLoss.winningSidePrice <= NEAR_ZERO_STOP_LOSS_FLOOR
+      ) {
+        continue;
+      }
+
+      const liveSpotPrice = getCachedPrediction(sym)?.price ?? null;
+      const kalshiStrike = kd?.value ?? pos.kalshiTarget;
+      const suppressionMargin = S.config.convictionStopLossSuppressionMarginPct ?? 0.02;
+      if (shouldSuppressConvictionStopLoss({
+        direction: pos.direction,
+        livePrice: liveSpotPrice,
+        kalshiStrike,
+        marginPct: suppressionMargin,
+      })) {
+        logger.warn(
+          {
+            sym,
+            decisionMode: S.config.decisionMode,
+            direction: pos.direction,
+            liveSpotPrice,
+            kalshiStrike,
+            suppressionMargin,
+            winningSidePrice: +stopLoss.winningSidePrice.toFixed(4),
+            stopLossFloor: S.config.convictionStopLossFloor,
+          },
+          "[kalshi-bot] stop-loss suppressed — underlying still supports active position",
+        );
+        continue;
+      }
+
+      logger.warn(
+        {
+          sym,
+          decisionMode: S.config.decisionMode,
+          direction: pos.direction,
+          winningSidePrice: +stopLoss.winningSidePrice.toFixed(4),
+          stopLossFloor: S.config.convictionStopLossFloor,
+          activationMinute: S.config.convictionStopLossActivationMinute,
+          clockMinutesElapsed: +clockMinutesElapsed.toFixed(2),
+          entryYesPrice: pos.entryYesPrice,
+        },
+        "[kalshi-bot] shared stop-loss triggered — selling active position",
+      );
+      // Claim local ownership before the asynchronous close. A failed or
+      // ambiguous exit restores the position so its durable lifecycle retries.
+      openPositions.delete(sym);
+      try {
+        await closePosition(
+          pos,
+          yesPrice,
+          kalshiStrike,
+          "conviction_stop_loss",
+          false,
+          { gtcFallback: true },
+        );
+      } catch (err) {
+        logger.error(
+          { err, sym, decisionMode: S.config.decisionMode },
+          "[kalshi-bot] shared stop-loss exit failed — restoring position",
+        );
+        openPositions.set(sym, pos);
+      }
+    }
+
     for (const [sym] of Array.from(openPositions.entries())) {
+      const pos = openPositions.get(sym);
+      if (pos && positionsWithBlockedExitLifecycle.has(pos.id)) continue;
       const kalshiData = getKalshiCachedData(sym);
       const prediction = getCachedPrediction(sym);
       try {

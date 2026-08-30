@@ -235,6 +235,72 @@ test("FastLane does not inherit legacy Conviction's gross daily spend throttle",
   );
 });
 
+test("a valid FastLane fill uses the shared stop-loss module like every other mode", () => {
+  const loopSource = readFileSync(new URL("./kalshi-bot-loop.ts", import.meta.url), "utf8");
+  const sharedStopLossStart = loopSource.indexOf("Shared stop-loss module");
+  const positionTickStart = loopSource.indexOf(
+    "for (const [sym] of Array.from(openPositions.entries()))",
+    sharedStopLossStart,
+  );
+  assert.ok(sharedStopLossStart >= 0, "shared stop-loss module must exist");
+  assert.ok(
+    positionTickStart > sharedStopLossStart,
+    "shared stop-loss must run before ordinary mode-specific position management",
+  );
+  const stopLossBlock = loopSource.slice(sharedStopLossStart, positionTickStart);
+  assert.match(stopLossBlock, /convictionStopLossFloor/);
+  assert.match(stopLossBlock, /convictionStopLossActivationMinute/);
+  assert.match(stopLossBlock, /convictionStopLossSuppressionMarginPct/);
+  assert.match(stopLossBlock, /NEAR_ZERO_STOP_LOSS_FLOOR/);
+  assert.match(stopLossBlock, /"conviction_stop_loss"/);
+  assert.doesNotMatch(
+    stopLossBlock,
+    /decisionMode\s*===\s*"conviction"|decisionMode\s*===\s*"fastlane"/,
+    "entry decision mode must not gate active-position stop-loss protection",
+  );
+
+  const reconciliationIndex = loopSource.indexOf("reconcileActiveRegularExitIntent(pos.id)");
+  const expiryIndex = loopSource.indexOf("Always run window-expiry check");
+  const pausedGateIndex = loopSource.indexOf(
+    "if (!S.config.enabled || S.paused) return",
+    reconciliationIndex,
+  );
+  assert.ok(reconciliationIndex >= 0, "active live exits must be reconciled automatically");
+  assert.ok(
+    reconciliationIndex < expiryIndex,
+    "live-exit reconciliation must run before window-expiry accounting",
+  );
+  assert.ok(
+    reconciliationIndex < pausedGateIndex,
+    "live-exit reconciliation must run while trading is paused or disabled",
+  );
+  assert.match(loopSource, /reconciledLiveFill:/);
+  assert.match(loopSource, /positionsWithBlockedExitLifecycle\.has\(stalePos\.id\)/);
+
+  const dbSource = readFileSync(new URL("./kalshi-bot-db.ts", import.meta.url), "utf8");
+  assert.match(dbSource, /hasActiveRegularExitIntent\("live", row\.id\)/);
+  assert.match(dbSource, /restoring expired-window position with active live exit for reconciliation/);
+  assert.match(dbSource, /exit_intent\.status IN \('reserved','unknown','filled'\)/);
+  assert.match(dbSource, /historicalExitRecoveryPositions\.set\(row\.id, recoveredPosition\)/);
+  assert.doesNotMatch(
+    dbSource,
+    /if \(windowKey !== currentKey\)[\s\S]{0,1200}openPositions\.set\(row\.symbol/,
+    "historical unresolved exits must not overwrite a current same-symbol position",
+  );
+  assert.match(loopSource, /historicalExitRecoveryPositions\.values\(\)/);
+  assert.match(loopSource, /historicalExitRecoveryPositions\.delete\(pos\.id\)/);
+
+  const manualSource = readFileSync(new URL("./kalshi-bot-manual.ts", import.meta.url), "utf8");
+  const manualRecoveryGuard = manualSource.indexOf("historicalExitRecoveryPositions.values()");
+  const manualBrokerSubmit = manualSource.indexOf("await placeOrderWithRetry(");
+  assert.ok(manualRecoveryGuard >= 0, "manual orders must check historical exit recovery");
+  assert.ok(
+    manualRecoveryGuard < manualBrokerSubmit,
+    "manual recovery guard must run before any broker submission",
+  );
+  assert.match(manualSource, /older live exit still pending reconciliation/);
+});
+
 test("one slow market poll cannot serialize every FastLane symbol", () => {
   const source = readFileSync(new URL("./kalshi-conviction-poller.ts", import.meta.url), "utf8");
   assert.match(source, /const marketPollsInFlight = new PerKeyInFlight\(\)/);

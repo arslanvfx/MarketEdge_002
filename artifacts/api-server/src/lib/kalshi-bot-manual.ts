@@ -38,7 +38,7 @@ import {
   persistCoinStreakState, loadCoinStreakState, type StreakDbStore,
 } from "./kalshi-bot-streak-db";
 import {
-  S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
+  S, openPositions, historicalExitRecoveryPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
@@ -80,6 +80,15 @@ export async function placeManualOrder(opts: {
   const direction = opts.direction;
   const targetMode: BotMode = opts.mode ?? S.botMode;
   const targetBetSize = opts.betSize ?? S.config.betSize;
+
+  if (
+    Array.from(historicalExitRecoveryPositions.values())
+      .some((recovering) => recovering.symbol === sym)
+  ) {
+    throw new Error(
+      `${sym} has an older live exit still pending reconciliation — no new manual order is allowed`,
+    );
+  }
 
   // Guard: bet size cap
   const maxBetCap = S.config.maxBetSize ?? 2;

@@ -39,6 +39,10 @@ import {
 import {
   persistCoinStreakState, loadCoinStreakState, type StreakDbStore,
 } from "./kalshi-bot-streak-db";
+import {
+  ensureRegularOrderIntentMigrations,
+  hasActiveRegularExitIntent,
+} from "./kalshi-regular-order-intent";
 import { AsyncSerialQueue } from "./async-serial-queue";
 import {
   createSerializedAsyncOperation,
@@ -46,7 +50,7 @@ import {
   shouldRunSmartHoursCatchUp,
 } from "./kalshi-quiet-hours-scheduler";
 import {
-  S, openPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
+  S, openPositions, historicalExitRecoveryPositions, midExitedWindows, lastGuardStatesMap, lastGuardReasonMap,
   lastDecisionWindowKey, prefetchedTicker, windowBetCounts, windowTotalBets,
   windowBetDetails, windowDirectionCounts, windowFailedFills, windowZeroFillAttempts,
   pausedCoins, paperCoinDailyLoss, liveCoinDailyLoss, paperCoinStreakState,
@@ -602,8 +606,11 @@ export async function clearBetHistoryOld(hours = 2): Promise<{ deleted: number }
  */
 export async function loadOpenPositionFromDB(): Promise<void> {
   try {
+    await ensureRegularOrderIntentMigrations();
     // Use a 24-hour rolling window instead of a DATE equality so a position
     // opened just before UTC midnight is still found after a post-midnight restart.
+    // Positions with unresolved live exits are never age-limited: they must be
+    // hydrated so the loop can reconcile the durable broker lifecycle.
     const rows = await db
       .select()
       .from(kalshiBotBetsTable)
@@ -611,7 +618,16 @@ export async function loadOpenPositionFromDB(): Promise<void> {
         and(
           isNull(kalshiBotBetsTable.exitedAt),
           eq(kalshiBotBetsTable.action, "bet"),
-          sql`${kalshiBotBetsTable.createdAt} >= NOW() - INTERVAL '24 hours'`,
+          sql`(
+            ${kalshiBotBetsTable.createdAt} >= NOW() - INTERVAL '24 hours'
+            OR EXISTS (
+              SELECT 1
+                FROM kalshi_regular_exit_intents exit_intent
+               WHERE exit_intent.mode = 'live'
+                 AND exit_intent.position_id = ${kalshiBotBetsTable.id}
+                 AND exit_intent.status IN ('reserved','unknown','filled')
+            )
+          )`,
         ),
       )
       .orderBy(desc(kalshiBotBetsTable.createdAt));
@@ -641,18 +657,27 @@ export async function loadOpenPositionFromDB(): Promise<void> {
       const windowKey = row.windowKey;
 
       if (windowKey !== currentKey) {
-        // Window has already expired — skip; evalClosedBets will settle it.
-        logger.info(
+        const hasActiveLiveExit = row.mode === "live"
+          && await hasActiveRegularExitIntent("live", row.id);
+        if (!hasActiveLiveExit) {
+          // Ordinary expired rows remain evaluator-owned. Only a durable live
+          // exit lifecycle justifies restoring an older-window position.
+          logger.info(
+            { id: row.id, symbol: row.symbol, windowKey, currentKey },
+            "[kalshi-bot] recovered position window has expired — leaving for normal evaluator flow",
+          );
+          continue;
+        }
+        logger.warn(
           { id: row.id, symbol: row.symbol, windowKey, currentKey },
-          "[kalshi-bot] recovered position window has expired — leaving for normal evaluator flow",
+          "[kalshi-bot] restoring expired-window position with active live exit for reconciliation",
         );
-        continue;
       }
 
       const entryYesPrice = parseFloat(String(row.entryPrice));
       const direction = row.direction as "yes" | "no";
 
-      openPositions.set(row.symbol, {
+      const recoveredPosition: OpenPosition = {
         id: row.id,
         symbol: row.symbol,
         windowKey,
@@ -691,11 +716,19 @@ export async function loadOpenPositionFromDB(): Promise<void> {
             mlAbove:     typeof ma === "boolean" ? ma : null,
           };
         })(),
-      });
+      };
+
+      if (windowKey === currentKey) {
+        openPositions.set(row.symbol, recoveredPosition);
+      } else {
+        historicalExitRecoveryPositions.set(row.id, recoveredPosition);
+      }
 
       logger.info(
         { id: row.id, symbol: row.symbol, windowKey, direction, entryYesPrice },
-        "[kalshi-bot] open position restored from DB — exit guard will resume on next tick",
+        windowKey === currentKey
+          ? "[kalshi-bot] open position restored from DB — exit guard will resume on next tick"
+          : "[kalshi-bot] historical live-exit position restored into reconciliation queue",
       );
       restored++;
     }

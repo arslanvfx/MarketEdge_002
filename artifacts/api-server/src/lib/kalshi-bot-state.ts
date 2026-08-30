@@ -240,6 +240,10 @@ export function readCanonicalBotConfig(): Readonly<BotConfig> | null {
 // ---------------------------------------------------------------------------
 
 export const openPositions = new Map<string, OpenPosition>();
+// Older-window live positions with unresolved durable exit intents are kept
+// separately by position ID so they cannot overwrite a current same-symbol
+// position in the symbol-keyed active map.
+export const historicalExitRecoveryPositions = new Map<string, OpenPosition>();
 export const midExitedWindows = new Map<string, { windowKey: string; direction: "yes" | "no" }>();
 export const lastGuardStatesMap = new Map<string, GuardStates>();
 export const lastGuardReasonMap = new Map<string, string>();

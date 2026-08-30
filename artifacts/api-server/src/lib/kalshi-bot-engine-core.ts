@@ -1386,12 +1386,9 @@ export interface BotConfig {
   proximityCalibrationMigrated?: boolean; // one-time startup migration: clamp drifted proximity thresholds back to the calibrated band (global ≤0.05, per-coin ≤ suggestion)
   strikeProximityAtrScale?: boolean;  // when true, effectiveThreshold = strikeProximityMinPct × max(1, atrPct/0.20); scales guard wider for more volatile coins (default true)
   strikeProximityMinPctOverrides?: Record<string, number>; // per-coin override of strikeProximityMinPct; takes priority over global when set; key = symbol (e.g. "BTC")
-  /** @deprecated retained only so old persisted config can be read; no runtime stop-loss is armed. */
-  convictionStopLossFloor?: number;
-  /** @deprecated retained only so old persisted config can be read; no runtime stop-loss is armed. */
-  convictionStopLossActivationMinute?: number;
-  /** @deprecated retained only for persisted-config compatibility. */
-  convictionStopLossSuppressionMarginPct?: number;
+  convictionStopLossFloor?: number; // shared active-position stop-loss floor in winning-side price; 0 = disabled
+  convictionStopLossActivationMinute?: number; // shared active-position stop-loss activation minute
+  convictionStopLossSuppressionMarginPct?: number; // shared underlying-price suppression margin
   convictionEmergencyCloseFloor?: number;      // conviction only: fills ABOVE this value are kept as open positions (stop-loss monitors them); fills BELOW trigger immediate emergency close; default 0.75
   convictionDailyLossLimit?: number;  // conviction only: net daily loss cap in $ before the bot pauses (default 50); overrides dailyLossLimit when in conviction mode
   /** @deprecated retained only for persisted-config compatibility; no automatic opposite order is submitted. */
@@ -2912,6 +2909,46 @@ export function shouldSuppressConvictionStopLoss(opts: {
   return direction === "no"
     ? livePrice < kalshiStrike * (1 + marginPct)  // NO wins when crypto is at/below strike + margin
     : livePrice > kalshiStrike * (1 - marginPct); // YES wins when crypto is at/above strike - margin
+}
+
+export function evaluatePositionStopLoss(opts: {
+  direction: "yes" | "no";
+  currentYesPrice: number | null;
+  floor: number | null | undefined;
+  minutesElapsed: number;
+  activationMinute: number | null | undefined;
+}): {
+  triggered: boolean;
+  winningSidePrice: number | null;
+  reason: "disabled" | "not_armed" | "price_unavailable" | "above_floor" | "at_or_below_floor";
+} {
+  const { direction, currentYesPrice, floor, minutesElapsed, activationMinute } = opts;
+  if (!Number.isFinite(floor) || floor! <= 0 || floor! >= 1) {
+    return { triggered: false, winningSidePrice: null, reason: "disabled" };
+  }
+  const armMinute = Number.isFinite(activationMinute)
+    ? Math.max(0, activationMinute!)
+    : 0;
+  if (!Number.isFinite(minutesElapsed) || minutesElapsed < armMinute) {
+    return { triggered: false, winningSidePrice: null, reason: "not_armed" };
+  }
+  if (
+    currentYesPrice == null
+    || !Number.isFinite(currentYesPrice)
+    || currentYesPrice < 0
+    || currentYesPrice > 1
+  ) {
+    return { triggered: false, winningSidePrice: null, reason: "price_unavailable" };
+  }
+  const winningSidePrice = direction === "yes"
+    ? currentYesPrice
+    : 1 - currentYesPrice;
+  const triggered = winningSidePrice <= floor! + 1e-9;
+  return {
+    triggered,
+    winningSidePrice,
+    reason: triggered ? "at_or_below_floor" : "above_floor",
+  };
 }
 
 /**
