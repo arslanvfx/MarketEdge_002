@@ -1395,7 +1395,7 @@ export interface BotConfig {
   convictionCatastrophicFillThresholdCents?: number;
   /** @deprecated retained only for persisted-config compatibility; always ignored. */
   convictionEmergencyAutoCloseEnabled?: boolean;
-  convictionMinEntryMinutes?: number; // conviction only: min minutes to wait after window open before placing any bet (0 = no minimum, fire as soon as price enters zone; default 0)
+  convictionMinEntryMinutes?: number; // price-triggered modes: min minutes to wait after window open before placing any bet (0 = no minimum, 14 = final minute only; default 0)
   convictionMaxDailySpend?: number;   // conviction only: max gross $ bet per day (sum of all bet amounts regardless of wins); 0/undefined = disabled
   // Per-market conviction entry overrides.  Each key is a symbol (e.g. "GOLD").
   // Any field left undefined falls through to the matching global setting.
@@ -2792,7 +2792,7 @@ export function mergePerMarketConvictionConfig(
     if (hasField("minEntryMinute")) {
       if (value.minEntryMinute === null) {
         delete candidate.minEntryMinute;
-      } else if (typeof value.minEntryMinute === "number" && value.minEntryMinute >= 0 && value.minEntryMinute <= 13) {
+      } else if (typeof value.minEntryMinute === "number" && value.minEntryMinute >= 0 && value.minEntryMinute <= 14) {
         candidate.minEntryMinute = Math.round(value.minEntryMinute);
       } else {
         throw new Error(`Invalid conviction minimum entry minute for ${key}.`);

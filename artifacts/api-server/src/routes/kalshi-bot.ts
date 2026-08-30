@@ -1570,8 +1570,8 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   if (typeof convictionDailyLossLimit === "number" && convictionDailyLossLimit > 0) {
     partial.convictionDailyLossLimit = convictionDailyLossLimit;
   }
-  // 0 = no minimum (fire as soon as price enters zone); 1–12 = wait N minutes after window open
-  if (typeof convictionMinEntryMinutes === "number" && convictionMinEntryMinutes >= 0 && convictionMinEntryMinutes <= 12) {
+  // 0 = no minimum (fire as soon as price enters zone); 1–14 = wait N minutes after window open
+  if (typeof convictionMinEntryMinutes === "number" && convictionMinEntryMinutes >= 0 && convictionMinEntryMinutes <= 14) {
     partial.convictionMinEntryMinutes = Math.round(convictionMinEntryMinutes);
   }
   if (typeof convictionMaxDailySpend === "number" && convictionMaxDailySpend >= 0) {

@@ -181,6 +181,14 @@ test("per-market config merge rejects invalid values and inverted effective zone
     () => mergePerMarketConvictionConfig({ GOLD: { minEntryMinute: "12" } }, stored, 0.82, 0.91),
     /minimum entry minute/,
   );
+  assert.equal(
+    mergePerMarketConvictionConfig({ GOLD: { minEntryMinute: 14 } }, stored, 0.82, 0.91).GOLD?.minEntryMinute,
+    14,
+  );
+  assert.throws(
+    () => mergePerMarketConvictionConfig({ GOLD: { minEntryMinute: 15 } }, stored, 0.82, 0.91),
+    /minimum entry minute/,
+  );
   assert.throws(
     () => mergePerMarketConvictionConfig({ WTI: { lockPrice: 0.95 } }, stored, 0.82, 0.91),
     /WTI.*exceeds cap/,

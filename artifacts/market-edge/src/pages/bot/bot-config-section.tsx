@@ -802,7 +802,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                          </span>
                                        )}
                                       <input
-                                        type="number" min={0} max={13} step={1}
+                                        type="number" min={0} max={14} step={1}
                                         placeholder="0"
                                         value={ov.minEntryMinute == null ? "" : ov.minEntryMinute}
                                         onChange={e => updateOverride(sym, "minEntryMinute", e.target.value)}
@@ -882,7 +882,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                               : <span className="text-amber-400 font-mono">Wait {minEntry} min before first bet</span>}
                           </span>
                           <div className="flex items-center gap-3">
-                            <input type="range" min={0} max={12} step={1}
+                            <input type="range" min={0} max={14} step={1}
                               className="flex-1 accent-amber-500"
                               value={minEntry}
                               onChange={e => setConfigDraft(d => ({ ...d, convictionMinEntryMinutes: parseInt(e.target.value, 10) }))} />
