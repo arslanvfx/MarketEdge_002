@@ -223,6 +223,18 @@ test("FastLane has no cross-symbol bets-per-window cap", () => {
   );
 });
 
+test("FastLane does not inherit legacy Conviction's gross daily spend throttle", () => {
+  const tickSource = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
+  assert.match(
+    tickSource,
+    /S\.config\.decisionMode === "conviction"\s*&& effectiveMode === "live"\s*&& \(S\.config\.convictionMaxDailySpend \?\? 0\) > 0/,
+  );
+  assert.match(
+    tickSource,
+    /paperLiveEligibilityReason == null\s*&& S\.config\.decisionMode === "conviction"\s*&& \(S\.config\.convictionMaxDailySpend \?\? 0\) > 0/,
+  );
+});
+
 test("one slow market poll cannot serialize every FastLane symbol", () => {
   const source = readFileSync(new URL("./kalshi-conviction-poller.ts", import.meta.url), "utf8");
   assert.match(source, /const marketPollsInFlight = new PerKeyInFlight\(\)/);

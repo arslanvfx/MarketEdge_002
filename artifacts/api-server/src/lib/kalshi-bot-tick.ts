@@ -1847,9 +1847,14 @@ async function _runBotTick(
     return;
   }
   const betAmount = contractCount * expectedFillCost; // expected dollars risked
-  // Conviction daily spend gate: block entry if today's total spend would exceed the configured cap.
-  // Only applies to live entries — paper bypass entries don't consume real capital.
-  if (effectiveMode === "live" && (S.config.convictionMaxDailySpend ?? 0) > 0) {
+  // Legacy Conviction-only gross-spend throttle. FastLane intentionally does
+  // not inherit this mode-specific cap; it retains the canonical daily-loss,
+  // balance, reservation, ownership, and reconciliation safety boundaries.
+  if (
+    S.config.decisionMode === "conviction"
+    && effectiveMode === "live"
+    && (S.config.convictionMaxDailySpend ?? 0) > 0
+  ) {
     const spendCap = S.config.convictionMaxDailySpend!;
     if (S.dailySpendAmount + betAmount > spendCap) {
       logger.info(
@@ -3690,6 +3695,7 @@ async function _runBotTick(
     }
     if (
       paperLiveEligibilityReason == null
+      && S.config.decisionMode === "conviction"
       && (S.config.convictionMaxDailySpend ?? 0) > 0
       && S.dailySpendAmount + contractCount * expectedFillCost > S.config.convictionMaxDailySpend!
     ) {
