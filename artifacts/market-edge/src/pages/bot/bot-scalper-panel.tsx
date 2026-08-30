@@ -1391,6 +1391,16 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
       )}
 
       <div className="p-3 sm:p-5 space-y-4 sm:space-y-6">
+        <details
+          data-testid="details-scalper-settings"
+          className="group rounded-lg border border-amber-500/20 bg-amber-500/[0.03]"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-3 text-xs font-bold uppercase tracking-widest text-amber-400 transition-colors hover:bg-amber-500/5 [&::-webkit-details-marker]:hidden">
+            <Settings2 className="h-4 w-4" />
+            Settings &amp; safeguards
+            <ChevronDown className="ml-auto h-4 w-4 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="border-t border-amber-500/15 p-3 sm:p-4">
         <fieldset
           disabled={!canManage || mutationBusy !== null}
           className={`min-w-0 space-y-4 sm:space-y-6 ${!canManage ? "opacity-65" : ""}`}
@@ -1988,11 +1998,23 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
           </div>
         )}
         </fieldset>
+          </div>
+        </details>
 
+        <details
+          data-testid="details-scalper-diagnostics"
+          className="group rounded-lg border border-amber-500/20 bg-amber-500/[0.03]"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-3 text-xs font-bold uppercase tracking-widest text-amber-400 transition-colors hover:bg-amber-500/5 [&::-webkit-details-marker]:hidden">
+            <Activity className="h-4 w-4" />
+            Execution diagnostics &amp; research
+            <ChevronDown className="ml-auto h-4 w-4 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="border-t border-amber-500/15 p-3 sm:p-4">
         {funnelData && (
           <div
             data-testid="panel-scalper-window-funnel"
-            className="mt-8 border-t border-amber-500/20 pt-6"
+            className="pt-1"
           >
             <div className="flex flex-wrap items-end gap-x-3 gap-y-1">
               <Activity className="h-4 w-4 shrink-0 text-amber-500/70" />
@@ -2521,6 +2543,8 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
             </p>
           </div>
         )}
+          </div>
+        </details>
 
         {(statusData?.recentAttempts?.length ?? 0) > 0 && (() => {
           const totalAttempts = statusData!.recentAttempts.length;
@@ -2674,8 +2698,23 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
         })()}
 
         {/* Performance Section */}
+        <details
+          data-testid="details-scalper-performance"
+          className="group rounded-lg border border-amber-500/20 bg-amber-500/[0.03]"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-3 text-xs font-bold uppercase tracking-widest text-amber-400 transition-colors hover:bg-amber-500/5 [&::-webkit-details-marker]:hidden">
+            <Activity className="h-4 w-4" />
+            Performance
+            {perfData && (
+              <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-amber-300">
+                {perfData.settled} settled
+              </span>
+            )}
+            <ChevronDown className="ml-auto h-4 w-4 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="border-t border-amber-500/15 p-3 sm:p-4">
         {perfData && (
-          <div className="mt-8 border-t border-amber-500/20 pt-6">
+          <div>
             <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
               <div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -2773,6 +2812,8 @@ export function BotScalperPanel({ authPost, hideContrarianSpike = false }: BotSc
         <div className="mt-4 pt-4 border-t border-border/30 text-right text-[10px] text-muted-foreground">
           Settings are written to the bot configuration and restored when the server restarts.
         </div>
+          </div>
+        </details>
       </div>
     </div>
     {!hideContrarianSpike && <ContrarianSpikePanel authPost={authPost} />}
