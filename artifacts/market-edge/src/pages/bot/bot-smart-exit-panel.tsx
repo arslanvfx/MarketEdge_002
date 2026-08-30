@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Shield, AlertTriangle, PowerOff, Trash2 } from "lucide-react";
+import { Shield, AlertTriangle, PowerOff, Trash2, ChevronDown } from "lucide-react";
 import { API_BASE, fmt$, fmtDateTime } from "./utils";
 import type {
   ScalperSmartExitConfig, ScalperSmartExitLifecycleLedger, ScalperSmartExitReplayReport,
@@ -100,6 +100,20 @@ function SectionHeader({ title }: { title: string }) {
     <div className="px-4 py-2 border-b border-white/10 bg-white/[0.02] text-[10px] font-bold uppercase tracking-widest text-slate-400">
       {title}
     </div>
+  );
+}
+
+function CollapsedSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <details className="group border-b border-white/10 bg-white/[0.01]">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-slate-300 transition-colors hover:bg-white/[0.03] [&::-webkit-details-marker]:hidden">
+        {title}
+        <ChevronDown className="ml-auto h-3.5 w-3.5 text-slate-500 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="border-t border-white/10">
+        {children}
+      </div>
+    </details>
   );
 }
 
@@ -1076,7 +1090,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
               </tbody>
             </table>
           </div>
-          <SectionHeader title="Position Coverage · Why a coin did or did not trigger" />
+          <CollapsedSection title="Position Coverage · Why a coin did or did not trigger">
           <div className="overflow-x-auto overflow-y-auto max-h-[220px]">
             <table className="w-full min-w-[720px] table-fixed text-left text-xs whitespace-nowrap">
               <thead>
@@ -1109,11 +1123,12 @@ export function BotSmartExitPanel({ authPost }: Props) {
               </tbody>
             </table>
           </div>
+          </CollapsedSection>
         </div>
 
         {/* Right Column: Config & Replay */}
         <div className="flex flex-col h-full bg-[#0d1017]">
-          <SectionHeader title="Parameters & Config" />
+          <CollapsedSection title="Parameters & Config">
           <div className="p-4 flex flex-col gap-5 border-b border-white/10 bg-white/[0.01]">
             <div className="flex flex-col gap-2">
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Active Overrides</span>
@@ -1174,8 +1189,9 @@ export function BotSmartExitPanel({ authPost }: Props) {
               </button>
             </div>
           </div>
+          </CollapsedSection>
 
-          <SectionHeader title="Replay & Calibration Reports" />
+          <CollapsedSection title="Replay & Calibration Reports">
           <div className="overflow-x-auto overflow-y-auto max-h-[400px]">
             <table className="w-full min-w-[500px] table-fixed text-left text-xs whitespace-nowrap">
               <thead>
@@ -1211,6 +1227,7 @@ export function BotSmartExitPanel({ authPost }: Props) {
               </tbody>
             </table>
           </div>
+          </CollapsedSection>
         </div>
       </div>
       </div>
