@@ -954,7 +954,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         <div className="min-w-0 pr-3">
                           <div className="text-xs font-medium text-foreground">Strike Proximity Gate</div>
                           <div className="text-[10px] text-muted-foreground/70">
-                            On by default. Turn off only when you intentionally want conviction entries near the strike.
+                            Applies to Conviction and FastLane. Turn it off to skip this check completely.
                           </div>
                         </div>
                         <button
@@ -1114,7 +1114,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                         </button>
                       </div>
                       <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        Controls the final Bot 1 regular-bet safety check immediately before submission. When on, it fails closed on missing or stale spot evidence, the wrong target side, adverse endpoint movement, consecutive wrong-way movement, reversal/excursion, or rapid movement. This does not change the separate Scalper freefall guard.
+                        Controls the final Bot 1 safety check for regular, Conviction, and FastLane entries immediately before submission. When on, it fails closed on missing or stale spot evidence, the wrong target side, adverse endpoint movement, consecutive wrong-way movement, reversal/excursion, or rapid movement. When off, the check is skipped completely. This does not change the separate Scalper freefall guard.
                       </span>
                       {(merged.convictionDirectionGuardEnabled ?? true) && (
                         <div className="flex flex-col gap-2 mt-1">

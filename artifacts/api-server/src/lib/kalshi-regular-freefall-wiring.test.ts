@@ -40,7 +40,7 @@ test("dashboard distinguishes paper advisory and exposes regular-mode guard stat
   assert.match(source, /status-regular-guard-/);
 });
 
-test("one persisted false disables both regular direction guard checkpoints", () => {
+test("one persisted false disables every regular direction guard checkpoint including FastLane", () => {
   const tickSource = readFileSync(
     new URL("./kalshi-bot-tick.ts", import.meta.url),
     "utf8",
@@ -51,7 +51,11 @@ test("one persisted false disables both regular direction guard checkpoints", ()
   );
   assert.match(
     tickSource,
-    /evaluateRegularFreefallPreSubmitGuard\(\{\s*enabled: !isFastLane && \(S\.config\.convictionDirectionGuardEnabled \?\? true\),/,
+    /const regularFreefallEnabled = S\.config\.convictionDirectionGuardEnabled \?\? true/,
+  );
+  assert.match(
+    tickSource,
+    /enabled: regularFreefallEnabled,\s*samples: regularFreefallEnabled \? \(convictionPriceTicks\.get\(sym\) \?\? \[\]\) : \[\]/,
   );
 
   const routeSource = readFileSync(
@@ -64,7 +68,7 @@ test("one persisted false disables both regular direction guard checkpoints", ()
   );
 });
 
-test("one persisted false disables both conviction proximity checkpoints", () => {
+test("one persisted false disables the final proximity checkpoint for Conviction and FastLane", () => {
   const loopSource = readFileSync(
     new URL("./kalshi-bot-loop.ts", import.meta.url),
     "utf8",
@@ -79,12 +83,12 @@ test("one persisted false disables both conviction proximity checkpoints", () =>
     "utf8",
   );
   const finalProximitySection = tickSource.slice(
-    tickSource.indexOf("Conviction strike-proximity re-check (tick-time)"),
-    tickSource.indexOf("Conviction direction guard", tickSource.indexOf("Conviction strike-proximity re-check (tick-time)")),
+    tickSource.indexOf("Price-triggered strike-proximity re-check (tick-time)"),
+    tickSource.indexOf("Pipeline direction guard", tickSource.indexOf("Price-triggered strike-proximity re-check (tick-time)")),
   );
   assert.match(
     finalProximitySection,
-    /S\.config\.decisionMode === "conviction"\s*&& \(S\.config\.convictionProximityGuardEnabled \?\? true\)/,
+    /isPriceTriggeredMode\s*&& \(S\.config\.convictionProximityGuardEnabled \?\? true\)/,
   );
   assert.match(finalProximitySection, /computeStrikeProximityGate/);
 

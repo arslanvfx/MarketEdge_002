@@ -1382,7 +1382,7 @@ export interface BotConfig {
   lockPrice092Bootstrap?: boolean;    // one-time startup bootstrap: 0.93 → 0.92 target (asymmetric zone [90¢, 95¢])
   lockPrice082Migrated?: boolean;     // one-time startup migration: ≥88¢ lockPrice → 0.82 floor + set kalshiLockPriceCap=0.91
   kalshiLockPriceCap?: number;        // conviction only: entry cap (default 0.91; above this the window is missed → SKIP)
-  strikeProximityMinPct?: number;     // conviction only: global minimum |cryptoPrice−kalshiStrike|/strike % required before any order fires (default 0.05); missing/invalid price or strike blocks
+  strikeProximityMinPct?: number;     // price-triggered modes: global minimum |cryptoPrice−kalshiStrike|/strike % required before any order fires (default 0.05); missing/invalid price or strike blocks
   proximityCalibrationMigrated?: boolean; // one-time startup migration: clamp drifted proximity thresholds back to the calibrated band (global ≤0.05, per-coin ≤ suggestion)
   strikeProximityAtrScale?: boolean;  // when true, effectiveThreshold = strikeProximityMinPct × max(1, atrPct/0.20); scales guard wider for more volatile coins (default true)
   strikeProximityMinPctOverrides?: Record<string, number>; // per-coin override of strikeProximityMinPct; takes priority over global when set; key = symbol (e.g. "BTC")

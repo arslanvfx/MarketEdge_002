@@ -131,6 +131,26 @@ test("FastLane bypasses authenticated-book quote and revalidation while retainin
   assert.match(source, /authenticatedBookQuote\?\.revalidate\(\) \?\? true/);
 });
 
+test("FastLane honors enabled proximity and freefall guards without adding waits or requests", () => {
+  const source = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
+  const proximityStart = source.indexOf("Price-triggered strike-proximity re-check (tick-time)");
+  const freefallStart = source.indexOf("const regularFreefallEnabled");
+  const intentStart = source.indexOf("claimRegularOrderIntent", freefallStart);
+
+  assert.ok(proximityStart >= 0);
+  assert.match(
+    source.slice(proximityStart, freefallStart),
+    /isPriceTriggeredMode\s*&& \(S\.config\.convictionProximityGuardEnabled \?\? true\)[\s\S]*computeStrikeProximityGate/,
+  );
+  assert.ok(freefallStart > proximityStart);
+  assert.ok(intentStart > freefallStart);
+  assert.match(
+    source.slice(freefallStart, intentStart),
+    /enabled: regularFreefallEnabled,\s*samples: regularFreefallEnabled \? \(convictionPriceTicks\.get\(sym\) \?\? \[\]\) : \[\]/,
+  );
+  assert.doesNotMatch(source.slice(proximityStart, intentStart), /await getTickerFresh|setTimeout|sleep\(/);
+});
+
 test("FastLane persists a bad fill before dispatching its emergency sell inline", () => {
   const source = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
   const closeSource = readFileSync(new URL("./kalshi-bot-close.ts", import.meta.url), "utf8");

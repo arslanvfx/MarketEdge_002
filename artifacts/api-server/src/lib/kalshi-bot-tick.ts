@@ -2612,7 +2612,7 @@ async function _runBotTick(
     );
   }
 
-  // ── Conviction strike-proximity re-check (tick-time) ──────────────────────
+  // ── Price-triggered strike-proximity re-check (tick-time) ─────────────────
   // The main-loop evaluation runs computeStrikeProximityGate once per loop
   // tick using a potentially-stale cached crypto price.  Between that check
   // and the IOC order below, the live price can drift much closer to the
@@ -2621,7 +2621,7 @@ async function _runBotTick(
   // price — the latest fresh one-second spot sample — immediately before the
   // order fires. Missing price or strike evidence blocks.
   if (
-    S.config.decisionMode === "conviction"
+    isPriceTriggeredMode
     && (S.config.convictionProximityGuardEnabled ?? true)
   ) {
     const _proxNow = Date.now();
@@ -2649,7 +2649,7 @@ async function _runBotTick(
       atrMultiplierCap: 1.2,
     });
     if (_prox.blocked) {
-      releaseConvictionEntryReservation("conviction proximity re-check");
+      releaseConvictionEntryReservation("price-triggered proximity re-check");
       logger.warn(
         {
           sym, direction, windowKey,
@@ -2660,7 +2660,7 @@ async function _runBotTick(
           livePrice:          _proxLivePrice,
           kalshiStrike:       kalshiTarget,
         },
-        "[kalshi-bot] conviction proximity re-check: price too close to strike — order aborted",
+        "[kalshi-bot] price-triggered proximity re-check: price too close to strike — order aborted",
       );
       setTickAbortReason(sym, windowKey,
         `strike-proximity re-check: gap ${_prox.gapPct?.toFixed(3) ?? '?'}% < threshold ${_prox.effectiveThreshold.toFixed(3)}%`);
@@ -2698,7 +2698,7 @@ async function _runBotTick(
         gapPct:             _prox.gapPct?.toFixed(4) ?? "n/a",
         effectiveThreshold: _prox.effectiveThreshold.toFixed(4),
       },
-      "[kalshi-bot] conviction proximity re-check: gap OK — proceeding",
+      "[kalshi-bot] price-triggered proximity re-check: gap OK — proceeding",
     );
   }
 
@@ -2900,13 +2900,18 @@ async function _runBotTick(
   // Evaluate one canonical final decision for both modes at the exact same
   // pre-submit boundary. Live fails closed; paper records the decision but
   // remains advisory so it can measure the guard without changing exposure.
-  const freefallProduct = CRYPTO_COINS.find(
-    (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
-  );
+  const regularFreefallEnabled = S.config.convictionDirectionGuardEnabled ?? true;
+  // Keep the disabled path allocation-free with respect to guard evidence.
+  // The evaluator returns immediately and no samples are copied or inspected.
+  const freefallProduct = regularFreefallEnabled
+    ? CRYPTO_COINS.find(
+      (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
+    )
+    : undefined;
   const freefallStartedAt = Date.now();
   const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
-    enabled: !isFastLane && (S.config.convictionDirectionGuardEnabled ?? true),
-    samples: convictionPriceTicks.get(sym) ?? [],
+    enabled: regularFreefallEnabled,
+    samples: regularFreefallEnabled ? (convictionPriceTicks.get(sym) ?? []) : [],
     side: direction,
     nowMs: freefallStartedAt,
     windowStartMs,
