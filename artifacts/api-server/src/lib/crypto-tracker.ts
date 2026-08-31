@@ -1151,7 +1151,11 @@ export async function fetchCryptoPrices(): Promise<{
         const geckoEntry = (gecko as GeckoPrices)[GECKO_ID[coin.symbol] ?? ""];
         const [tickerPrice, stats] = await Promise.all([
           getTicker(coin.product),
-          geckoEntry?.usd_24h_change == null ? getStats(coin.product) : Promise.resolve(null),
+          geckoEntry?.usd_24h_change == null
+            ? coin.category === "commodity"
+              ? getStats(coin.product).catch(() => null)
+              : getStats(coin.product)
+            : Promise.resolve(null),
         ]);
         const change24hPct =
           geckoEntry?.usd_24h_change != null

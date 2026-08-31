@@ -20,7 +20,7 @@ export type ContrarianMode = ScalpMode;
 
 export const CONTRARIAN_COMMODITY_ADVERSE_EXCURSION_THRESHOLD_PCT = 0.03;
 export const CONTRARIAN_CRYPTO_ADVERSE_EXCURSION_THRESHOLD_PCT = 0.1;
-const CONTRARIAN_COMMODITY_SYMBOLS = new Set(["WTI", "GOLD", "SILVER"]);
+const CONTRARIAN_COMMODITY_SYMBOLS = new Set(["WTI", "GOLD", "SILVER", "COPPER", "NATGAS"]);
 
 /** Pure side-market threshold selection for the independent monitor. */
 export function contrarianAdverseExcursionThresholdPct(symbol: string): number {

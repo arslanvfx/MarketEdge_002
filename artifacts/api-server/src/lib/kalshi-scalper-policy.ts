@@ -2482,7 +2482,7 @@ export interface ConfigValidationResult {
   errors: string[];
 }
 
-const VALID_SYMBOLS = ["BTC","ETH","SOL","XRP","HYPE","BNB","DOGE","NEAR","ZEC","GOLD","SILVER","WTI"];
+const VALID_SYMBOLS = ["BTC","ETH","SOL","XRP","HYPE","BNB","DOGE","NEAR","ZEC","GOLD","SILVER","WTI","COPPER","NATGAS"];
 
 /**
  * Validate a partial ScalpConfig update.

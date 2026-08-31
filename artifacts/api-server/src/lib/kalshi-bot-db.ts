@@ -1042,7 +1042,7 @@ export async function recomputeSymbolQuietHours(symbol: string): Promise<void> {
   }
 }
 
-const _ALL_PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
+const _ALL_PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI", "COPPER", "NATGAS"];
 
 /**
  * Force-recomputes quiet-hours schedules for ALL per-market symbols at once.

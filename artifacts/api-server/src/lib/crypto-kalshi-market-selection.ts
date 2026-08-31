@@ -12,6 +12,20 @@ export function parseKalshiFloorStrike(
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+/**
+ * Commodity contracts compare the candle at contract close with the one-minute
+ * candle closing at the traded window's open. fetchPythWindowClosePrice accepts
+ * a 15-minute window start, so the reference window starts 30 minutes before
+ * the selected market closes.
+ */
+export function commodityOpeningReferenceWindowKey(
+  marketCloseTime: Date,
+): string | null {
+  const closeMs = marketCloseTime.getTime();
+  if (!Number.isFinite(closeMs)) return null;
+  return new Date(closeMs - 30 * 60_000).toISOString().slice(0, 16);
+}
+
 export function selectKalshiMarket<T extends KalshiMarketCandidate>(
   markets: readonly T[],
   targetTime?: Date,

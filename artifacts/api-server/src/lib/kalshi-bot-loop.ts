@@ -111,7 +111,7 @@ setConvictionZoneEntryCallback((sym: string, yesAsk: number | null, noAsk: numbe
   // ── Real-zone sanity check (belt-and-suspenders) ──────────────────────────
   // Re-verify the poller's price against the REAL configured zone for THIS
   // symbol, using per-market overrides when present (same two-arg form that
-  // kalshi-conviction-poller uses).  Per-market overrides let GOLD/SILVER/WTI
+  // kalshi-conviction-poller uses). Per-market overrides let commodities
   // use a different zone than BTC without the poller and loop disagreeing.
   const _cbZoneRaw = getEffectiveConvictionZone(sym, S.config);
   const { lockPrice, lockPriceCap } = deriveConvictionZone(

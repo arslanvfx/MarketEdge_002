@@ -7,9 +7,9 @@ import {
   planScalperRouteFunding,
 } from "./kalshi-shard-allocation.ts";
 
-test("production balance snapshot reserves three commodity attempts before more crypto", () => {
+test("production balance snapshot funds both new commodities within balanced route caps", () => {
   const candidates = [
-    ...["GOLD", "SILVER", "WTI"].map((symbol) => ({
+    ...["GOLD", "SILVER", "WTI", "COPPER", "NATGAS"].map((symbol) => ({
       symbol,
       exchangeIndex: 0,
       requiredBalance: 30,
@@ -23,15 +23,16 @@ test("production balance snapshot reserves three commodity attempts before more 
   assert.deepEqual(
     funding.targets,
     [
-      { exchangeIndex: 0, targetAvailableBalance: 90 },
-      { exchangeIndex: 2, targetAvailableBalance: 150 },
+      { exchangeIndex: 0, targetAvailableBalance: 120 },
+      { exchangeIndex: 2, targetAvailableBalance: 120 },
     ],
   );
   assert.equal(funding.fundedSymbols.has("GOLD"), true);
   assert.equal(funding.fundedSymbols.has("SILVER"), true);
-  assert.equal(funding.fundedSymbols.has("WTI"), true);
+  assert.equal(funding.fundedSymbols.has("COPPER"), true);
+  assert.equal(funding.fundedSymbols.has("NATGAS"), true);
   assert.equal(funding.fundedSymbols.size, 8);
-  assert.equal(funding.blockedSymbols.size, 4);
+  assert.equal(funding.blockedSymbols.size, 6);
 });
 
 test("overfunded crypto route returns enough cash to the commodity route", () => {

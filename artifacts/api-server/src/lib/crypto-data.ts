@@ -34,12 +34,14 @@ export {
   isPythProduct, type CoinDef,
 } from "./market-defs";
 import {
+  computeCurrentKalshiEventTicker,
   CRYPTO_COINS,
   isPythProduct,
   type CoinDef,
 } from "./market-defs";
 import { getKalshiPythValueEvidence } from "./kalshi-pyth-value-service";
 import { getKalshiCfBenchmarksValueEvidence } from "./kalshi-cfbenchmarks-value-service";
+import { selectPythWindowClose } from "./pyth-window-close.ts";
 
 // Commodity underlying data is an application-wide market-data dependency,
 // shared by guard sampling and live commodity price reads. Its service owns a
@@ -232,6 +234,93 @@ export interface FreshTickerEvidence {
   average60s?: number | null;
 }
 
+const KALSHI_LIVE_DATA_PRODUCTS = new Set([
+  "PYTH:Commodities.Index.CU/USD",
+  "PYTH:Commodities.Index.NATGAS/USD",
+]);
+const kalshiLiveDataCache = new Map<string, {
+  evidence: FreshTickerEvidence;
+  fetchedAtMs: number;
+}>();
+const kalshiLiveDataInFlight = new Map<string, Promise<FreshTickerEvidence>>();
+
+async function fetchKalshiCommodityLiveEvidence(
+  product: string,
+  maxAgeSeconds: number,
+): Promise<FreshTickerEvidence> {
+  const nowMs = Date.now();
+  const market = CRYPTO_COINS.find((candidate) => candidate.product === product);
+  const eventTicker = market
+    ? computeCurrentKalshiEventTicker(market.symbol, nowMs)
+    : null;
+  if (!market || !eventTicker) {
+    throw new Error(`Kalshi live-data event is not configured for ${product}`);
+  }
+  const cacheKey = `${product}|${eventTicker}`;
+  const cached = kalshiLiveDataCache.get(cacheKey);
+  if (cached && nowMs - cached.fetchedAtMs < 750) return cached.evidence;
+
+  const existing = kalshiLiveDataInFlight.get(cacheKey);
+  if (existing) return existing;
+
+  const request = (async (): Promise<FreshTickerEvidence> => {
+    const response = await fetch(
+      `https://api.elections.kalshi.com/trade-api/v2/live_data/events/${eventTicker}?range=15min`,
+      { signal: AbortSignal.timeout(3_000) },
+    );
+    if (!response.ok) {
+      throw new Error(`Kalshi live-data ${response.status} for ${eventTicker}`);
+    }
+    const body = await response.json() as {
+      live_data?: {
+        type?: string;
+        details?: {
+          asset?: string;
+          event_ticker?: string;
+          timeseries?: Array<{ t?: number; v?: number }>;
+        };
+      };
+    };
+    const details = body.live_data?.details;
+    const point = details?.timeseries?.at(-1);
+    const price = Number(point?.v);
+    const publishedAtMs = Number(point?.t);
+    if (
+      body.live_data?.type !== "commodity"
+      || details?.asset !== market.symbol
+      || details.event_ticker !== eventTicker
+      || !Number.isFinite(price)
+      || price <= 0
+      || !Number.isFinite(publishedAtMs)
+    ) {
+      throw new Error(`Kalshi live-data payload invalid for ${eventTicker}`);
+    }
+    const sourceAgeMs = Date.now() - publishedAtMs;
+    if (sourceAgeMs < -5_000 || sourceAgeMs > maxAgeSeconds * 1_000) {
+      throw new Error(
+        `Kalshi live-data evidence stale for ${eventTicker} (${Math.round(sourceAgeMs / 1_000)}s old)`,
+      );
+    }
+    const evidence: FreshTickerEvidence = {
+      price,
+      publishedAtMs,
+      sourceSequence: `${eventTicker}:${publishedAtMs}:${price}`,
+      source: "kalshi_pyth",
+      sourceIndex: pythSymbol(product),
+    };
+    kalshiLiveDataCache.set(cacheKey, { evidence, fetchedAtMs: Date.now() });
+    return evidence;
+  })();
+  kalshiLiveDataInFlight.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    if (kalshiLiveDataInFlight.get(cacheKey) === request) {
+      kalshiLiveDataInFlight.delete(cacheKey);
+    }
+  }
+}
+
 /**
  * Fresh Pyth spot price. Throws when the feed is stale (> PYTH_SPOT_MAX_AGE_S)
  * or unavailable so callers fail closed exactly like a Coinbase fetch error.
@@ -248,7 +337,13 @@ async function fetchPythSpotEvidence(
   maxAgeSeconds = PYTH_SPOT_MAX_AGE_S,
   _signal?: AbortSignal,
 ): Promise<FreshTickerEvidence> {
-  const evidence = getKalshiPythValueEvidence(product, maxAgeSeconds * 1_000);
+  let evidence;
+  try {
+    evidence = getKalshiPythValueEvidence(product, maxAgeSeconds * 1_000);
+  } catch (error) {
+    if (!KALSHI_LIVE_DATA_PRODUCTS.has(product)) throw error;
+    return fetchKalshiCommodityLiveEvidence(product, maxAgeSeconds);
+  }
   const ageMs = Date.now() - evidence.publishedAtMs;
   if (ageMs > maxAgeSeconds * 1_000) {
     throw new Error(`Kalshi Pyth evidence stale for ${pythSymbol(product)} (${Math.round(ageMs / 1_000)}s old)`);
@@ -437,7 +532,11 @@ export async function getOrderBook(product: string): Promise<OrderBook> {
  * minute of the window (same convention as the Coinbase path in
  * kalshi-bot-shadow.fetchWindowClosePrice).  Returns null on any error.
  */
-export async function fetchPythWindowClosePrice(product: string, windowKey: string): Promise<number | null> {
+export async function fetchPythWindowClosePrice(
+  product: string,
+  windowKey: string,
+  options: { requireExactTimestamp?: boolean } = {},
+): Promise<number | null> {
   try {
     const windowStartMs = new Date(windowKey + ":00Z").getTime();
     if (isNaN(windowStartMs)) return null;
@@ -449,9 +548,11 @@ export async function fetchPythWindowClosePrice(product: string, windowKey: stri
     );
     if (body.s !== "ok" || !body.t?.length) return null;
     const targetT = windowEndSec - 60; // last 1-min candle in the window
-    const idx = body.t.lastIndexOf(targetT);
-    const close = idx >= 0 ? body.c![idx] : body.c![body.c!.length - 1];
-    return Number.isFinite(close) && close > 0 ? close : null;
+    return selectPythWindowClose(
+      body,
+      targetT,
+      options.requireExactTimestamp === true,
+    );
   } catch {
     return null;
   }

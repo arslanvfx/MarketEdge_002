@@ -6,6 +6,7 @@ import type { BotStatus, BotConfig, BacktestModeStats, DecisionMode } from "./ty
 import { utcToEst, estToUtc, ET_LABEL, fmtPct, API_BASE } from "./utils";
 import { PerCoinOverrides } from "./per-coin-overrides";
 import { SmartQuietHoursControls } from "./smart-quiet-hours-controls";
+import { REGULAR_BOT_SYMBOLS } from "./regular-symbols";
 
 interface BotConfigSectionProps {
   cfg: BotConfig | undefined;
@@ -78,14 +79,14 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
     ...(configDraft.perMarketConvictionConfig ?? {}),
   };
   const invalidPerMarketSymbols = isPriceTriggeredMode
-    ? ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"].filter(sym => {
+    ? REGULAR_BOT_SYMBOLS.filter(sym => {
         const ov = convictionOverrides[sym];
         if (!ov) return false;
         return (ov.lockPrice ?? convictionFloor) > (ov.lockPriceCap ?? convictionCap);
       })
     : [];
   const invalidPerMarketTimingSymbols = isPriceTriggeredMode
-    ? ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"].filter(sym => {
+    ? REGULAR_BOT_SYMBOLS.filter(sym => {
         const wait = convictionOverrides[sym]?.minEntryMinute;
         return wait != null && wait < convictionGlobalMinEntryMinute;
       })
@@ -798,7 +799,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                 {isFastLane && <span className="text-muted-foreground/50">Emergency sell</span>}
                                  <span className="text-muted-foreground/50">Wait until (≥ global)</span>
                                 <span className="text-muted-foreground/50">Reset</span>
-                                {["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"].map(sym => {
+                                {REGULAR_BOT_SYMBOLS.map(sym => {
                                   const ov = overrides[sym] ?? {};
                                   const hasOverride = Object.values(ov).some(value => value != null);
                                   const floorPlaceholder = String(Math.round((merged.kalshiLockPrice ?? 0.82) * 100));
@@ -1106,7 +1107,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
 
                       {/* Per-coin threshold overrides */}
                       {(() => {
-                        const COINS = ["BTC","ETH","XRP","BNB","SOL","DOGE","NEAR","HYPE","ZEC","GOLD","SILVER","WTI"];
+                        const COINS = REGULAR_BOT_SYMBOLS;
                         // Suggested values match PROXIMITY_THRESHOLD_SUGGESTIONS on the backend —
                         // calibrated from observed gapPct values during 82–91¢ conviction entries.
                         // These are the minimum thresholds that still block zero-gap entries while

@@ -1,30 +1,39 @@
 ---
 name: Commodity 15-min markets via Pyth
-description: GOLD/SILVER/WTI Kalshi markets — data source routing, fail-closed rules, and why Pyth (not Coinbase/Yahoo) is the price source
+description: Five Kalshi commodity markets — settlement identities, opening targets, live-data routing, and fail-closed rules
 ---
 
-# Commodity 15-min markets (GOLD / SILVER / WTI)
+# Commodity 15-min markets
 
-The market universe lives in a pure module (`market-defs.ts`, no imports) so
-node --test can load it; `crypto-data.ts` / `crypto-kalshi.ts` re-export from it.
-Commodity defs carry `category: "commodity"` and a `PYTH:`-prefixed product id;
-all data fetchers route on that prefix.
+The supported commodity set is GOLD, SILVER, WTI, COPPER, and NATGAS.
 
-**Why Pyth:** Kalshi settles KXGOLD15M/KXSILVER15M/KXWTI15M against Pyth
-(settlement_sources "Pyth - Gold/Silver/WTI"), so execution-safety decisions
-must use Kalshi's authenticated Pyth publications rather than unrelated
-Coinbase/Yahoo movement. The authenticated Kalshi identities are
-`Metal.XAU/USD`, `Metal.XAG/USD`, and `Commodities.Index.PYTHOIL/USD`.
-External Hermes market-data routes may use a different WTI identity; never
-substitute that identity for Kalshi's own execution-safety stream.
+**Rule:** Execution evidence must use the exact Pyth identity named by Kalshi:
+GOLD=`Metal.XAU/USD`, SILVER=`Metal.XAG/USD`,
+WTI=`Commodities.Index.PYTHOIL/USD`,
+COPPER=`Commodities.Index.CU/USD`, and
+NATGAS=`Commodities.Index.NATGAS/USD`. Copper's separate public
+`COPPER/USD` feed is not interchangeable with Kalshi's `CU/USD` settlement
+identity.
+
+**Why:** These contracts resolve against Pyth. A correlated exchange quote or
+similarly named public feed can move differently from the settlement source and
+turn a safety check into false evidence.
 
 **How to apply:**
-- Spot: Hermes v2 `/updates/price/latest` (feed id resolved once via
-  `/v2/price_feeds?query=`, matched on exact `attributes.symbol`). A publish
-  age > 60s throws — commodities trade with market closures (weekends,
-  daily breaks), and a frozen price must never feed conviction ticks. The
-  conviction poller treats a throw as a failed tick → direction guard fails
-  closed (< 2 samples → no block/no entry).
+- Prefer Kalshi's authenticated `pyth_value` websocket. Kalshi's configured
+  websocket universe currently omits Copper and Natural Gas even though their
+  contracts are live. For those two, use Kalshi's event live-data commodity
+  timeseries, validating the exact asset and event ticker on every response.
+- Scope live-data caches and coalesced requests by both product and event ticker;
+  a fresh point from the prior 15-minute event cannot cross the boundary.
+- General UI reads may accept evidence up to 60 seconds old. Execution reads
+  require source publication age within 5 seconds. Missing, stale, future-dated,
+  wrong-asset, or wrong-event evidence must throw so entry fails closed.
+- New-style contracts may keep `floor_strike` absent/TBD. Their authoritative
+  target is the Pyth one-minute candle closing at the traded window's open.
+  Fetch that exact timestamp only; never substitute the last candle returned by
+  a partial history response. If the exact candle is absent, target stays null
+  and trading remains blocked.
 - Candles: Pyth Benchmarks TradingView shim `/v1/shims/tradingview/history`
   (any range in one call — no Coinbase-style 300-candle pagination). Candle
   volume is always 0; vwap/volTilt/volumeDirectionBias already degrade to
@@ -38,14 +47,17 @@ substitute that identity for Kalshi's own execution-safety stream.
   fresh authenticated Kalshi held-side depth covering the full position.
 - Settlement fallback close price: route `fetchWindowClosePrice` by prefix to
   the Pyth 1-min candle for the window's last minute (same slot convention as
-  the Coinbase path).
+  the Coinbase path). This legacy settlement fallback is intentionally separate
+  from strict live target derivation.
 - Benchmarks rate-limits aggressively ("too many requests") — keep the
   existing per-product candle caches in front of it; never poll it per-tick.
 
-Commodity Kalshi tickers share the exact crypto format
-(`KX<SYM>15M-YYMONDD-HHMM-MM`, EDT close time), verified live 2026-08-12
-(`KXGOLD15M-26AUG121400-00`), so the deterministic ticker derivation in the
-bot tick needs no special-casing.
+**Rule:** Commodity event and market tickers use DST-aware New York close time,
+not a fixed UTC offset.
 
-Commodities are NOT in TRAINING_COINS — Claude opening calls are autopilot-
-gated like any non-training coin; stat + ML run normally.
+**Why:** A hardcoded EDT offset is wrong during standard time and can select the
+wrong event at a boundary.
+
+**How to apply:** Build the event ticker as
+`KX<SYM>15M-YYMONDDHHMM` and the market ticker with its minute suffix, using
+`America/New_York` formatting.

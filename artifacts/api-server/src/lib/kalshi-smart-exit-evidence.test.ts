@@ -118,11 +118,13 @@ test("Kalshi Pyth evidence uses distinct upstream publications and fails closed 
   assert.match(stillRegressed.failureReason ?? "", /regressed/);
 });
 
-test("GOLD, SILVER, and WTI all route through Kalshi Pyth publication identity", async () => {
+test("all commodity markets route through Kalshi Pyth publication identity", async () => {
   const products = [
     "PYTH:Metal.XAU/USD",
     "PYTH:Metal.XAG/USD",
     "PYTH:Commodities.Index.PYTHOIL/USD",
+    "PYTH:Commodities.Index.CU/USD",
+    "PYTH:Commodities.Index.NATGAS/USD",
   ];
   for (const [index, product] of products.entries()) {
     const nowMs = 50_000 + index;

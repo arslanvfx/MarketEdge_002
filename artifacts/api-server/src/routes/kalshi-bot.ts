@@ -2457,7 +2457,7 @@ router.post("/crypto/bot/re-evaluate-bets", async (req, res) => {
   }
 });
 
-// POST /crypto/bot/fix-commodity-outcomes — re-evaluate all WTI/GOLD/SILVER expired
+// POST /crypto/bot/fix-commodity-outcomes — re-evaluate all expired commodity bets
 // bets using the Kalshi series-level settlement API and correct any that were
 // mis-evaluated (conservative loss committed before CF Benchmarks RTI published).
 // Idempotent — safe to call multiple times.

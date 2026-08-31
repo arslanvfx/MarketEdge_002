@@ -2746,7 +2746,7 @@ export function isValidConvictionZoneBounds(lockPrice: number, lockPriceCap: num
 
 export const PER_MARKET_CONVICTION_SYMBOLS = [
   "BTC", "ETH", "XRP", "HYPE", "BNB", "SOL",
-  "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI",
+  "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI", "COPPER", "NATGAS",
 ] as const;
 
 /**

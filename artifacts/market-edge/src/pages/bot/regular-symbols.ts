@@ -11,4 +11,6 @@ export const REGULAR_BOT_SYMBOLS = [
   "GOLD",
   "SILVER",
   "WTI",
+  "COPPER",
+  "NATGAS",
 ] as const;

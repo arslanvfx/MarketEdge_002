@@ -232,7 +232,7 @@ export async function evalClosedBets(): Promise<void> {
         // ── Step 1.5: Series-level settlement lookup ──────────────────────────
         // When GET /markets/{ticker} returns unknown (slow-settling commodity RTI,
         // ticker-format quirk) fetch the full settled-market list for this series
-        // and match the exact ticker.  More reliable for WTI, GOLD, SILVER where
+        // and match the exact ticker. More reliable for commodity markets where
         // CF Benchmarks RTI can lag the window close by several minutes.
         if (!kalshiSettled && row.ticker) {
           const _seriesTk = row.ticker.split("-")[0]; // "KXWTI15M-26AUG261900-00" → "KXWTI15M"
@@ -269,7 +269,7 @@ export async function evalClosedBets(): Promise<void> {
         }
 
         // ── Commodity-specific defer ───────────────────────────────────────────
-        // For commodity markets (WTI/GOLD/SILVER) the Pyth spot price differs from
+        // For commodity markets the Pyth spot price differs from
         // CF Benchmarks RTI which Kalshi uses for settlement — comparing against a
         // Pyth candle near the strike gives the wrong outcome.
         // Defer within the 90-s window; commit conservative loss past it so the
@@ -625,7 +625,7 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
         let _reEvalResult = settled.result;
 
         // Fallback: series-level lookup when per-ticker result is unavailable.
-        // This is the primary fix for commodity markets (WTI/GOLD/SILVER) where
+        // This is the primary fix for commodity markets where
         // GET /markets/{ticker} can return null while the series-level endpoint
         // correctly shows the CF Benchmarks RTI settlement.
         if (_reEvalResult !== "yes" && _reEvalResult !== "no") {
@@ -709,7 +709,7 @@ export async function reEvaluateSettledBets(opts: { since?: string; limit?: numb
 }
 
 /**
- * Re-evaluate ALL commodity (WTI/GOLD/SILVER) expired bets using the Kalshi
+ * Re-evaluate ALL expired commodity bets using the Kalshi
  * series-level settlement API.  Corrects outcomes committed as conservative losses
  * before the CF Benchmarks RTI result was published.  Idempotent — safe to call
  * multiple times.

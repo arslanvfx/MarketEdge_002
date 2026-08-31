@@ -5,9 +5,12 @@
 import { logger } from "./logger";
 import { hasKalshiCredentials, makeKalshiSignedHeaders } from "./kalshi-auth.ts";
 import {
+  commodityOpeningReferenceWindowKey,
   parseKalshiFloorStrike,
   selectKalshiMarket,
 } from "./crypto-kalshi-market-selection.ts";
+import { CRYPTO_COINS } from "./market-defs.ts";
+import { fetchPythWindowClosePrice } from "./crypto-data.ts";
 
 // Map of symbol → Kalshi series ticker for coins that have 15-min markets.
 // KALSHI_SERIES lives in market-defs.ts (pure module) alongside the market
@@ -329,7 +332,41 @@ export async function fetchKalshiTarget(
     }
 
     if (selected) {
-      const floorStrike = parseKalshiFloorStrike(selected.floor_strike);
+      let floorStrike = parseKalshiFloorStrike(selected.floor_strike);
+      const marketDef = CRYPTO_COINS.find((market) => market.symbol === sym);
+      if (
+        floorStrike == null
+        && marketDef?.category === "commodity"
+        && selected.ticker
+      ) {
+        const previouslyConfirmed = confirmedTargetStore.get(sym);
+        if (
+          previouslyConfirmed?.ticker === selected.ticker
+          && previouslyConfirmed.target > 0
+        ) {
+          floorStrike = previouslyConfirmed.target;
+        } else {
+          const marketCloseTime = selected.close_time
+            ? new Date(selected.close_time)
+            : targetTime;
+          const referenceWindowKey = marketCloseTime
+            ? commodityOpeningReferenceWindowKey(marketCloseTime)
+            : null;
+          if (referenceWindowKey) {
+            floorStrike = await fetchPythWindowClosePrice(
+              marketDef.product,
+              referenceWindowKey,
+              { requireExactTimestamp: true },
+            );
+            if (floorStrike != null) {
+              logger.info(
+                { sym, ticker: selected.ticker, target: floorStrike, referenceWindowKey },
+                "[kalshi] resolved TBD commodity target from authoritative Pyth opening candle",
+              );
+            }
+          }
+        }
+      }
       const rawExchangeIndex = selected.exchange_index;
       const parsedExchangeIndex =
         typeof rawExchangeIndex === "number"

@@ -1,8 +1,8 @@
-// Unit tests for the commodity 15-min market additions (GOLD / SILVER / WTI).
+// Unit tests for the commodity 15-minute market universe.
 //
 // Covers:
 //   1. Market definitions — commodity entries exist, categorized, PYTH-prefixed.
-//   2. KALSHI_SERIES — series tickers registered for all three commodities.
+//   2. KALSHI_SERIES — series tickers registered for every commodity.
 //   3. Deterministic Kalshi ticker derivation — the KX${SYM}15M-… format used by
 //      the bot tick must produce valid commodity tickers (KXGOLD15M-26AUG121400-00
 //      was verified live on 2026-08-12).
@@ -13,6 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  computeCurrentKalshiEventTicker,
   CRYPTO_COINS,
   COMMODITY_SYMBOLS,
   isPythProduct,
@@ -25,7 +26,7 @@ import {
 // ── 1. Market definitions ────────────────────────────────────────────────────
 
 test("commodity markets are defined with category and PYTH product prefix", () => {
-  for (const sym of ["GOLD", "SILVER", "WTI"]) {
+  for (const sym of ["GOLD", "SILVER", "WTI", "COPPER", "NATGAS"]) {
     const def = CRYPTO_COINS.find((c) => c.symbol === sym);
     assert.ok(def, `${sym} missing from CRYPTO_COINS`);
     assert.equal(def!.category, "commodity", `${sym} must be category=commodity`);
@@ -34,7 +35,10 @@ test("commodity markets are defined with category and PYTH product prefix", () =
 });
 
 test("COMMODITY_SYMBOLS is derived from CRYPTO_COINS and contains exactly the commodity symbols", () => {
-  assert.deepEqual([...COMMODITY_SYMBOLS].sort(), ["GOLD", "SILVER", "WTI"]);
+  assert.deepEqual(
+    [...COMMODITY_SYMBOLS].sort(),
+    ["COPPER", "GOLD", "NATGAS", "SILVER", "WTI"],
+  );
 });
 
 test("crypto coins are unchanged — no category, Coinbase products", () => {
@@ -52,6 +56,8 @@ test("KALSHI_SERIES contains the verified commodity series tickers", () => {
   assert.equal(KALSHI_SERIES["GOLD"], "KXGOLD15M");
   assert.equal(KALSHI_SERIES["SILVER"], "KXSILVER15M");
   assert.equal(KALSHI_SERIES["WTI"], "KXWTI15M");
+  assert.equal(KALSHI_SERIES["COPPER"], "KXCOPPER15M");
+  assert.equal(KALSHI_SERIES["NATGAS"], "KXNATGAS15M");
 });
 
 test("every market definition has a Kalshi series entry", () => {
@@ -90,10 +96,29 @@ test("deterministic ticker derivation produces the observed commodity ticker for
     deriveExpectedTicker("WTI", "2026-08-12T17:45"),
     "KXWTI15M-26AUG121400-00",
   );
+  assert.equal(
+    deriveExpectedTicker("COPPER", "2026-08-12T17:45"),
+    "KXCOPPER15M-26AUG121400-00",
+  );
+  assert.equal(
+    deriveExpectedTicker("NATGAS", "2026-08-12T17:45"),
+    "KXNATGAS15M-26AUG121400-00",
+  );
   // Crypto format is unchanged by the additions.
   assert.equal(
     deriveExpectedTicker("BTC", "2026-07-18T00:15"),
     "KXBTC15M-26JUL172030-30",
+  );
+});
+
+test("current event ticker uses the DST-aware New York close time", () => {
+  assert.equal(
+    computeCurrentKalshiEventTicker("COPPER", Date.parse("2026-08-31T18:40:00Z")),
+    "KXCOPPER15M-26AUG311445",
+  );
+  assert.equal(
+    computeCurrentKalshiEventTicker("NATGAS", Date.parse("2026-01-14T19:20:00Z")),
+    "KXNATGAS15M-26JAN141430",
   );
 });
 
@@ -110,9 +135,19 @@ test("commodity products use the canonical Pyth Core feed identities", () => {
   assert.equal(PYTH_COMMODITY_FEEDS.GOLD.symbol, "Metal.XAU/USD");
   assert.equal(PYTH_COMMODITY_FEEDS.SILVER.symbol, "Metal.XAG/USD");
   assert.equal(PYTH_COMMODITY_FEEDS.WTI.symbol, "Commodities.Index.PYTHOIL/USD");
+  assert.equal(PYTH_COMMODITY_FEEDS.COPPER.symbol, "Commodities.Index.CU/USD");
+  assert.equal(PYTH_COMMODITY_FEEDS.NATGAS.symbol, "Commodities.Index.NATGAS/USD");
   assert.equal(
     CRYPTO_COINS.find((coin) => coin.symbol === "WTI")?.product,
     "PYTH:Commodities.Index.PYTHOIL/USD",
+  );
+  assert.equal(
+    CRYPTO_COINS.find((coin) => coin.symbol === "COPPER")?.product,
+    "PYTH:Commodities.Index.CU/USD",
+  );
+  assert.equal(
+    CRYPTO_COINS.find((coin) => coin.symbol === "NATGAS")?.product,
+    "PYTH:Commodities.Index.NATGAS/USD",
   );
   for (const feed of Object.values(PYTH_COMMODITY_FEEDS)) {
     assert.match(feed.feedId, /^[0-9a-f]{64}$/);

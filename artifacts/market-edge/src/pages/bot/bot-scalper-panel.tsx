@@ -27,8 +27,9 @@ import {
   getScalperGuardBlock,
 } from "./scalper-ledger";
 import { ScalperCalibrationReview } from "./calibration-review";
+import { REGULAR_BOT_SYMBOLS } from "./regular-symbols";
 
-const PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"];
+const PER_MARKET_SYMBOLS = [...REGULAR_BOT_SYMBOLS];
 
 interface BotScalperPanelProps {
   authPost: (path: string, body: object) => Promise<unknown>;

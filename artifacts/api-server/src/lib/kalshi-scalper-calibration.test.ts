@@ -45,8 +45,10 @@ function input(
   };
 }
 
-test("handles all-market-neutral symbols including GOLD and WTI", () => {
-  for (const symbol of ["GOLD", "WTI"]) assert.equal(buildScalpCalibrationRecommendation(input(symbol)).status, "recommended");
+test("handles all-market-neutral symbols including every commodity", () => {
+  for (const symbol of ["GOLD", "SILVER", "WTI", "COPPER", "NATGAS"]) {
+    assert.equal(buildScalpCalibrationRecommendation(input(symbol)).status, "recommended");
+  }
 });
 test("reports explicit insufficient evidence and isolates supplied mode rows", () => {
   const value = input(); value.realOrders = value.realOrders.slice(0, 2);

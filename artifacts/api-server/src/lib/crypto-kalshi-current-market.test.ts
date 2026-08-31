@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  commodityOpeningReferenceWindowKey,
   parseKalshiFloorStrike,
   selectKalshiMarket,
 } from "./crypto-kalshi-market-selection.ts";
@@ -41,4 +42,12 @@ test("returns no market when every close time is outside the current window", ()
   );
 
   assert.equal(selected, undefined);
+});
+
+test("derives the preceding Pyth window whose close is the commodity opening target", () => {
+  assert.equal(
+    commodityOpeningReferenceWindowKey(new Date("2026-08-31T18:45:00Z")),
+    "2026-08-31T18:15",
+  );
+  assert.equal(commodityOpeningReferenceWindowKey(new Date("invalid")), null);
 });
