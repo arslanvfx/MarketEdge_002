@@ -8,6 +8,11 @@ import {
   shouldRunRegularSpotSampler,
 } from "./kalshi-regular-spot-sampler-core";
 import { PerKeyInFlight } from "./per-key-in-flight";
+import {
+  recordRegularSpotFetchAttempt,
+  recordRegularSpotFetchFailure,
+  recordRegularSpotFetchSuccess,
+} from "./kalshi-regular-spot-telemetry";
 
 export {
   collectRegularEntrySpotSamples,
@@ -39,16 +44,27 @@ async function sampleOnce(): Promise<void> {
   for (const product of CRYPTO_COINS) {
     const symbol = product.symbol.toUpperCase();
     void samplesInFlight.run(symbol, async () => {
+      recordRegularSpotFetchAttempt(symbol, product.product, Date.now());
       const symbolSamples = new Map([
         [symbol, [...(convictionPriceTicks.get(symbol) ?? [])]],
       ]);
-      await collectRegularEntrySpotSample({
-        product,
-        fetchFresh: getTickerFreshEvidence,
-        samples: symbolSamples,
-        nowMs,
-        receiptClock: Date.now,
-      });
+      try {
+        await collectRegularEntrySpotSample({
+          product,
+          fetchFresh: getTickerFreshEvidence,
+          samples: symbolSamples,
+          nowMs,
+          receiptClock: Date.now,
+        });
+      } catch (err) {
+        recordRegularSpotFetchFailure({
+          symbol,
+          product: product.product,
+          atMs: Date.now(),
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
       // Publish this symbol immediately. A slow unrelated product cannot delay
       // it, while retired mode/window owners remain unable to repopulate state.
       if (!isRegularSpotSampleOwnerActive({
@@ -60,7 +76,15 @@ async function sampleOnce(): Promise<void> {
         clockWindowStartMs: Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS,
       })) return;
       const ticks = symbolSamples.get(symbol);
-      if (ticks) convictionPriceTicks.set(symbol, ticks);
+      if (ticks) {
+        convictionPriceTicks.set(symbol, ticks);
+        recordRegularSpotFetchSuccess({
+          symbol,
+          product: product.product,
+          atMs: Date.now(),
+          publishedAtMs: ticks[ticks.length - 1]?.oraclePublishedAtMs ?? null,
+        });
+      }
     }).catch((err) =>
       logger.debug({ err, symbol }, "[regular-spot-sampler] symbol sample failed"),
     );

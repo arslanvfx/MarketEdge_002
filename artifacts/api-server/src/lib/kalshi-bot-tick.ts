@@ -70,6 +70,7 @@ import {
   evaluateRegularFreefallPreSubmitGuard,
 } from "./kalshi-regular-freefall-guard";
 import { shouldPersistRegularFreefallSkip } from "./kalshi-freefall-telemetry";
+import { recordRegularSpotCandidateDecision } from "./kalshi-regular-spot-telemetry";
 import { regularPlacementFunnel, type RegularPlacementTerminalOutcome } from "./kalshi-regular-placement-funnel";
 import crypto from "crypto";
 import { decideRemainderAttempt } from "./kalshi-entry-remainder";
@@ -3006,6 +3007,15 @@ async function _runBotTick(
     sampleCoverageMs: regularFreefall.sampleCoverageMs,
     secondsRemaining: regularFreefall.secondsRemaining,
   } as const;
+  recordRegularSpotCandidateDecision({
+    symbol: sym,
+    product: freefallProduct?.product ?? "unavailable",
+    evidenceClass: regularFreefallSignals.evidenceClass,
+    reason: regularFreefall.reason,
+    atMs: freefallStartedAt,
+    windowKey,
+    mode: entryMode,
+  });
   if (!regularFreefall.allowed) {
     const evidence = describeRegularFreefallDecision(regularFreefall);
     convictionDirectionGuardBlockedMap.set(sym, {

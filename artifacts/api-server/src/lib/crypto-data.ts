@@ -30,9 +30,19 @@ export const GECKO_ID: Record<string, string> = {
 // Market definitions live in market-defs.ts (pure module, unit-testable);
 // re-exported here so all existing `from "./crypto-data"` imports keep working.
 export {
-  CRYPTO_COINS, COMMODITY_SYMBOLS, isPythProduct, type CoinDef,
+  CRYPTO_COINS, COMMODITY_SYMBOLS, PYTH_COMMODITY_FEEDS, isPythProduct, type CoinDef,
 } from "./market-defs";
-import { CRYPTO_COINS, isPythProduct, type CoinDef } from "./market-defs";
+import {
+  CRYPTO_COINS,
+  isPythProduct,
+  type CoinDef,
+} from "./market-defs";
+import { getKalshiPythValueEvidence } from "./kalshi-pyth-value-service";
+
+// Commodity underlying data is an application-wide market-data dependency,
+// shared by guard sampling and live commodity price reads. Its service owns a
+// single reconnecting socket for the process lifetime rather than tracking bot
+// pause/mode state; safety consumers still reject stale or disconnected data.
 
 export interface Prediction {
   target: string;
@@ -111,6 +121,7 @@ export async function fetchJson<T>(
   url: string,
   timeoutMs = 8000,
   signal?: AbortSignal,
+  additionalHeaders?: Record<string, string>,
 ): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -119,7 +130,11 @@ export async function fetchJson<T>(
   else signal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": UA, Accept: "application/json" },
+      headers: {
+        "User-Agent": UA,
+        Accept: "application/json",
+        ...additionalHeaders,
+      },
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`${res.status} ${url}`);
@@ -189,30 +204,11 @@ export async function getGeckoPrices(): Promise<GeckoPrices> {
 // logic (vwap, volumeDirectionBias, volTilt) already degrades gracefully to
 // neutral when total volume is 0.
 
-export const PYTH_HERMES = "https://hermes.pyth.network";
 export const PYTH_BENCHMARKS = "https://benchmarks.pyth.network";
 
 /** "PYTH:Metal.XAU/USD" → "Metal.XAU/USD" */
 function pythSymbol(product: string): string {
   return product.slice(5);
-}
-
-// Pyth Hermes needs the hex feed id for spot lookups. Resolved once per
-// symbol via the search endpoint, then cached for the process lifetime.
-const pythFeedIdCache = new Map<string, string>();
-
-async function getPythFeedId(symbol: string, signal?: AbortSignal): Promise<string> {
-  const hit = pythFeedIdCache.get(symbol);
-  if (hit) return hit;
-  const results = await fetchJson<Array<{ id: string; attributes: { symbol?: string } }>>(
-    `${PYTH_HERMES}/v2/price_feeds?query=${encodeURIComponent(symbol.split(".").pop() ?? symbol)}`,
-    8_000,
-    signal,
-  );
-  const match = results.find((r) => r.attributes?.symbol === symbol);
-  if (!match) throw new Error(`Pyth feed id not found for ${symbol}`);
-  pythFeedIdCache.set(symbol, match.id);
-  return match.id;
 }
 
 /** Max acceptable publish age for a Pyth spot price used as a live tick.
@@ -244,28 +240,14 @@ async function fetchPythSpot(
 async function fetchPythSpotEvidence(
   product: string,
   maxAgeSeconds = PYTH_SPOT_MAX_AGE_S,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
 ): Promise<FreshTickerEvidence> {
-  const sym = pythSymbol(product);
-  const id = await getPythFeedId(sym, signal);
-  const body = await fetchJson<{
-    parsed?: Array<{ id: string; price: {
-      price: string; conf?: string; expo: number; publish_time: number;
-    } }>;
-  }>(`${PYTH_HERMES}/v2/updates/price/latest?ids[]=${id}`, 5000, signal);
-  const p = body.parsed?.[0]?.price;
-  if (!p) throw new Error(`Pyth spot unavailable for ${sym}`);
-  const ageS = Date.now() / 1000 - p.publish_time;
-  if (ageS > maxAgeSeconds) {
-    throw new Error(`Pyth spot stale for ${sym} (${Math.round(ageS)}s old — market closed?)`);
+  const evidence = getKalshiPythValueEvidence(product, maxAgeSeconds * 1_000);
+  const ageMs = Date.now() - evidence.publishedAtMs;
+  if (ageMs > maxAgeSeconds * 1_000) {
+    throw new Error(`Kalshi Pyth evidence stale for ${pythSymbol(product)} (${Math.round(ageMs / 1_000)}s old)`);
   }
-  const price = Number(p.price) * Math.pow(10, p.expo);
-  if (!Number.isFinite(price) || price <= 0) throw new Error(`Pyth spot invalid for ${sym}`);
-  return {
-    price,
-    publishedAtMs: p.publish_time * 1_000,
-    sourceSequence: `${p.publish_time}:${p.price}:${p.conf ?? ""}`,
-  };
+  return evidence;
 }
 
 /** Pyth Benchmarks TradingView-shim OHLC history → Candle[] (v always 0). */
@@ -335,6 +317,7 @@ export async function getTickerFreshEvidence(
     // is stale/closed — the conviction tick feed treats a throw as a failed
     // tick (nothing pushed), so the direction guard fails closed rather than
     // operating on frozen prices.
+    if (signal?.aborted) throw new Error(`Kalshi Pyth fetch aborted for ${pythSymbol(product)}`);
     const evidence = await fetchPythSpotEvidence(
       product,
       PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S,

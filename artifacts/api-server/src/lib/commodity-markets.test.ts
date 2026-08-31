@@ -17,6 +17,7 @@ import {
   COMMODITY_SYMBOLS,
   isPythProduct,
   KALSHI_SERIES,
+  PYTH_COMMODITY_FEEDS,
 } from "./market-defs.ts";
 // (crypto-data.ts itself can't be loaded under node --test — it imports
 // logger/pino via extension-less paths; pure market logic lives in market-defs.)
@@ -103,4 +104,17 @@ test("isPythProduct routes only PYTH-prefixed products", () => {
   assert.equal(isPythProduct("PYTH:Commodities.USOILSPOT"), true);
   assert.equal(isPythProduct("BTC-USD"), false);
   assert.equal(isPythProduct("ETH-USD"), false);
+});
+
+test("commodity products use the canonical Pyth Core feed identities", () => {
+  assert.equal(PYTH_COMMODITY_FEEDS.GOLD.symbol, "Metal.XAU/USD");
+  assert.equal(PYTH_COMMODITY_FEEDS.SILVER.symbol, "Metal.XAG/USD");
+  assert.equal(PYTH_COMMODITY_FEEDS.WTI.symbol, "Commodities.Index.PYTHOIL/USD");
+  assert.equal(
+    CRYPTO_COINS.find((coin) => coin.symbol === "WTI")?.product,
+    "PYTH:Commodities.Index.PYTHOIL/USD",
+  );
+  for (const feed of Object.values(PYTH_COMMODITY_FEEDS)) {
+    assert.match(feed.feedId, /^[0-9a-f]{64}$/);
+  }
 });

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, mergePerMarketConvictionConfig, isValidConvictionZoneBounds, PER_MARKET_CONVICTION_SYMBOLS, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, mergePerMarketConvictionConfig, isValidConvictionZoneBounds, PER_MARKET_CONVICTION_SYMBOLS, getConvictionMinEntryMinute, type BetProfile } from "../lib/kalshi-bot-engine";
 import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
@@ -40,7 +40,7 @@ import { getAllPipelineResults, getInFlightDetails } from "../lib/kalshi-bot-pip
 import { getLatestCoinSignals } from "../lib/crypto-signals";
 import { CRYPTO_COINS, getTrackerWindowCall } from "../lib/crypto";
 import { getKalshiCachedData } from "../lib/crypto-kalshi";
-import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow, convictionDirectionGuardBlockedMap, type ConvictionDirectionBlockInfo } from "../lib/kalshi-bot-state";
+import { recentDirectionalOutcomes, directionalDampenerCooldown, activeCoinStreakState, coinStabilityCache, coinTrajectoryCache, extremeCautionAbortedThisWindow, convictionDirectionGuardBlockedMap, convictionPriceTicks, type ConvictionDirectionBlockInfo } from "../lib/kalshi-bot-state";
 import { db, botConfigTable, kalshiBotBetsTable, botAutoTuneLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import {
@@ -53,6 +53,8 @@ import {
 import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
 import { getDailyHourlyPnl, getDailyPnlSimulation, getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
 import { getRegularPlacementFunnelSnapshot } from "../lib/kalshi-regular-placement-funnel.ts";
+import { getRegularSpotTelemetrySnapshot } from "../lib/kalshi-regular-spot-telemetry.ts";
+import { kalshiPythValueService } from "../lib/kalshi-pyth-value-service.ts";
 import { logger } from "../lib/logger";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
@@ -586,7 +588,29 @@ router.get("/bot/pipeline-status", pipelineStatusHandler);
 router.get("/crypto/bot/regular-placement-funnel", requireAuth, (req, res) => {
   const parsed = Number.parseInt(String(req.query.limit ?? "50"), 10);
   const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 200)) : 50;
-  res.json(getRegularPlacementFunnelSnapshot(limit));
+  const state = getBotState();
+  const commoditySymbols = CRYPTO_COINS
+    .filter((market) => market.category === "commodity")
+    .map((market) => market.symbol);
+  res.json({
+    ...getRegularPlacementFunnelSnapshot(limit),
+    comparisonProfile: {
+      environment: process.env.NODE_ENV === "production" ? "production" : "development",
+      executionMode: state.mode,
+      decisionMode: state.config.decisionMode,
+      paperDecisionMode: state.config.paperDecisionMode ?? null,
+      liveDecisionMode: state.config.liveDecisionMode ?? null,
+      directionFreefallEnabled: state.config.convictionDirectionGuardEnabled ?? true,
+      commodityMinimumEntryMinutes: Object.fromEntries(
+        commoditySymbols.map((symbol) => [
+          symbol,
+          getConvictionMinEntryMinute(symbol, state.config),
+        ]),
+      ),
+    },
+    spotSampler: getRegularSpotTelemetrySnapshot(convictionPriceTicks),
+    commodityUnderlyingFeed: kalshiPythValueService.getStatus(),
+  });
 });
 
 // GET /crypto/bot/coin-guard-state?mode=paper|live — per-coin streak / daily-loss / slippage state (public — read only)

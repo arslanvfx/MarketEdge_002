@@ -44,7 +44,7 @@ test("WTI is sampled through its exact Pyth product route", async () => {
   await collectRegularEntrySpotSamples({
     products: [{
       symbol: "WTI",
-      product: "PYTH:Commodities.USOILSPOT",
+      product: "PYTH:Commodities.Index.PYTHOIL/USD",
     }],
     fetchFresh: async (product) => {
       requested.push(product);
@@ -53,7 +53,7 @@ test("WTI is sampled through its exact Pyth product route", async () => {
     samples,
     nowMs: 900_000,
   });
-  assert.deepEqual(requested, ["PYTH:Commodities.USOILSPOT"]);
+  assert.deepEqual(requested, ["PYTH:Commodities.Index.PYTHOIL/USD"]);
   assert.deepEqual(samples.get("WTI"), [{ price: 72.5, ts: 900_000 }]);
 });
 
@@ -61,7 +61,7 @@ test("Pyth publish evidence is retained while Coinbase keeps local cadence", asy
   const samples = new Map();
   await collectRegularEntrySpotSamples({
     products: [
-      { symbol: "WTI", product: "PYTH:Commodities.USOILSPOT" },
+      { symbol: "WTI", product: "PYTH:Commodities.Index.PYTHOIL/USD" },
       { symbol: "BTC", product: "BTC-USD" },
     ],
     fetchFresh: async (product) => product.startsWith("PYTH:")

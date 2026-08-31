@@ -46,6 +46,11 @@ import {
 } from "./kalshi-regular-spot-sampler";
 import { ConvictionOrderbookWarmupCoordinator } from "./kalshi-conviction-orderbook-warmup";
 import { PerKeyInFlight } from "./per-key-in-flight";
+import {
+  recordRegularSpotFetchAttempt,
+  recordRegularSpotFetchFailure,
+  recordRegularSpotFetchSuccess,
+} from "./kalshi-regular-spot-telemetry";
 
 const POLL_INTERVAL_MS = 1_000;
 export const CONVICTION_LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
@@ -127,6 +132,7 @@ function isActiveGeneration(generation: number): boolean {
 
 async function refreshSpotTick(sym: string, product: string, generation: number): Promise<void> {
   const h = healthFor(sym);
+  recordRegularSpotFetchAttempt(sym, product, Date.now());
   try {
     const evidence = await getTickerFreshEvidence(product);
     if (!isActiveGeneration(generation)) return;
@@ -145,6 +151,12 @@ async function refreshSpotTick(sym: string, product: string, generation: number)
       // last few seconds via timestamp but deep history costs little.
       if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
       convictionPriceTicks.set(sym, ticks);
+      recordRegularSpotFetchSuccess({
+        symbol: sym,
+        product,
+        atMs: receivedAt,
+        publishedAtMs: evidence.publishedAtMs,
+      });
       h.okCount++;
       h.consecutiveFails = 0;
       h.lastOkAt = Date.now();
@@ -153,12 +165,18 @@ async function refreshSpotTick(sym: string, product: string, generation: number)
       h.failCount++;
       h.consecutiveFails++;
     }
-  } catch {
+  } catch (err) {
     // No tick pushed on error.  The direction guard fails CLOSED when it
     // ends up with no usable source, so a feed outage blocks entries rather
     // than fabricating a fake decline OR silently passing.
     h.failCount++;
     h.consecutiveFails++;
+    recordRegularSpotFetchFailure({
+      symbol: sym,
+      product,
+      atMs: Date.now(),
+      reason: err instanceof Error ? err.message : String(err),
+    });
     if (h.consecutiveFails === 5 || h.consecutiveFails % 30 === 0) {
       logger.warn(
         { sym, consecutiveFails: h.consecutiveFails, lastOkAgoMs: h.lastOkAt != null ? Date.now() - h.lastOkAt : null },
