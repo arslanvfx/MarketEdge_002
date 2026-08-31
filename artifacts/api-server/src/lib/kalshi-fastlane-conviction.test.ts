@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 import {
   computeFastLaneLimitPrice,
   computeFastLaneContractCount,
-  fastLaneRequiresAuthenticatedBook,
   computeConvictionDecision,
   computeKalshi15mTicker,
   evaluateConvictionFillZone,
@@ -122,14 +121,11 @@ test("FastLane confirmed zero fills use the controlled five-second, ten-attempt 
   );
 });
 
-test("FastLane requires authenticated executable depth for commodities only", () => {
+test("FastLane bypasses authenticated-book quote and revalidation for every market", () => {
   const source = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
-  assert.equal(fastLaneRequiresAuthenticatedBook("WTI"), true);
-  assert.equal(fastLaneRequiresAuthenticatedBook("gold"), true);
-  assert.equal(fastLaneRequiresAuthenticatedBook("SILVER"), true);
-  assert.equal(fastLaneRequiresAuthenticatedBook("BTC"), false);
-  assert.match(source, /fastLaneCommodityRequiresAuthenticatedBook/);
-  assert.match(source, /commodity FastLane IOC requires a fresh exact authenticated book/);
+  assert.match(source, /const useAuthenticatedBook =\s*!isFastLane/);
+  assert.doesNotMatch(source, /fastLaneCommodityRequiresAuthenticatedBook/);
+  assert.doesNotMatch(source, /commodity FastLane IOC requires/);
   assert.match(source, /\[kalshi-bot\] FastLane range hit — submitting edge-capped IOC/);
   assert.match(source, /timeInForce: entryTimeInForce/);
   assert.match(source, /claimRegularOrderIntent\(/);

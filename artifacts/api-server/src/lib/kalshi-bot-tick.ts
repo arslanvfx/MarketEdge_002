@@ -22,7 +22,6 @@ import {
   shouldEmergencyExitFastLaneFill,
   getEffectiveConvictionZone,
   getEffectiveFastLaneEmergencyExitThresholdCents,
-  fastLaneRequiresAuthenticatedBook,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
   computeConvictionCandleSlopeGate,
@@ -3085,15 +3084,13 @@ async function _runBotTick(
     // the final pre-POST boundary. Without that proof, do not submit.
     const convictionRequiresAuthenticatedBook =
       authorizationDecisionMode === "conviction";
-    const fastLaneCommodityRequiresAuthenticatedBook =
-      authorizationDecisionMode === "fastlane"
-      && fastLaneRequiresAuthenticatedBook(sym);
     const useAuthenticatedBook =
-      convictionRequiresAuthenticatedBook
-      || fastLaneCommodityRequiresAuthenticatedBook
-      || (!isFastLane && S.config.liveExecutionGateway === "authenticated_book");
-    const authenticatedGatewayZone =
-      convictionRequiresAuthenticatedBook || fastLaneCommodityRequiresAuthenticatedBook
+      !isFastLane
+      && (
+        convictionRequiresAuthenticatedBook
+        || S.config.liveExecutionGateway === "authenticated_book"
+      );
+    const authenticatedGatewayZone = convictionRequiresAuthenticatedBook
       ? getEffectiveConvictionZone(sym, S.config)
       : { lockPrice: 0, lockPriceCap: 1 };
     const authenticatedBookQuote = useAuthenticatedBook
@@ -3108,9 +3105,7 @@ async function _runBotTick(
     if (useAuthenticatedBook && !authenticatedBookQuote) {
       const reason = convictionRequiresAuthenticatedBook
         ? "conviction IOC requires a fresh exact authenticated book with every executable level inside the entry band"
-        : fastLaneCommodityRequiresAuthenticatedBook
-          ? "commodity FastLane IOC requires a fresh exact authenticated book with every executable level inside the entry band"
-          : "authenticated book gateway requires a fresh exact book with full requested depth";
+        : "authenticated book gateway requires a fresh exact book with full requested depth";
       releaseConvictionEntryReservation(reason);
       setTickAbortReason(sym, windowKey, `gateway abort: ${reason}`);
       regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);

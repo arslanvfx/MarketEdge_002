@@ -3,11 +3,11 @@ name: FastLane Conviction mode
 description: Durable strategy and execution boundaries for the isolated price-only FastLane mode.
 ---
 
-FastLane is a separate decision mode. A fresh current-window YES or NO ask inside the configured conviction floor/cap is its sole strategy authorization; it must not inherit model, confidence, stability, or trajectory gates. Strike-proximity and Freefall are operator-controlled exceptions. Thin commodity markets are also an execution-safety exception: GOLD, SILVER, and WTI require fresh authenticated full-depth confirmation entirely inside the configured band immediately before submission, while crypto keeps the public-quote fast path.
+FastLane is a separate decision mode. A fresh current-window YES or NO ask inside the configured conviction floor/cap is its sole strategy authorization; it must not inherit model, confidence, stability, trajectory, or authenticated-book gates. This applies identically to crypto and commodities. Strike-proximity and Freefall are operator-controlled exceptions: FastLane enforces either guard only when its shared toggle is on.
 
 **Why:** The mode exists to remove pre-entry processing latency without changing or weakening the established Conviction mode. Operators explicitly chose to retain optional proximity and Freefall protection without adding network waits. Kalshi order submission remains authenticated even though a separate authenticated order-book read is intentionally absent.
 
-**How to apply:** Authorize entries from current-window public price alone, then apply enabled proximity and Freefall guards at the final pre-submit boundary using already-collected fresh samples. For commodity execution, reject missing, stale, shallow, or cheaper-than-floor authenticated depth and revalidate the exact book version at the pre-POST boundary. Disabled optional guards must short-circuit without evidence work, requests, or sleeps. Preserve exact market identity, monetary safety, per-position ownership, signed execution, and durable reconciliation.
+**How to apply:** Authorize entries from current-window public price alone, then apply enabled proximity and Freefall guards at the final pre-submit boundary using already-collected fresh samples. Never add a commodity-only quote, depth, or authenticated-book check. Disabled guards must short-circuit without evidence work, requests, or sleeps. Preserve exact market identity, monetary safety, per-position ownership, signed execution, and durable reconciliation.
 
 Do not apply legacy Conviction’s gross daily-spend throttle to FastLane. FastLane keeps canonical daily-loss, actual-balance, reservation, ownership, and reconciliation protections instead.
 

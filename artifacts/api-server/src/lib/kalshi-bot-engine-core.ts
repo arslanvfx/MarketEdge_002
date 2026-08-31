@@ -992,13 +992,6 @@ export function computeFastLaneContractCount(
   return Math.floor(targetDollars / worstCaseSideCost);
 }
 
-const FASTLANE_AUTHENTICATED_BOOK_SYMBOLS = new Set(["GOLD", "SILVER", "WTI"]);
-
-/** Thin commodity books require executable-depth confirmation before FastLane submits. */
-export function fastLaneRequiresAuthenticatedBook(symbol: string): boolean {
-  return FASTLANE_AUTHENTICATED_BOOK_SYMBOLS.has(symbol.toUpperCase());
-}
-
 /** Build the exact current-window ticker using DST-aware New York local time. */
 export function computeKalshi15mTicker(symbol: string, windowKey: string): string {
   const openMs = Date.parse(`${windowKey}:00Z`);
