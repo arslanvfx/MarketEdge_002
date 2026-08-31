@@ -89,7 +89,7 @@ test("Kalshi settlement health requires both fresh receipt and source publicatio
   assert.match(health, /ready = item\.ready && settlementSourceFresh/);
 });
 
-test("evidence recovery cannot create a duplicate owner exit request", () => {
+test("Smart Exit retries only confirmed no-sale requests and preserves active or terminal ownership", () => {
   const execute = service.slice(
     service.indexOf("async function executeAuthorizedExit"),
     service.indexOf("async function recordLifecycleTrigger"),
@@ -108,8 +108,47 @@ test("evidence recovery cannot create a duplicate owner exit request", () => {
     database.indexOf("export async function claimSmartExitRequest"),
     database.indexOf("export async function resolveSmartExitRequest"),
   );
-  assert.match(durableClaim, /ON CONFLICT \(owner,position_id\) DO NOTHING/);
-  assert.match(durableClaim, /exit_request_exists/);
+  assert.match(durableClaim, /ON CONFLICT \(owner,position_id\) DO UPDATE SET/);
+  assert.match(
+    durableClaim,
+    /WHERE kalshi_smart_exit_requests\.status IN \('blocked','zero_fill'\)/,
+  );
+  assert.match(durableClaim, /exit_request_active_or_terminal/);
+  assert.match(
+    execute,
+    /existingLifecycle\?\.executionStatus === "filled"[\s\S]*?executed: true, executionStatus: "filled"/,
+  );
+  assert.match(
+    execute,
+    /existingLifecycle\?\.executionStatus === "unknown"[\s\S]*?executionStatus: "unknown"/,
+  );
+  assert.match(
+    execute,
+    /existingLifecycle\?\.executionStatus === "requested"[\s\S]*?existingLifecycle\.requestId != null/,
+  );
+});
+
+test("a confirmed Smart Exit fill cannot be downgraded by a stale concurrent lifecycle write", () => {
+  const lifecycleUpsert = database.slice(
+    database.indexOf("export async function upsertSmartExitLifecycle"),
+    database.indexOf("export async function getSmartExitLifecycle"),
+  );
+  assert.match(
+    lifecycleUpsert,
+    /payload->>'executionStatus' = 'filled'[\s\S]*?EXCLUDED\.payload->>'executionStatus' IS DISTINCT FROM 'filled'/,
+  );
+  assert.match(
+    lifecycleUpsert,
+    /THEN kalshi_smart_exit_lifecycles\.payload/,
+  );
+  assert.match(
+    lifecycleUpsert,
+    /payload->>'executionStatus' = 'unknown'[\s\S]*?NOT IN \('unknown','filled'\)/,
+  );
+  assert.match(
+    database,
+    /function normalizeSmartExitLifecycleRecord[\s\S]*?record\.soldAt != null[\s\S]*?record\.winningFillPrice != null[\s\S]*?executionStatus: "filled"/,
+  );
 });
 
 test("both owner entry baselines require fresh authenticated settlement evidence", () => {

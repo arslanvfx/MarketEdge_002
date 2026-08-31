@@ -637,6 +637,22 @@ async function executeAuthorizedExit(
   position: SmartExitPosition,
   evaluation: SmartExitEvaluationRecord,
 ): Promise<SmartExitEvaluationRecord> {
+  const existingLifecycle = await getSmartExitLifecycle(
+    position.owner.kind,
+    position.positionId,
+  );
+  if (existingLifecycle?.executionStatus === "filled") {
+    return { ...evaluation, executed: true, executionStatus: "filled" };
+  }
+  if (existingLifecycle?.executionStatus === "unknown") {
+    return { ...evaluation, executionStatus: "unknown" };
+  }
+  if (
+    existingLifecycle?.executionStatus === "requested"
+    && existingLifecycle.requestId != null
+  ) {
+    return { ...evaluation, executionStatus: "requested" };
+  }
   const applied = currentVersion(position);
   const authorization = authorizeSmartExitExecution({
     config,
@@ -795,10 +811,18 @@ async function executeAuthorizedExit(
   });
   if (!claim.claimed) {
     const existing = await getSmartExitLifecycle(position.owner.kind, position.positionId);
-    if (existing) await upsertSmartExitLifecycle({
-      ...existing, executionStatus: "blocked", reason: claim.reason ?? "execution request already claimed",
-    });
-    return { ...evaluation, executionStatus: "blocked" };
+    if (existing?.executionStatus === "filled") {
+      return { ...evaluation, executed: true, executionStatus: "filled" };
+    }
+    if (existing?.executionStatus === "unknown") {
+      return { ...evaluation, executionStatus: "unknown" };
+    }
+    return {
+      ...evaluation,
+      executionStatus: existing?.executionStatus === "requested"
+        ? "requested"
+        : "blocked",
+    };
   }
   const lifecycle = await getSmartExitLifecycle(position.owner.kind, position.positionId);
   if (lifecycle) await upsertSmartExitLifecycle({

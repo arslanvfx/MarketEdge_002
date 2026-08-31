@@ -13,6 +13,23 @@ For an independent reducing subsystem, ownership begins when its lifecycle is cl
 
 A final pre-submit failure is not exchange exposure. Preserve its audit lifecycle, release its active-owner status, and allow a later fresh trigger to claim a new lifecycle. Never release ownership this way after a durable broker request exists; submitted or unknown requests stay blocking until authoritative reconciliation.
 
+Smart Exit request deduplication must distinguish no-sale outcomes from exposure.
+Blocked pre-submit attempts and confirmed zero fills may atomically retry under a
+new fresh signal; requested, unknown, and filled attempts remain locked. Filled
+and unknown lifecycle states are monotonic against stale concurrent writers, and
+durable sale time plus a valid confirmed fill price is authoritative evidence
+that a legacy lifecycle is filled.
+
+**Why:** A one-row-per-position request ledger once treated the first transient
+depth block as a permanent duplicate, preventing later exit attempts. A stale
+concurrent retry also overwrote a confirmed fill as blocked, making a successful
+sale appear to have failed.
+
+**How to apply:** Permit claim replacement only with an atomic conditional write
+whose prior status proves no sale (`blocked` or `zero_fill`). Never unlock
+`requested`, `unknown`, or `filled`; protect terminal lifecycle writes at the
+database boundary and normalize retained confirmed-fill evidence on reads.
+
 Scalper exit depth is complementary exposure, while its economic floor is original-side proceeds. Original YES exits inspect NO depth; original NO exits inspect YES depth. Convert every depth price with `1 - price` before testing the frozen floor, weighting proceeds, or reporting shadow/paper value.
 
 After proving exact full-quantity depth, the dedicated live exit must submit FOK, not IOC. Authenticated reconciliation still owns accepted or unknown outcomes, but partial-fill-capable TIF would invalidate the subsystem's all-or-nothing economic guarantee.

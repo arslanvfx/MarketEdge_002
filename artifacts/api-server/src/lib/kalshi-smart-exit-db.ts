@@ -81,6 +81,22 @@ export interface SmartExitHistoryDeleteCounts {
   kalshi_smart_exit_replay_reports: number;
 }
 
+function normalizeSmartExitLifecycleRecord(
+  record: SmartExitLifecycleRecord,
+): SmartExitLifecycleRecord {
+  const hasConfirmedFill = record.soldAt != null
+    && record.winningFillPrice != null
+    && Number.isFinite(record.winningFillPrice)
+    && record.winningFillPrice > 0
+    && record.winningFillPrice < 1;
+  if (!hasConfirmedFill || record.executionStatus === "filled") return record;
+  return {
+    ...record,
+    executionStatus: "filled",
+    reason: "confirmed owner fill recovered from durable fill evidence",
+  };
+}
+
 let migrated = false;
 let migrationPromise: Promise<void> | null = null;
 const SMART_EXIT_REPLAY_MAX_POSITIONS = 50;
@@ -624,9 +640,20 @@ export async function claimSmartExitRequest(request: SmartExitExitRequest): Prom
   await ensureMigrated();
   const result = await pool.query(`
     INSERT INTO kalshi_smart_exit_requests (id,owner,position_id,symbol,status,payload)
-    VALUES ($1,$2,$3,$4,'requested',$5) ON CONFLICT (owner,position_id) DO NOTHING`,
+    VALUES ($1,$2,$3,$4,'requested',$5)
+    ON CONFLICT (owner,position_id) DO UPDATE SET
+      id=EXCLUDED.id,
+      symbol=EXCLUDED.symbol,
+      status='requested',
+      payload=EXCLUDED.payload,
+      reason=NULL,
+      created_at=NOW(),
+      resolved_at=NULL
+    WHERE kalshi_smart_exit_requests.status IN ('blocked','zero_fill')`,
   [request.id, request.owner, request.positionId, request.symbol.toUpperCase(), request.payload ?? {}]);
-  return result.rowCount === 1 ? { claimed: true, reason: null } : { claimed: false, reason: "exit_request_exists" };
+  return result.rowCount === 1
+    ? { claimed: true, reason: null }
+    : { claimed: false, reason: "exit_request_active_or_terminal" };
 }
 
 export async function resolveSmartExitRequest(params: {
@@ -677,7 +704,29 @@ export async function upsertSmartExitLifecycle(record: SmartExitLifecycleRecord)
       (id,owner,position_id,symbol,ticker,triggered_at,settled_at,payload,updated_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
     ON CONFLICT (owner,position_id) DO UPDATE SET
-      settled_at=EXCLUDED.settled_at, payload=EXCLUDED.payload, updated_at=NOW()`,
+      settled_at=CASE
+        WHEN (
+          kalshi_smart_exit_lifecycles.payload->>'executionStatus' = 'filled'
+          AND EXCLUDED.payload->>'executionStatus' IS DISTINCT FROM 'filled'
+        ) OR (
+          kalshi_smart_exit_lifecycles.payload->>'executionStatus' = 'unknown'
+          AND COALESCE(EXCLUDED.payload->>'executionStatus','') NOT IN ('unknown','filled')
+        )
+        THEN kalshi_smart_exit_lifecycles.settled_at
+        ELSE EXCLUDED.settled_at
+      END,
+      payload=CASE
+        WHEN (
+          kalshi_smart_exit_lifecycles.payload->>'executionStatus' = 'filled'
+          AND EXCLUDED.payload->>'executionStatus' IS DISTINCT FROM 'filled'
+        ) OR (
+          kalshi_smart_exit_lifecycles.payload->>'executionStatus' = 'unknown'
+          AND COALESCE(EXCLUDED.payload->>'executionStatus','') NOT IN ('unknown','filled')
+        )
+        THEN kalshi_smart_exit_lifecycles.payload
+        ELSE EXCLUDED.payload
+      END,
+      updated_at=NOW()`,
   [record.id, record.owner, record.positionId, record.symbol, record.ticker,
     record.triggeredAt, record.settledAt, record]);
 }
@@ -690,7 +739,8 @@ export async function getSmartExitLifecycle(
     `SELECT payload FROM kalshi_smart_exit_lifecycles WHERE owner=$1 AND position_id=$2`,
     [owner, positionId],
   );
-  return (result.rows[0]?.payload as SmartExitLifecycleRecord | undefined) ?? null;
+  const record = result.rows[0]?.payload as SmartExitLifecycleRecord | undefined;
+  return record ? normalizeSmartExitLifecycleRecord(record) : null;
 }
 
 export async function getSmartExitLifecyclesByPositionIds(
@@ -705,7 +755,10 @@ export async function getSmartExitLifecyclesByPositionIds(
      WHERE owner=$1 AND position_id = ANY($2::text[])`,
     [owner, uniqueIds],
   );
-  return result.rows.map((row: { payload: SmartExitLifecycleRecord }) => row.payload);
+  return result.rows.map(
+    (row: { payload: SmartExitLifecycleRecord }) =>
+      normalizeSmartExitLifecycleRecord(row.payload),
+  );
 }
 
 export async function listSmartExitLifecycles(limit = 100): Promise<SmartExitLifecycleRecord[]> {
@@ -714,7 +767,10 @@ export async function listSmartExitLifecycles(limit = 100): Promise<SmartExitLif
     `SELECT payload FROM kalshi_smart_exit_lifecycles ORDER BY triggered_at DESC LIMIT $1`,
     [Math.min(500, Math.max(1, limit))],
   );
-  return result.rows.map((row: { payload: SmartExitLifecycleRecord }) => row.payload);
+  return result.rows.map(
+    (row: { payload: SmartExitLifecycleRecord }) =>
+      normalizeSmartExitLifecycleRecord(row.payload),
+  );
 }
 
 export async function listUnsettledSmartExitLifecycles(limit = 25): Promise<SmartExitLifecycleRecord[]> {
@@ -729,5 +785,8 @@ export async function listUnsettledSmartExitLifecycles(limit = 25): Promise<Smar
       ORDER BY triggered_at ASC LIMIT $1`,
     [Math.min(100, Math.max(1, limit))],
   );
-  return result.rows.map((row: { payload: SmartExitLifecycleRecord }) => row.payload);
+  return result.rows.map(
+    (row: { payload: SmartExitLifecycleRecord }) =>
+      normalizeSmartExitLifecycleRecord(row.payload),
+  );
 }
