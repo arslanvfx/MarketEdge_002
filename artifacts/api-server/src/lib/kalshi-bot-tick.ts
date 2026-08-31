@@ -2994,14 +2994,27 @@ async function _runBotTick(
     targetPrice: kalshiTarget,
     hasProduct: freefallProduct != null,
     authoritativeCommodityCadence: freefallProduct?.product.startsWith("PYTH:") ?? false,
+    authoritativePublicationCadence: freefallProduct != null,
   });
+  const freefallSamples = regularFreefallEnabled ? (convictionPriceTicks.get(sym) ?? []) : [];
+  const latestFreefallSample = freefallSamples[freefallSamples.length - 1];
   const regularFreefallSignals = {
     allowed: regularFreefall.allowed,
     evidenceClass: regularFreefall.allowed
       ? "clear"
       : regularFreefall.guardResult?.evaluable === true ? "adverse" : "unavailable",
     advisory: entryMode === "paper",
-    cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "coinbase",
+    cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "cfbenchmarks",
+    source: latestFreefallSample?.source ?? null,
+    sourceIndex: latestFreefallSample?.sourceIndex ?? null,
+    sourceSequence: latestFreefallSample?.sourceSequence ?? null,
+    sourcePublishedAtMs: latestFreefallSample?.oraclePublishedAtMs ?? null,
+    sourceAgeMs: latestFreefallSample?.oracleAgeMs ?? null,
+    sampleValues: freefallSamples.slice(-8).map((sample) => ({
+      price: sample.price,
+      publishedAtMs: sample.oraclePublishedAtMs ?? null,
+      sourceSequence: sample.sourceSequence ?? null,
+    })),
     reason: regularFreefall.reason,
     guardResult: regularFreefall.guardResult,
     sampleCoverageMs: regularFreefall.sampleCoverageMs,

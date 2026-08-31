@@ -139,13 +139,28 @@ async function refreshSpotTick(sym: string, product: string, generation: number)
     if (Number.isFinite(evidence.price) && evidence.price > 0) {
       const receivedAt = Date.now();
       const ticks = convictionPriceTicks.get(sym) ?? [];
+      if (
+        evidence.sourceSequence
+        && ticks.some((tick) => tick.sourceSequence === evidence.sourceSequence)
+      ) return;
       ticks.push(evidence.publishedAtMs == null
-        ? { price: evidence.price, ts: receivedAt }
+        ? {
+          price: evidence.price,
+          ts: receivedAt,
+          sourceSequence: evidence.sourceSequence,
+          source: evidence.source,
+          sourceIndex: evidence.sourceIndex,
+          websocketSequence: evidence.websocketSequence,
+        }
         : {
           price: evidence.price,
           ts: receivedAt,
           oraclePublishedAtMs: evidence.publishedAtMs,
           oracleAgeMs: receivedAt - evidence.publishedAtMs,
+          sourceSequence: evidence.sourceSequence,
+          source: evidence.source,
+          sourceIndex: evidence.sourceIndex,
+          websocketSequence: evidence.websocketSequence,
         });
       // Keep ~5 min of history at 1 s cadence; the guard filters to the
       // last few seconds via timestamp but deep history costs little.

@@ -30,7 +30,8 @@ export const GECKO_ID: Record<string, string> = {
 // Market definitions live in market-defs.ts (pure module, unit-testable);
 // re-exported here so all existing `from "./crypto-data"` imports keep working.
 export {
-  CRYPTO_COINS, COMMODITY_SYMBOLS, PYTH_COMMODITY_FEEDS, isPythProduct, type CoinDef,
+  CRYPTO_COINS, COMMODITY_SYMBOLS, PYTH_COMMODITY_FEEDS, CF_BENCHMARKS_CRYPTO_FEEDS,
+  isPythProduct, type CoinDef,
 } from "./market-defs";
 import {
   CRYPTO_COINS,
@@ -38,6 +39,7 @@ import {
   type CoinDef,
 } from "./market-defs";
 import { getKalshiPythValueEvidence } from "./kalshi-pyth-value-service";
+import { getKalshiCfBenchmarksValueEvidence } from "./kalshi-cfbenchmarks-value-service";
 
 // Commodity underlying data is an application-wide market-data dependency,
 // shared by guard sampling and live commodity price reads. Its service owns a
@@ -224,6 +226,10 @@ export interface FreshTickerEvidence {
   publishedAtMs: number | null;
   /** Provider update identity (Pyth price fingerprint or Coinbase trade id). */
   sourceSequence?: string | null;
+  source?: "kalshi_pyth" | "kalshi_cfbenchmarks" | "coinbase";
+  sourceIndex?: string | null;
+  websocketSequence?: number | null;
+  average60s?: number | null;
 }
 
 /**
@@ -247,7 +253,11 @@ async function fetchPythSpotEvidence(
   if (ageMs > maxAgeSeconds * 1_000) {
     throw new Error(`Kalshi Pyth evidence stale for ${pythSymbol(product)} (${Math.round(ageMs / 1_000)}s old)`);
   }
-  return evidence;
+  return {
+    ...evidence,
+    source: "kalshi_pyth",
+    sourceIndex: pythSymbol(product),
+  };
 }
 
 /** Pyth Benchmarks TradingView-shim OHLC history → Candle[] (v always 0). */
@@ -326,19 +336,13 @@ export async function getTickerFreshEvidence(
     tickerCache.set(product, { at: Date.now(), value: evidence.price });
     return evidence;
   }
-  const raw = await fetchJson<Record<string, string>>(
-    `${COINBASE}/products/${product}/ticker`,
-    8_000,
-    signal,
+  // Execution-critical crypto sampling must use the exact CF Benchmarks RTI
+  // named by Kalshi's settlement rules. Coinbase remains the source for
+  // candles, indicators, stats, and non-safety display paths.
+  return getKalshiCfBenchmarksValueEvidence(
+    product,
+    PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S * 1_000,
   );
-  const price = parseFloat(raw.price ?? "0");
-  if (price > 0) tickerCache.set(product, { at: Date.now(), value: price });
-  const publishedAtMs = raw.time ? Date.parse(raw.time) : Number.NaN;
-  return {
-    price,
-    publishedAtMs: Number.isFinite(publishedAtMs) ? publishedAtMs : null,
-    sourceSequence: raw.trade_id ?? (raw.time ? `${raw.time}:${raw.price ?? ""}` : null),
-  };
 }
 
 export async function getCandles(product: string): Promise<Candle[]> {

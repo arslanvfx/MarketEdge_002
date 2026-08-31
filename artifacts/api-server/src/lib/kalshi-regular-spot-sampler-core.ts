@@ -16,6 +16,10 @@ export interface RegularSpotProduct {
 export interface RegularSpotEvidence {
   price: number;
   publishedAtMs: number | null;
+  sourceSequence?: string | null;
+  source?: string;
+  sourceIndex?: string | null;
+  websocketSequence?: number | null;
 }
 
 export interface RegularSpotSample {
@@ -23,6 +27,10 @@ export interface RegularSpotSample {
   ts: number;
   oraclePublishedAtMs?: number | null;
   oracleAgeMs?: number | null;
+  sourceSequence?: string | null;
+  source?: string;
+  sourceIndex?: string | null;
+  websocketSequence?: number | null;
 }
 
 export function shouldRunRegularSpotSampler(
@@ -69,13 +77,33 @@ export async function collectRegularEntrySpotSample(input: {
       && sample.ts >= windowStartMs
       && sample.ts <= receivedAt
     );
+  if (
+    evidence.sourceSequence
+    && existing.some((sample) => sample.sourceSequence === evidence.sourceSequence)
+  ) {
+    input.samples.set(key, existing);
+    return;
+  }
+  const sourceMetadata = {
+    ...(evidence.sourceSequence != null ? { sourceSequence: evidence.sourceSequence } : {}),
+    ...(evidence.source != null ? { source: evidence.source } : {}),
+    ...(evidence.sourceIndex != null ? { sourceIndex: evidence.sourceIndex } : {}),
+    ...(evidence.websocketSequence != null
+      ? { websocketSequence: evidence.websocketSequence }
+      : {}),
+  };
   existing.push(evidence.publishedAtMs == null
-    ? { price: evidence.price, ts: receivedAt }
+    ? {
+      price: evidence.price,
+      ts: receivedAt,
+      ...sourceMetadata,
+    }
     : {
       price: evidence.price,
       ts: receivedAt,
       oraclePublishedAtMs: evidence.publishedAtMs,
       oracleAgeMs: receivedAt - evidence.publishedAtMs,
+      ...sourceMetadata,
     });
   if (existing.length > REGULAR_SPOT_SAMPLE_LIMIT) {
     existing.splice(0, existing.length - REGULAR_SPOT_SAMPLE_LIMIT);

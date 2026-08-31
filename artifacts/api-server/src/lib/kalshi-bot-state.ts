@@ -348,10 +348,15 @@ export interface ConvictionPriceTick {
   price: number;
   /** Local receipt timestamp used for strict newest-sample freshness. */
   ts: number;
-  /** Pyth publication timestamp; null/absent for Coinbase. */
+  /** Settlement source publication timestamp. */
   oraclePublishedAtMs?: number | null;
   /** Oracle age at local receipt time. */
   oracleAgeMs?: number | null;
+  /** Upstream publication identity; repeated local reads are not new samples. */
+  sourceSequence?: string | null;
+  source?: string;
+  sourceIndex?: string | null;
+  websocketSequence?: number | null;
 }
 export const convictionPriceTicks = new Map<string, ConvictionPriceTick[]>();
 // Counts emergency closes (out-of-zone fills) per `sym:windowKey` this window.

@@ -79,6 +79,34 @@ test("Pyth publish evidence is retained while Coinbase keeps local cadence", asy
   assert.deepEqual(samples.get("BTC"), [{ price: 100_000, ts: 900_000 }]);
 });
 
+test("repeated Kalshi CF publication identity is not counted as a fresh sample", async () => {
+  const samples = new Map();
+  const evidence = {
+    price: 824.6,
+    publishedAtMs: 899_900,
+    sourceSequence: "ZECUSD_RTI:899900:824.60",
+    source: "kalshi_cfbenchmarks",
+    sourceIndex: "ZECUSD_RTI",
+    websocketSequence: 17,
+  };
+  await collectRegularEntrySpotSample({
+    product: { symbol: "ZEC", product: "ZEC-USD" },
+    fetchFresh: async () => evidence,
+    samples,
+    nowMs: 900_000,
+  });
+  await collectRegularEntrySpotSample({
+    product: { symbol: "ZEC", product: "ZEC-USD" },
+    fetchFresh: async () => evidence,
+    samples,
+    nowMs: 901_000,
+  });
+
+  assert.equal(samples.get("ZEC").length, 1);
+  assert.equal(samples.get("ZEC")[0].sourceIndex, "ZECUSD_RTI");
+  assert.equal(samples.get("ZEC")[0].websocketSequence, 17);
+});
+
 test("samples are current-window-only and bounded", async () => {
   const nowMs = 1_800_000;
   const samples = new Map<string, Array<{ price: number; ts: number }>>([

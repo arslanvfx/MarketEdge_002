@@ -257,3 +257,35 @@ test("Pyth adverse reversal blocks on distinct publications", () => {
   assert.equal(reversal.reason, "adverse_excursion_peak_fall_yes");
   assert.equal(reversal.guardResult?.adverseExcursionBlocked, true);
 });
+
+test("August 31 ZEC Kalshi RTI replay blocks the 9:44 YES submission", () => {
+  const submittedAt = Date.parse("2026-08-31T13:44:07.000Z");
+  const prices = [825.66, 825.42, 825.18, 824.97, 824.79, 824.60];
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    samples: prices.map((price, index) => {
+      const publishedAtMs = submittedAt - (prices.length - 1 - index) * 1_000;
+      return {
+        price,
+        ts: publishedAtMs + 40,
+        oraclePublishedAtMs: publishedAtMs,
+        oracleAgeMs: 40,
+        source: "kalshi_cfbenchmarks",
+        sourceIndex: "ZECUSD_RTI",
+        sourceSequence: `ZECUSD_RTI:${publishedAtMs}:${price}`,
+        websocketSequence: index + 1,
+      };
+    }),
+    side: "yes",
+    nowMs: submittedAt + 100,
+    windowStartMs: Date.parse("2026-08-31T13:30:00.000Z"),
+    closeTimeMs: Date.parse("2026-08-31T13:45:00.000Z"),
+    targetPrice: 823.151,
+    hasProduct: true,
+    authoritativePublicationCadence: true,
+  });
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "freefall_consecutive_falling");
+  assert.equal(result.guardResult?.consecutiveWrongWayMoves, 4);
+  assert.equal(result.guardResult?.latestPrice, 824.6);
+});

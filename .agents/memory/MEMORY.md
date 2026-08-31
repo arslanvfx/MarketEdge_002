@@ -148,3 +148,4 @@
 - [Bot 1 selectable live gateway](bot1-selectable-live-gateway.md) — legacy stays default; authenticated-book execution is isolated, opt-in, and shares Bot 1 ownership/accounting.
 - [FastLane Conviction mode](fastlane-conviction-mode.md) — isolated price-only IOC mode; optional proximity/freefall guards and lifecycle safety stay explicit.
 - [Operator-owned risk caps](operator-owned-risk-caps.md) — financial caps accept any finite non-negative operator value; do not impose arbitrary UI or API ceilings.
+- [Kalshi CF crypto feed identity](kalshi-cf-crypto-feed-identity.md) — settlement-rule IDs and websocket IDs differ; preserve publication identity and reject retired-socket evidence.

@@ -22,6 +22,27 @@ export interface PythFeedDef {
   feedId: string;
 }
 
+export interface CfBenchmarksFeedDef {
+  product: string;
+  /** Identifier printed in the Kalshi market's settlement rules. */
+  indexId: string;
+  /** Identifier used by Kalshi's cfbenchmarks_value websocket channel. */
+  streamIndexId: string;
+}
+
+/** Exact RTI identities named in each Kalshi 15-minute crypto market's rules. */
+export const CF_BENCHMARKS_CRYPTO_FEEDS: Record<string, CfBenchmarksFeedDef> = {
+  BTC:  { product: "BTC-USD",  indexId: "BRTI",       streamIndexId: "BRTI" },
+  ETH:  { product: "ETH-USD",  indexId: "ETHUSDRTI",  streamIndexId: "ETHUSD_RTI" },
+  SOL:  { product: "SOL-USD",  indexId: "SOLUSDRTI",  streamIndexId: "SOLUSD_RTI" },
+  XRP:  { product: "XRP-USD",  indexId: "XRPUSDRTI",  streamIndexId: "XRPUSD_RTI" },
+  HYPE: { product: "HYPE-USD", indexId: "HYPEUSDRTI", streamIndexId: "HYPEUSD_RTI" },
+  BNB:  { product: "BNB-USD",  indexId: "BNBUSDRTI",  streamIndexId: "BNBUSD_RTI" },
+  DOGE: { product: "DOGE-USD", indexId: "DOGEUSDRTI", streamIndexId: "DOGEUSD_RTI" },
+  NEAR: { product: "NEAR-USD", indexId: "NEARUSDRTI", streamIndexId: "NEARUSD_RTI" },
+  ZEC:  { product: "ZEC-USD",  indexId: "ZECUSDRTI",  streamIndexId: "ZECUSD_RTI" },
+};
+
 /**
  * Canonical Pyth Core feed identities used by Kalshi's commodity contracts.
  * Keep these explicit: execution must not depend on a best-effort feed search

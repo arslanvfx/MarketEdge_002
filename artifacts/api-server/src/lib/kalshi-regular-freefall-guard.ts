@@ -17,6 +17,10 @@ export interface RegularFreefallGuardInput {
     ts: number;
     oraclePublishedAtMs?: number | null;
     oracleAgeMs?: number | null;
+    sourceSequence?: string | null;
+    source?: string;
+    sourceIndex?: string | null;
+    websocketSequence?: number | null;
   }>;
   side: "yes" | "no";
   nowMs: number;
@@ -25,6 +29,7 @@ export interface RegularFreefallGuardInput {
   targetPrice: number;
   hasProduct: boolean;
   authoritativeCommodityCadence?: boolean;
+  authoritativePublicationCadence?: boolean;
 }
 
 export interface RegularFreefallGuardDecision extends FreefallPreSubmitDecision {
@@ -100,8 +105,10 @@ export function evaluateRegularFreefallPreSubmitGuard(
       REGULAR_FREEFALL_ADVERSE_EXCURSION_THRESHOLD_PCT,
     adverseExcursionRecoverySeconds:
       REGULAR_FREEFALL_ADVERSE_EXCURSION_RECOVERY_SECONDS,
-    requireDistinctOraclePublishTimes: input.authoritativeCommodityCadence,
-    authoritativeCommodityCadence: input.authoritativeCommodityCadence,
+    requireDistinctOraclePublishTimes:
+      input.authoritativePublicationCadence ?? input.authoritativeCommodityCadence,
+    authoritativeCommodityCadence:
+      input.authoritativePublicationCadence ?? input.authoritativeCommodityCadence,
   });
 
   return {

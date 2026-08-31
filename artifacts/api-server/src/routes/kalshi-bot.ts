@@ -55,6 +55,7 @@ import { getDailyHourlyPnl, getDailyPnlSimulation, getDailyTradingPnl } from "..
 import { getRegularPlacementFunnelSnapshot } from "../lib/kalshi-regular-placement-funnel.ts";
 import { getRegularSpotTelemetrySnapshot } from "../lib/kalshi-regular-spot-telemetry.ts";
 import { kalshiPythValueService } from "../lib/kalshi-pyth-value-service.ts";
+import { kalshiCfBenchmarksValueService } from "../lib/kalshi-cfbenchmarks-value-service.ts";
 import { logger } from "../lib/logger";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
@@ -610,6 +611,7 @@ router.get("/crypto/bot/regular-placement-funnel", requireAuth, (req, res) => {
     },
     spotSampler: getRegularSpotTelemetrySnapshot(convictionPriceTicks),
     commodityUnderlyingFeed: kalshiPythValueService.getStatus(),
+    cryptoUnderlyingFeed: kalshiCfBenchmarksValueService.getStatus(),
   });
 });
 
