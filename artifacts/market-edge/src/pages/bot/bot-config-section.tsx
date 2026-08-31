@@ -398,7 +398,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                 {/* Max Total Exposure — always visible; in conviction mode BNB alone can fill the cap */}
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs text-muted-foreground">Max Total Exposure ($)</span>
-                  <input type="number" min={0} max={500} step={0.5}
+                  <input type="number" min={0} step={0.5}
                     className="bg-background border border-amber-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
                     value={merged.maxTotalExposure ?? 5}
                     onChange={e => setConfigDraft(d => ({ ...d, maxTotalExposure: parseFloat(e.target.value) }))} />

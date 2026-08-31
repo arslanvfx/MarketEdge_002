@@ -147,3 +147,4 @@
 - [Dashboard 2 shared operations](dashboard2-shared-operations.md) — reuse canonical controls; keep retained quotes display-only and serialize paper safety with reservation.
 - [Bot 1 selectable live gateway](bot1-selectable-live-gateway.md) — legacy stays default; authenticated-book execution is isolated, opt-in, and shares Bot 1 ownership/accounting.
 - [FastLane Conviction mode](fastlane-conviction-mode.md) — isolated price-only IOC mode; optional proximity/freefall guards and lifecycle safety stay explicit.
+- [Operator-owned risk caps](operator-owned-risk-caps.md) — financial caps accept any finite non-negative operator value; do not impose arbitrary UI or API ceilings.

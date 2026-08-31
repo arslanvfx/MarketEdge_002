@@ -1400,7 +1400,13 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   // Live-mode safety guards
   if (typeof maxBetSize === "number" && maxBetSize >= 0.5 && maxBetSize <= 500) partial.maxBetSize = maxBetSize;
   if (typeof minAccountBalance === "number" && minAccountBalance >= 0 && minAccountBalance <= 1000) partial.minAccountBalance = minAccountBalance;
-  if (typeof maxTotalExposure === "number" && maxTotalExposure >= 0 && maxTotalExposure <= 500) partial.maxTotalExposure = maxTotalExposure;
+  if (
+    typeof maxTotalExposure === "number"
+    && Number.isFinite(maxTotalExposure)
+    && maxTotalExposure >= 0
+  ) {
+    partial.maxTotalExposure = maxTotalExposure;
+  }
   if (typeof maxDailyLossPerCoin === "number" && maxDailyLossPerCoin >= 0 && maxDailyLossPerCoin <= 100) partial.maxDailyLossPerCoin = maxDailyLossPerCoin;
   if (typeof coinStreakLossLimit === "number" && coinStreakLossLimit >= 0 && coinStreakLossLimit <= 10) partial.coinStreakLossLimit = coinStreakLossLimit;
   if (typeof coinStreakPauseWindows === "number" && coinStreakPauseWindows >= 1 && coinStreakPauseWindows <= 10) partial.coinStreakPauseWindows = coinStreakPauseWindows;
