@@ -992,6 +992,13 @@ export function computeFastLaneContractCount(
   return Math.floor(targetDollars / worstCaseSideCost);
 }
 
+const FASTLANE_AUTHENTICATED_BOOK_SYMBOLS = new Set(["GOLD", "SILVER", "WTI"]);
+
+/** Thin commodity books require executable-depth confirmation before FastLane submits. */
+export function fastLaneRequiresAuthenticatedBook(symbol: string): boolean {
+  return FASTLANE_AUTHENTICATED_BOOK_SYMBOLS.has(symbol.toUpperCase());
+}
+
 /** Build the exact current-window ticker using DST-aware New York local time. */
 export function computeKalshi15mTicker(symbol: string, windowKey: string): string {
   const openMs = Date.parse(`${windowKey}:00Z`);
@@ -1401,9 +1408,14 @@ export interface BotConfig {
   // Any field left undefined falls through to the matching global setting.
   //   lockPrice      — entry floor (overrides kalshiLockPrice)
   //   lockPriceCap   — entry cap   (overrides kalshiLockPriceCap)
-  //   minEntryMinute — don't enter until this many minutes have elapsed; 0 = no per-market restriction
-  //                    falls through to convictionMinEntryMinutes when not set per-market
-  perMarketConvictionConfig?: Record<string, { lockPrice?: number; lockPriceCap?: number; minEntryMinute?: number }>;
+  //   minEntryMinute — optionally delay this market beyond the global wait.
+  //                    It can never weaken convictionMinEntryMinutes.
+  perMarketConvictionConfig?: Record<string, {
+    lockPrice?: number;
+    lockPriceCap?: number;
+    minEntryMinute?: number;
+    emergencyExitThresholdCents?: number;
+  }>;
   maxBetsPerWindow: number;  // how many separate bets the bot may place per 15-min window (default 3)
   enabled: boolean;          // master kill-switch
   quietHoursStart: number;   // UTC hour (0-23) when quiet period starts — no new entries (default 12)
@@ -2573,20 +2585,26 @@ export function getEffectiveConvictionZone(
  * getConvictionMinEntryMinute — resolve the "don't enter before X minutes
  * elapsed" value for a given symbol.
  *
- * Priority:
- *   1. perMarketConvictionConfig[sym].minEntryMinute — when explicitly set
- *      (even if 0, which means "no per-market restriction for this market
- *      even if the global convictionMinEntryMinutes is non-zero")
- *   2. config.convictionMinEntryMinutes — global fallback
- *   3. 0 — no restriction
+ * The global wait is a hard safety floor. A per-market value may delay one
+ * market further, but can never shorten or disable that global lockout.
  *
  * Callers should skip entry when minutesElapsed < result (and result > 0),
  * subject to the same early-bypass logic as the global gate.
  */
 export function getConvictionMinEntryMinute(sym: string, config: BotConfig): number {
+  const globalMin = config.convictionMinEntryMinutes ?? 0;
   const ov = config.perMarketConvictionConfig?.[sym];
-  if (ov != null && ov.minEntryMinute != null) return ov.minEntryMinute;
-  return config.convictionMinEntryMinutes ?? 0;
+  return Math.max(globalMin, ov?.minEntryMinute ?? globalMin);
+}
+
+export function getEffectiveFastLaneEmergencyExitThresholdCents(
+  sym: string,
+  config: Pick<BotConfig, "fastLaneEmergencyExitThresholdCents" | "perMarketConvictionConfig">,
+): number {
+  return resolveFastLaneEmergencyExitThresholdCents(
+    config.perMarketConvictionConfig?.[sym]?.emergencyExitThresholdCents
+      ?? config.fastLaneEmergencyExitThresholdCents,
+  );
 }
 
 export type ConvictionPollerFallbackSource = "empty_book" | "orderbook_timeout";
@@ -2726,6 +2744,7 @@ export type PerMarketConvictionOverride = {
   lockPrice?: number;
   lockPriceCap?: number;
   minEntryMinute?: number;
+  emergencyExitThresholdCents?: number;
 };
 
 export function isValidConvictionZoneBounds(lockPrice: number, lockPriceCap: number): boolean {
@@ -2751,6 +2770,7 @@ export function mergePerMarketConvictionConfig(
   stored: Record<string, PerMarketConvictionOverride>,
   globalFloor: number,
   globalCap: number,
+  globalMinEntryMinute = 0,
 ): Record<string, PerMarketConvictionOverride> {
   const allowed = new Set<string>(PER_MARKET_CONVICTION_SYMBOLS);
   const result: Record<string, PerMarketConvictionOverride> = { ...stored };
@@ -2798,6 +2818,20 @@ export function mergePerMarketConvictionConfig(
         throw new Error(`Invalid conviction minimum entry minute for ${key}.`);
       }
     }
+    if (hasField("emergencyExitThresholdCents")) {
+      if (value.emergencyExitThresholdCents === null) {
+        delete candidate.emergencyExitThresholdCents;
+      } else if (
+        typeof value.emergencyExitThresholdCents === "number"
+        && Number.isInteger(value.emergencyExitThresholdCents)
+        && value.emergencyExitThresholdCents >= 1
+        && value.emergencyExitThresholdCents <= 99
+      ) {
+        candidate.emergencyExitThresholdCents = value.emergencyExitThresholdCents;
+      } else {
+        throw new Error(`Invalid FastLane emergency-close gap for ${key}.`);
+      }
+    }
 
     const effectiveFloor = candidate.lockPrice ?? globalFloor;
     const effectiveCap = candidate.lockPriceCap ?? globalCap;
@@ -2806,8 +2840,36 @@ export function mergePerMarketConvictionConfig(
         `Invalid conviction entry zone for ${key}: floor ${Math.round(effectiveFloor * 100)}¢ exceeds cap ${Math.round(effectiveCap * 100)}¢.`,
       );
     }
+    if (
+      candidate.minEntryMinute != null
+      && candidate.minEntryMinute < globalMinEntryMinute
+    ) {
+      throw new Error(
+        `Invalid conviction minimum entry minute for ${key}: ${candidate.minEntryMinute} cannot be earlier than the global ${globalMinEntryMinute}-minute lockout.`,
+      );
+    }
     if (Object.keys(candidate).length > 0) result[key] = candidate;
     else delete result[key];
+  }
+
+  // Revalidate the complete resulting map, not only the submitted symbols.
+  // This catches stale overrides when the global wait or zone changes.
+  for (const [key, candidate] of Object.entries(result)) {
+    const effectiveFloor = candidate.lockPrice ?? globalFloor;
+    const effectiveCap = candidate.lockPriceCap ?? globalCap;
+    if (effectiveFloor > effectiveCap) {
+      throw new Error(
+        `Invalid conviction entry zone for ${key}: floor ${Math.round(effectiveFloor * 100)}¢ exceeds cap ${Math.round(effectiveCap * 100)}¢.`,
+      );
+    }
+    if (
+      candidate.minEntryMinute != null
+      && candidate.minEntryMinute < globalMinEntryMinute
+    ) {
+      throw new Error(
+        `Invalid conviction minimum entry minute for ${key}: ${candidate.minEntryMinute} cannot be earlier than the global ${globalMinEntryMinute}-minute lockout.`,
+      );
+    }
   }
 
   return result;

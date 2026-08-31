@@ -14,6 +14,7 @@ export type RegularPlacementStage =
 
 export type RegularPlacementTerminalOutcome =
   | "smart_hours"
+  | "timing"
   | "proximity"
   | "direction"
   | "freefall"
@@ -83,7 +84,7 @@ export interface RegularPlacementFunnelOptions {
 }
 
 const terminalSet = new Set<RegularPlacementTerminalOutcome>([
-  "smart_hours", "proximity", "direction", "freefall", "intent_denied",
+  "smart_hours", "timing", "proximity", "direction", "freefall", "intent_denied",
   "intent_error", "zero_fill", "filled", "unknown", "definite_error",
   "paper_synthetic",
 ]);

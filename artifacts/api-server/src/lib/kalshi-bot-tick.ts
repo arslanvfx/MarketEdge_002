@@ -21,6 +21,8 @@ import {
   resolveFastLaneEmergencyExitThresholdCents,
   shouldEmergencyExitFastLaneFill,
   getEffectiveConvictionZone,
+  getEffectiveFastLaneEmergencyExitThresholdCents,
+  fastLaneRequiresAuthenticatedBook,
   computeAdverseMomentumGate,
   computeConvictionDirectionGate,
   computeConvictionCandleSlopeGate,
@@ -2786,9 +2788,7 @@ async function _runBotTick(
   })();
   const authorizationFastLaneEmergencyThresholdCents =
     authorizationDecisionMode === "fastlane"
-      ? resolveFastLaneEmergencyExitThresholdCents(
-        S.config.fastLaneEmergencyExitThresholdCents,
-      )
+      ? getEffectiveFastLaneEmergencyExitThresholdCents(sym, S.config)
       : null;
   let convictionOutOfBandFill: {
     sideCost: number;
@@ -2813,6 +2813,51 @@ async function _runBotTick(
   const _intentReservationId = crypto.randomUUID();
   let _intentClaimed = false;
   let _routeFundingHoldClaimed = false;
+
+  // Re-resolve timing from the live config at the last possible boundary.
+  // A tick may spend several seconds awaiting quotes, balance, and durable
+  // intent I/O; an operator can raise the global/per-market wait meanwhile.
+  // Per-market waits may only delay the global floor. Conviction's separately
+  // explicit extreme-price bypass remains honored; FastLane never bypasses.
+  const placementTimingAllowsEntry = (
+    source: "paper-pre-submit" | "exchange-pre-submit",
+    freshestSideCost: number | null,
+  ): boolean => {
+    if (!isPriceTriggeredMode) return true;
+    const currentMinEntryMinute = getConvictionMinEntryMinute(sym, S.config);
+    const currentElapsedSeconds = Math.max(0, (Date.now() - windowStartMs) / 1000);
+    if (currentMinEntryMinute <= 0 || currentElapsedSeconds >= currentMinEntryMinute * 60) {
+      return true;
+    }
+    const bypassFloor = S.config.convictionEarlyBypassThreshold ?? 0.81;
+    const bypassCap = S.config.convictionEarlyBypassCap ?? 0.95;
+    const bypassActive =
+      S.config.decisionMode === "conviction"
+      && S.config.convictionEarlyBypassEnabled !== false
+      && freshestSideCost != null
+      && freshestSideCost >= bypassFloor
+      && freshestSideCost <= bypassCap;
+    if (bypassActive) return true;
+
+    logger.warn(
+      {
+        sym,
+        windowKey,
+        direction,
+        currentElapsedMinutes: +(currentElapsedSeconds / 60).toFixed(2),
+        currentMinEntryMinute,
+        freshestSideCost,
+        source,
+      },
+      "[kalshi-bot] placement-time entry wait blocked stale in-flight order",
+    );
+    setTickAbortReason(
+      sym,
+      windowKey,
+      `entry wait changed: ${currentMinEntryMinute}min required, ${(currentElapsedSeconds / 60).toFixed(1)}min elapsed`,
+    );
+    return false;
+  };
 
   // ── FINAL SMART HOURS CHECK — immediately before order placement ─────────
   // Authoritative, fail-closed re-resolution at the moment the order would be
@@ -3040,13 +3085,15 @@ async function _runBotTick(
     // the final pre-POST boundary. Without that proof, do not submit.
     const convictionRequiresAuthenticatedBook =
       authorizationDecisionMode === "conviction";
+    const fastLaneCommodityRequiresAuthenticatedBook =
+      authorizationDecisionMode === "fastlane"
+      && fastLaneRequiresAuthenticatedBook(sym);
     const useAuthenticatedBook =
-      !isFastLane
-      && (
-        convictionRequiresAuthenticatedBook
-        || S.config.liveExecutionGateway === "authenticated_book"
-      );
-    const authenticatedGatewayZone = S.config.decisionMode === "conviction"
+      convictionRequiresAuthenticatedBook
+      || fastLaneCommodityRequiresAuthenticatedBook
+      || (!isFastLane && S.config.liveExecutionGateway === "authenticated_book");
+    const authenticatedGatewayZone =
+      convictionRequiresAuthenticatedBook || fastLaneCommodityRequiresAuthenticatedBook
       ? getEffectiveConvictionZone(sym, S.config)
       : { lockPrice: 0, lockPriceCap: 1 };
     const authenticatedBookQuote = useAuthenticatedBook
@@ -3061,7 +3108,9 @@ async function _runBotTick(
     if (useAuthenticatedBook && !authenticatedBookQuote) {
       const reason = convictionRequiresAuthenticatedBook
         ? "conviction IOC requires a fresh exact authenticated book with every executable level inside the entry band"
-        : "authenticated book gateway requires a fresh exact book with full requested depth";
+        : fastLaneCommodityRequiresAuthenticatedBook
+          ? "commodity FastLane IOC requires a fresh exact authenticated book with every executable level inside the entry band"
+          : "authenticated book gateway requires a fresh exact book with full requested depth";
       releaseConvictionEntryReservation(reason);
       setTickAbortReason(sym, windowKey, `gateway abort: ${reason}`);
       regularPlacementFunnel.finalEligibility(ensurePlacementCandidate(), false, Date.now(), reason);
@@ -3306,6 +3355,10 @@ async function _runBotTick(
           // definite-error catch resolves this durable intent as skipped.
           preSubmitGuard: () => {
             if (!S.config.enabled || S.paused || S.botMode !== "live" || entryMode !== "live") return false;
+            if (!placementTimingAllowsEntry(
+              "exchange-pre-submit",
+              authenticatedBookQuote?.marginalLimitCost ?? expectedFillCost,
+            )) return false;
             const currentQh = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
             if (currentQh.action === "block" || currentQh.forcedPaper) {
               logger.warn(
@@ -3809,6 +3862,21 @@ async function _runBotTick(
       paperEligible,
       paperLiveEligibilityReason,
     );
+  }
+
+  if (
+    entryMode === "paper"
+    && !placementTimingAllowsEntry("paper-pre-submit", expectedFillCost)
+  ) {
+    releaseConvictionEntryReservation("placement-time entry wait changed");
+    regularPlacementFunnel.finalEligibility(
+      ensurePlacementCandidate(),
+      false,
+      Date.now(),
+      "placement-time entry wait changed",
+    );
+    markPlacementTerminal("timing", "placement-time entry wait changed");
+    return;
   }
 
   const id = `${sym}:${windowKey}:${Date.now()}`;

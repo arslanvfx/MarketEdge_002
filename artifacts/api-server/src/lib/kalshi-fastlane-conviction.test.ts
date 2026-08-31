@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   computeFastLaneLimitPrice,
   computeFastLaneContractCount,
+  fastLaneRequiresAuthenticatedBook,
   computeConvictionDecision,
   computeKalshi15mTicker,
   evaluateConvictionFillZone,
@@ -121,9 +122,14 @@ test("FastLane confirmed zero fills use the controlled five-second, ten-attempt 
   );
 });
 
-test("FastLane bypasses authenticated-book quote and revalidation while retaining IOC intent flow", () => {
+test("FastLane requires authenticated executable depth for commodities only", () => {
   const source = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
-  assert.match(source, /const useAuthenticatedBook =\s*!isFastLane/);
+  assert.equal(fastLaneRequiresAuthenticatedBook("WTI"), true);
+  assert.equal(fastLaneRequiresAuthenticatedBook("gold"), true);
+  assert.equal(fastLaneRequiresAuthenticatedBook("SILVER"), true);
+  assert.equal(fastLaneRequiresAuthenticatedBook("BTC"), false);
+  assert.match(source, /fastLaneCommodityRequiresAuthenticatedBook/);
+  assert.match(source, /commodity FastLane IOC requires a fresh exact authenticated book/);
   assert.match(source, /\[kalshi-bot\] FastLane range hit — submitting edge-capped IOC/);
   assert.match(source, /timeInForce: entryTimeInForce/);
   assert.match(source, /claimRegularOrderIntent\(/);
@@ -215,6 +221,7 @@ test("confirmed emergency exits finalize before pause and daily-loss gates", () 
 test("FastLane honors the configured per-window minimum entry wait with no early-price bypass", () => {
   const tickSource = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
   const loopSource = readFileSync(new URL("./kalshi-bot-loop.ts", import.meta.url), "utf8");
+  const routeSource = readFileSync(new URL("../routes/kalshi-bot.ts", import.meta.url), "utf8");
   assert.match(tickSource, /if \(isPriceTriggeredMode\) \{[\s\S]*getConvictionMinEntryMinute\(sym, S\.config\)/);
   assert.match(
     tickSource,
@@ -233,6 +240,26 @@ test("FastLane honors the configured per-window minimum entry wait with no early
     tickSource,
     /if \(!isPriceTriggeredMode && minWindowEntryMinutes > 0/,
     "the legacy lockout must not contradict the price-triggered Min Entry Wait",
+  );
+  assert.match(
+    tickSource,
+    /preSubmitGuard: \(\) => \{[\s\S]*placementTimingAllowsEntry\([\s\S]*"exchange-pre-submit",[\s\S]*authenticatedBookQuote\?\.marginalLimitCost/,
+    "live entry must re-check the current effective wait at the exchange boundary",
+  );
+  assert.doesNotMatch(
+    tickSource,
+    /placementTimingAllowsEntry\([\s\S]{0,120}authenticatedBookQuote\?\.worstCaseCost/,
+    "the early-price bypass must compare a per-contract side cost, never aggregate order cost",
+  );
+  assert.match(
+    tickSource,
+    /entryMode === "paper"[\s\S]*placementTimingAllowsEntry\("paper-pre-submit"/,
+    "paper entry must re-check the current effective wait after asynchronous previews",
+  );
+  assert.match(
+    routeSource,
+    /hasValidGlobalMinEntryUpdate[\s\S]*mergePerMarketConvictionConfig\([\s\S]*effectiveGlobalMinEntryMinute/,
+    "global wait-only updates must revalidate the complete per-market timing map",
   );
 });
 

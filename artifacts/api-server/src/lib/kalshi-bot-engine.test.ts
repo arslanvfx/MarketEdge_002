@@ -63,6 +63,7 @@ import {
   computeStrikeProximityGate,
   getEffectiveProximityThreshold,
   getEffectiveConvictionZone,
+  getEffectiveFastLaneEmergencyExitThresholdCents,
   getConvictionMinEntryMinute,
   evaluateConvictionPollerFallback,
   tryClaimEntryReservation,
@@ -107,7 +108,7 @@ function inp(overrides: Partial<CorePairInputs> = {}): CorePairInputs {
   };
 }
 
-test("per-market conviction zone and wait settings fall back to global values", () => {
+test("per-market conviction waits can delay but never weaken the global lockout", () => {
   const config = {
     ...DEFAULT_BOT_CONFIG,
     kalshiLockPrice: 0.82,
@@ -115,13 +116,27 @@ test("per-market conviction zone and wait settings fall back to global values", 
     convictionMinEntryMinutes: 3,
     perMarketConvictionConfig: {
       GOLD: { lockPrice: 0.84, lockPriceCap: 0.90, minEntryMinute: 12 },
+      SILVER: { minEntryMinute: 0 },
     },
   } satisfies BotConfig;
 
   assert.deepEqual(getEffectiveConvictionZone("GOLD", config), { lockPrice: 0.84, lockPriceCap: 0.90 });
   assert.deepEqual(getEffectiveConvictionZone("BTC", config), { lockPrice: 0.82, lockPriceCap: 0.91 });
   assert.equal(getConvictionMinEntryMinute("GOLD", config), 12);
+  assert.equal(getConvictionMinEntryMinute("SILVER", config), 3);
   assert.equal(getConvictionMinEntryMinute("BTC", config), 3);
+});
+
+test("per-market FastLane emergency-close gaps override the global fallback", () => {
+  const config = {
+    ...DEFAULT_BOT_CONFIG,
+    fastLaneEmergencyExitThresholdCents: 20,
+    perMarketConvictionConfig: {
+      WTI: { emergencyExitThresholdCents: 8 },
+    },
+  } satisfies BotConfig;
+  assert.equal(getEffectiveFastLaneEmergencyExitThresholdCents("WTI", config), 8);
+  assert.equal(getEffectiveFastLaneEmergencyExitThresholdCents("BTC", config), 20);
 });
 
 test("global conviction bounds reject floor-only, cap-only, and simultaneous inverted updates", () => {
@@ -190,8 +205,46 @@ test("per-market config merge rejects invalid values and inverted effective zone
     /minimum entry minute/,
   );
   assert.throws(
+    () => mergePerMarketConvictionConfig(
+      { SILVER: { minEntryMinute: 0 } },
+      stored,
+      0.82,
+      0.91,
+      11,
+    ),
+    /cannot be earlier than the global 11-minute lockout/,
+  );
+  assert.throws(
+    () => mergePerMarketConvictionConfig(
+      { GOLD: { lockPrice: 0.85 } },
+      { SILVER: { minEntryMinute: 0 } },
+      0.82,
+      0.91,
+      11,
+    ),
+    /SILVER.*cannot be earlier than the global 11-minute lockout/,
+  );
+  assert.throws(
     () => mergePerMarketConvictionConfig({ WTI: { lockPrice: 0.95 } }, stored, 0.82, 0.91),
     /WTI.*exceeds cap/,
+  );
+  assert.equal(
+    mergePerMarketConvictionConfig(
+      { WTI: { emergencyExitThresholdCents: 8 } },
+      stored,
+      0.82,
+      0.91,
+    ).WTI?.emergencyExitThresholdCents,
+    8,
+  );
+  assert.throws(
+    () => mergePerMarketConvictionConfig(
+      { WTI: { emergencyExitThresholdCents: 0 } },
+      stored,
+      0.82,
+      0.91,
+    ),
+    /emergency-close gap/,
   );
 });
 

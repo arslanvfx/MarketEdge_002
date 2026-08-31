@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getAuth } from "@clerk/express";
-import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, mergePerMarketConvictionConfig, isValidConvictionZoneBounds, type BetProfile } from "../lib/kalshi-bot-engine";
+import { BET_PROFILES, isLiveModePermitted, ML_WEIGHT, CLAUDE_WEIGHT, STAT_BOOST, STAT_PENALTY, clampProximityToCalibratedBand, mergePerMarketConvictionConfig, isValidConvictionZoneBounds, PER_MARKET_CONVICTION_SYMBOLS, type BetProfile } from "../lib/kalshi-bot-engine";
 import { isKalshiConfigured, getCachedKalshiBalance } from "../lib/kalshi-trader";
 import {
   getBotState,
@@ -1486,15 +1486,22 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
 
   // Per-market conviction entry overrides (lockPrice, lockPriceCap, minEntryMinute per symbol).
+  // The global minimum entry wait is a hard safety floor; a market override may
+  // delay entry further but can never shorten or disable the global lockout.
   // Revalidate the complete resulting map on every update that changes either
   // global bound, not only when the per-market map is present in the request.
   // This prevents a global cap/floor edit from leaving a stored market zone inverted.
   const hasValidGlobalZoneUpdate =
     (typeof kalshiLockPrice === "number" && kalshiLockPrice >= 0.50 && kalshiLockPrice <= 0.99) ||
     (typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97);
+  const hasValidGlobalMinEntryUpdate =
+    typeof convictionMinEntryMinutes === "number"
+    && convictionMinEntryMinutes >= 0
+    && convictionMinEntryMinutes <= 14;
   if (
     (perMarketConvictionConfig !== undefined && typeof perMarketConvictionConfig === "object" && perMarketConvictionConfig !== null) ||
-    hasValidGlobalZoneUpdate
+    hasValidGlobalZoneUpdate ||
+    hasValidGlobalMinEntryUpdate
   ) {
     const currentConfig = getBotState().config;
     const storedPmcc = currentConfig.perMarketConvictionConfig ?? {};
@@ -1519,13 +1526,47 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
       typeof kalshiLockPriceCap === "number" && kalshiLockPriceCap >= 0.51 && kalshiLockPriceCap <= 0.97
         ? kalshiLockPriceCap
         : currentConfig.kalshiLockPriceCap ?? 0.91;
+    const effectiveGlobalMinEntryMinute =
+      hasValidGlobalMinEntryUpdate
+        ? Math.round(convictionMinEntryMinutes)
+        : currentConfig.convictionMinEntryMinutes ?? 0;
     try {
-      partial.perMarketConvictionConfig = mergePerMarketConvictionConfig(
+      const mergedPmcc = mergePerMarketConvictionConfig(
         submittedPmcc,
         storedPmcc,
         effectiveGlobalFloor,
         effectiveGlobalCap,
+        effectiveGlobalMinEntryMinute,
       );
+      partial.perMarketConvictionConfig = mergedPmcc;
+      const changedWaits = Object.fromEntries(
+        PER_MARKET_CONVICTION_SYMBOLS.flatMap((symbol) => {
+          const before = storedPmcc[symbol]?.minEntryMinute ?? null;
+          const after = mergedPmcc[symbol]?.minEntryMinute ?? null;
+          return before === after ? [] : [[symbol, { before, after }]];
+        }),
+      );
+      const changedEmergencyCloseGaps = Object.fromEntries(
+        PER_MARKET_CONVICTION_SYMBOLS.flatMap((symbol) => {
+          const before = storedPmcc[symbol]?.emergencyExitThresholdCents ?? null;
+          const after = mergedPmcc[symbol]?.emergencyExitThresholdCents ?? null;
+          return before === after ? [] : [[symbol, { before, after }]];
+        }),
+      );
+      if (
+        Object.keys(changedWaits).length > 0
+        || Object.keys(changedEmergencyCloseGaps).length > 0
+      ) {
+        logger.info(
+          {
+            source: "authenticated_config_api",
+            globalMinEntryMinute: effectiveGlobalMinEntryMinute,
+            changedWaits,
+            changedEmergencyCloseGaps,
+          },
+          "[kalshi-bot] per-market conviction override changed",
+        );
+      }
     } catch (error) {
       return res.status(400).json({
         error: error instanceof Error ? error.message : "Invalid per-market conviction entry zone.",

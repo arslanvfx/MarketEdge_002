@@ -155,6 +155,7 @@ export interface BotConfig {
     lockPrice?: number | null;
     lockPriceCap?: number | null;
     minEntryMinute?: number | null;
+    emergencyExitThresholdCents?: number | null;
   } | null>;
   convictionBoostBetSize?: number;
   convictionBoostProbability?: number;

@@ -64,6 +64,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
   const isPriceTriggeredMode = isConviction || isFastLane;
   const convictionFloor = configDraft.kalshiLockPrice ?? merged.kalshiLockPrice ?? 0.82;
   const convictionCap = configDraft.kalshiLockPriceCap ?? merged.kalshiLockPriceCap ?? 0.91;
+  const convictionGlobalMinEntryMinute =
+    configDraft.convictionMinEntryMinutes
+    ?? merged.convictionMinEntryMinutes
+    ?? 0;
   const fastLaneEmergencyExitThresholdCents =
     configDraft.fastLaneEmergencyExitThresholdCents
     ?? merged.fastLaneEmergencyExitThresholdCents
@@ -78,6 +82,12 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
         const ov = convictionOverrides[sym];
         if (!ov) return false;
         return (ov.lockPrice ?? convictionFloor) > (ov.lockPriceCap ?? convictionCap);
+      })
+    : [];
+  const invalidPerMarketTimingSymbols = isPriceTriggeredMode
+    ? ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"].filter(sym => {
+        const wait = convictionOverrides[sym]?.minEntryMinute;
+        return wait != null && wait < convictionGlobalMinEntryMinute;
       })
     : [];
   return (
@@ -715,7 +725,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       const overrides = convictionOverrides;
                       const updateOverride = (
                         sym: string,
-                        field: "lockPrice" | "lockPriceCap" | "minEntryMinute",
+                        field: "lockPrice" | "lockPriceCap" | "minEntryMinute" | "emergencyExitThresholdCents",
                         raw: string,
                       ) => {
                         const current = overrides[sym] ?? {};
@@ -726,7 +736,10 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                           // use the matching global setting".
                           next[field] = null;
                         } else {
-                          const value = field === "minEntryMinute" ? parseInt(raw, 10) : parseFloat(raw);
+                          const value =
+                            field === "minEntryMinute" || field === "emergencyExitThresholdCents"
+                              ? parseInt(raw, 10)
+                              : parseFloat(raw);
                           if (!Number.isNaN(value)) next[field] = value;
                         }
                         const nextMap = { ...overrides };
@@ -762,22 +775,28 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                             <div className="border-t border-cyan-500/15 px-3 py-2.5 flex flex-col gap-2">
                               <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
                                 Optional overrides for each market. Blank fields use the global conviction settings.
-                                The wait value is the earliest window minute allowed, so 12 means the last 3 minutes only.
+                                A market wait may delay entry beyond the global {convictionGlobalMinEntryMinute}-minute lockout, but can never shorten it.
                               </p>
                               {invalidPerMarketSymbols.length > 0 && (
                                 <div role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[11px] text-red-300">
                                   Invalid entry zone for {invalidPerMarketSymbols.join(", ")}. Floor must not exceed cap; fix these rows before saving.
                                 </div>
                               )}
+                              {invalidPerMarketTimingSymbols.length > 0 && (
+                                <div role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[11px] text-red-300">
+                                  Invalid early wait for {invalidPerMarketTimingSymbols.join(", ")}. Per-market waits must be at least the global {convictionGlobalMinEntryMinute}-minute lockout.
+                                </div>
+                              )}
+                              <div className="w-full overflow-x-auto pb-1">
                               <div className={isFastLane
-                                ? "grid min-w-[660px] grid-cols-[auto_1fr_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]"
-                                : "grid min-w-[520px] grid-cols-[auto_1fr_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center text-[10px]"
+                                ? "grid min-w-[700px] grid-cols-[auto_minmax(84px,1fr)_minmax(84px,1fr)_minmax(118px,1fr)_minmax(100px,1fr)_auto] gap-x-2 gap-y-1.5 items-center text-[10px]"
+                                : "grid min-w-[560px] grid-cols-[auto_minmax(84px,1fr)_minmax(84px,1fr)_minmax(100px,1fr)_auto] gap-x-2 gap-y-1.5 items-center text-[10px]"
                               }>
                                 <span className="text-muted-foreground/50">Market</span>
                                 <span className="text-muted-foreground/50">Floor</span>
                                 <span className="text-muted-foreground/50">Cap</span>
                                 {isFastLane && <span className="text-muted-foreground/50">Emergency sell</span>}
-                                <span className="text-muted-foreground/50">Wait until</span>
+                                 <span className="text-muted-foreground/50">Wait until (≥ global)</span>
                                 <span className="text-muted-foreground/50">Reset</span>
                                 {["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOGE", "NEAR", "ZEC", "GOLD", "SILVER", "WTI"].map(sym => {
                                   const ov = overrides[sym] ?? {};
@@ -806,14 +825,49 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                         className="w-full min-w-0 bg-background border border-border/60 rounded px-1.5 py-1 text-[11px] text-foreground"
                                         aria-label={`${sym} entry cap in cents`}
                                       />
-                                       {isFastLane && (
-                                         <span className="rounded border border-amber-500/15 bg-amber-500/5 px-1.5 py-1 font-mono text-[10px] text-amber-300">
-                                           {Math.max(0, effectiveFloorCents - fastLaneEmergencyExitThresholdCents)}¢ or lower
-                                         </span>
-                                       )}
+                                       {isFastLane && (() => {
+                                         const effectiveGap =
+                                           ov.emergencyExitThresholdCents
+                                           ?? fastLaneEmergencyExitThresholdCents;
+                                         const emergencySellCents = Math.max(0, effectiveFloorCents - effectiveGap);
+                                         const globalEmergencySellCents = Math.max(
+                                           0,
+                                           effectiveFloorCents - fastLaneEmergencyExitThresholdCents,
+                                         );
+                                         return (
+                                           <div className="relative min-w-0">
+                                             <input
+                                               type="number"
+                                               min={0}
+                                               max={Math.max(0, effectiveFloorCents - 1)}
+                                               step={1}
+                                               placeholder={String(globalEmergencySellCents)}
+                                               value={ov.emergencyExitThresholdCents == null ? "" : emergencySellCents}
+                                               onChange={e => {
+                                                 if (e.target.value === "") {
+                                                   updateOverride(sym, "emergencyExitThresholdCents", "");
+                                                   return;
+                                                 }
+                                                 const sellAt = parseInt(e.target.value, 10);
+                                                 if (!Number.isNaN(sellAt)) {
+                                                   updateOverride(
+                                                     sym,
+                                                     "emergencyExitThresholdCents",
+                                                     String(effectiveFloorCents - sellAt),
+                                                   );
+                                                 }
+                                               }}
+                                               className="w-full min-w-0 rounded border border-amber-500/25 bg-background px-1.5 py-1 pr-5 font-mono text-[11px] text-amber-300"
+                                               aria-label={`${sym} emergency close price in cents or lower`}
+                                               title={`Immediately close ${sym} at this winning-side fill price or lower. Blank uses the global ${globalEmergencySellCents}¢ threshold.`}
+                                             />
+                                             <span className="pointer-events-none absolute inset-y-0 right-1.5 flex items-center text-[9px] text-amber-400/70">¢</span>
+                                           </div>
+                                         );
+                                       })()}
                                       <input
-                                        type="number" min={0} max={14} step={1}
-                                        placeholder="0"
+                                        type="number" min={convictionGlobalMinEntryMinute} max={14} step={1}
+                                        placeholder={String(convictionGlobalMinEntryMinute)}
                                         value={ov.minEntryMinute == null ? "" : ov.minEntryMinute}
                                         onChange={e => updateOverride(sym, "minEntryMinute", e.target.value)}
                                         className="w-full min-w-0 bg-background border border-border/60 rounded px-1.5 py-1 text-[11px] text-foreground"
@@ -833,8 +887,9 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                   );
                                 })}
                               </div>
+                              </div>
                               <p className="text-[10px] text-muted-foreground/50">
-                                Blank one field to use its global value, or choose Use global to clear the whole market row. Example: GOLD wait until 12 = no GOLD entry before T+12m.
+                                Blank one field to use its global value, or choose Use global to clear the whole market row. Emergency sell is the winning-side fill price that triggers an immediate close. Example: GOLD wait until 12 = no GOLD entry before T+12m.
                               </p>
                             </div>
                           )}
@@ -2457,7 +2512,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
               />
 
               <div className="flex items-center gap-2 pt-2 border-t border-border">
-                <Button size="sm" disabled={!hasDraft || saving || convictionGlobalZoneInvalid || invalidPerMarketSymbols.length > 0} onClick={saveConfig} className="gap-1">
+                <Button size="sm" disabled={!hasDraft || saving || convictionGlobalZoneInvalid || invalidPerMarketSymbols.length > 0 || invalidPerMarketTimingSymbols.length > 0} onClick={saveConfig} className="gap-1">
                   {saving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
                   {saving ? "Saving…" : "Save Configuration"}
                 </Button>

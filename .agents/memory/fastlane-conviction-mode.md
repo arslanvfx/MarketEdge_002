@@ -3,11 +3,11 @@ name: FastLane Conviction mode
 description: Durable strategy and execution boundaries for the isolated price-only FastLane mode.
 ---
 
-FastLane is a separate decision mode. A fresh current-window YES or NO ask inside the configured conviction floor/cap is its sole strategy authorization; it must not inherit model, confidence, stability, trajectory, or authenticated-book gates. Strike-proximity and Freefall are operator-controlled exceptions: FastLane enforces either guard only when its shared toggle is on.
+FastLane is a separate decision mode. A fresh current-window YES or NO ask inside the configured conviction floor/cap is its sole strategy authorization; it must not inherit model, confidence, stability, or trajectory gates. Strike-proximity and Freefall are operator-controlled exceptions. Thin commodity markets are also an execution-safety exception: GOLD, SILVER, and WTI require fresh authenticated full-depth confirmation entirely inside the configured band immediately before submission, while crypto keeps the public-quote fast path.
 
 **Why:** The mode exists to remove pre-entry processing latency without changing or weakening the established Conviction mode. Operators explicitly chose to retain optional proximity and Freefall protection without adding network waits. Kalshi order submission remains authenticated even though a separate authenticated order-book read is intentionally absent.
 
-**How to apply:** Authorize entries from current-window public price alone, then apply enabled proximity and Freefall guards at the final pre-submit boundary using already-collected fresh samples. Disabled guards must short-circuit without evidence work, requests, or sleeps. Preserve exact market identity, monetary safety, per-position ownership, signed execution, and durable reconciliation.
+**How to apply:** Authorize entries from current-window public price alone, then apply enabled proximity and Freefall guards at the final pre-submit boundary using already-collected fresh samples. For commodity execution, reject missing, stale, shallow, or cheaper-than-floor authenticated depth and revalidate the exact book version at the pre-POST boundary. Disabled optional guards must short-circuit without evidence work, requests, or sleeps. Preserve exact market identity, monetary safety, per-position ownership, signed execution, and durable reconciliation.
 
 Do not apply legacy Conviction’s gross daily-spend throttle to FastLane. FastLane keeps canonical daily-loss, actual-balance, reservation, ownership, and reconciliation protections instead.
 
@@ -21,11 +21,23 @@ FastLane’s emergency close is only a one-time bad-fill safeguard. After a vali
 
 **How to apply:** Keep bad-fill evaluation at entry, then manage every active position with the shared floor, activation-minute, and suppression parameters regardless of entry decision mode.
 
-Price-triggered modes have one authoritative entry timer: the global/per-market Conviction Min Entry Wait. The legacy model-driven early-window lockout must not also apply. The extreme-price bypass belongs with that timer and is available only to legacy Conviction; FastLane always respects its configured wait. Risk controls must likewise display only the field the active mode actually enforces: Conviction uses its dedicated daily-loss limit, while FastLane uses the canonical shared daily-loss limit and never shows Conviction’s gross-spend cap.
+Price-triggered modes have one authoritative entry timer: the global Conviction Min Entry Wait is a hard floor, and per-market waits may only delay entry further. The legacy model-driven early-window lockout must not also apply. The extreme-price bypass belongs with that timer and is available only to legacy Conviction; FastLane always respects its configured wait. Risk controls must likewise display only the field the active mode actually enforces: Conviction uses its dedicated daily-loss limit, while FastLane uses the canonical shared daily-loss limit and never shows Conviction’s gross-spend cap.
 
 **Why:** Showing overlapping timers and mode-inapplicable loss/spend inputs made operators believe hidden or ignored values controlled FastLane, while stale legacy values could contradict the visible slider.
 
 **How to apply:** Keep price-triggered timing and bypass UI together, keep legacy lockout UI exclusive to non-price-triggered modes, and condition risk controls by their real backend decision-mode scope.
+
+Revalidate the effective wait from the current configuration at the exact live exchange boundary and after all asynchronous paper previews. Global-wait-only updates must validate the complete stored per-market map, not just fields included in the request. When preserving Conviction's explicit bypass, compare a per-contract side cost; aggregate order cost is the wrong unit.
+
+**Why:** A tick can begin under an older wait and remain in flight while the operator raises it. Separately, validating only submitted overrides can leave stale lower values hidden in storage, and aggregate multi-contract cost incorrectly disables an otherwise valid bypass.
+
+**How to apply:** Use the current global/per-market maximum immediately before submission or synthetic fill, reject stale lower stored overrides whenever timing config is saved, and keep FastLane ineligible for the Conviction-only bypass.
+
+FastLane emergency-close distance supports a per-market override with the global gap as fallback. The operator-facing value is the winning-side fill price at or below which the position is immediately closed; internally it is stored as a cent gap below that market's effective entry floor.
+
+**Why:** Commodity books can price-improve far below the public quote and need different emergency tolerances from tighter crypto books. A display-only derived value prevented operators from expressing that risk preference.
+
+**How to apply:** Snapshot the effective per-market gap before submission, normalize YES and NO fills to winning-side cost, persist the confirmed fill, then immediately close when the fill is at or below the derived threshold. Blank overrides must fall back to the global gap.
 
 If an authoritative fill breaches the snapshotted emergency threshold, record the entry before beginning the emergency exit. Normalize NO fills to winning-side cost. Full exits finalize through an idempotent durable lifecycle; unknown or partial exits remain blocked with residual exposure visible, and recovery must work across pauses and restarts without another broker order.
 
