@@ -21,6 +21,7 @@ const PRODUCT_TO_INDEX = new Map(
 export interface KalshiCfBenchmarksTickerEvidence {
   price: number;
   publishedAtMs: number;
+  receivedAtMs: number;
   sourceSequence: string;
   source: "kalshi_cfbenchmarks";
   sourceIndex: string;
@@ -79,6 +80,11 @@ export class KalshiCfBenchmarksValueService {
         ? `Kalshi CF Benchmarks evidence unavailable for ${indexId}: ${this.lastFailureReason}`
         : `Kalshi CF Benchmarks evidence unavailable for ${indexId}: awaiting first publication`);
     }
+    if (evidence.provenance !== "websocket") {
+      throw new Error(
+        `Kalshi CF Benchmarks authenticated evidence unavailable for ${indexId}: awaiting websocket publication`,
+      );
+    }
     const sourceAgeMs = nowMs - evidence.sourceTsMs;
     if (sourceAgeMs < -5_000 || sourceAgeMs > maxAgeMs) {
       throw new Error(`Kalshi CF Benchmarks evidence stale for ${indexId} (${Math.round(sourceAgeMs / 1_000)}s old)`);
@@ -86,6 +92,7 @@ export class KalshiCfBenchmarksValueService {
     return {
       price: evidence.price,
       publishedAtMs: evidence.sourceTsMs,
+      receivedAtMs: evidence.receivedAtMs,
       sourceSequence: evidence.sourceSequence,
       source: "kalshi_cfbenchmarks",
       sourceIndex: indexId,

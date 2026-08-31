@@ -12,10 +12,13 @@ import {
   INITIAL_SMART_EXIT_STATE,
   evaluateSmartExit,
   modelWinProbability,
+  smartExitSettlementSpotIsFresh,
   resolveAuthoritativeHeldSideMarketEvidence,
   resolveSmartExitSensitivity,
 } from "./kalshi-smart-exit-policy.ts";
 import { KalshiSmartExitEvidenceCollector } from "./kalshi-smart-exit-evidence.ts";
+import { getKalshiCfBenchmarksValueEvidence } from "./kalshi-cfbenchmarks-value-service.ts";
+import { getKalshiPythValueEvidence } from "./kalshi-pyth-value-service.ts";
 import {
   applyValidatedSmartExitParameterVersion,
   claimSmartExitRequest,
@@ -102,8 +105,10 @@ const HOT_SCHEDULER_MS = 500;
 const SLOW_SCHEDULER_MS = 1_000;
 const EVALUATION_PERSISTENCE_MS = 1_000;
 const PRODUCT_BY_SYMBOL = new Map(CRYPTO_COINS.map((coin) => [coin.symbol, coin]));
-const collector = new KalshiSmartExitEvidenceCollector();
-const hotCollector = new KalshiSmartExitEvidenceCollector();
+const readPyth = (product: string) => getKalshiPythValueEvidence(product);
+const readCfBenchmarks = (product: string) => getKalshiCfBenchmarksValueEvidence(product);
+const collector = new KalshiSmartExitEvidenceCollector({ readPyth, readCfBenchmarks });
+const hotCollector = new KalshiSmartExitEvidenceCollector({ readPyth, readCfBenchmarks });
 type BookSnapshot = OrderbookPrices & {
   receivedAtSeconds: number;
   observedAtSeconds: number;
@@ -155,7 +160,7 @@ const persistenceQueue = new Map<string, PersistenceItem>();
 let persistenceWorkerRunning = false;
 let persistenceWakeTimer: ReturnType<typeof setTimeout> | null = null;
 let persistenceWakeAtMs: number | null = null;
-const PREWARMABLE_COINS = CRYPTO_COINS.filter((coin) => coin.category !== "commodity");
+const PREWARMABLE_COINS = CRYPTO_COINS;
 
 function identityKey(owner: SmartExitOwnerKind, positionId: string): string {
   return `${owner}:${positionId}`;
@@ -251,6 +256,10 @@ function mergeHotSpotWithSlowEvidence(
   const useHotMomentum = hot.momentumLogReturn != null && hot.momentumWindowSeconds != null;
   return {
     ...slow,
+    source: hot.source,
+    spotSourceSequence: hot.spotSourceSequence,
+    spotTrajectoryAtSeconds: hot.spotTrajectoryAtSeconds,
+    failureReason: hot.failureReason,
     underlyingPrice: hot.underlyingPrice,
     spotReceivedAtSeconds: hot.spotReceivedAtSeconds,
     spotObservedAtSeconds: hot.spotObservedAtSeconds,
@@ -386,15 +395,31 @@ function componentHealth(
     if (receivedAt > nowSeconds || receiptAgeMs! > config.maxEvidenceAgeSeconds * 1_000) {
       return { status: "delayed", receiptAgeMs, eventAgeMs };
     }
-    if (quietAllowed && (eventAt == null || eventAgeMs! > config.maxEvidenceAgeSeconds * 1_000)) {
-      return { status: "quiet", receiptAgeMs, eventAgeMs };
+    if (
+      eventAt == null
+      || eventAt > nowSeconds
+      || eventAgeMs! > config.maxEvidenceAgeSeconds * 1_000
+    ) {
+      return {
+        status: quietAllowed ? "quiet" : eventAt == null ? "unavailable" : "delayed",
+        receiptAgeMs,
+        eventAgeMs,
+      };
     }
     return { status: "fresh", receiptAgeMs, eventAgeMs };
   };
   return {
-    spot: classify(evidence.spotReceivedAtSeconds, evidence.spotObservedAtSeconds, true),
-    tape: classify(evidence.tapeReceivedAtSeconds, evidence.tapeObservedAtSeconds, true),
-    coinbaseBook: classify(evidence.bookReceivedAtSeconds, evidence.bookObservedAtSeconds),
+    spot: classify(
+      evidence.spotReceivedAtSeconds,
+      evidence.spotObservedAtSeconds,
+      evidence.source === "coinbase-rest",
+    ),
+    tape: evidence.source === "kalshi-pyth"
+      ? { status: "quiet", receiptAgeMs: null, eventAgeMs: null }
+      : classify(evidence.tapeReceivedAtSeconds, evidence.tapeObservedAtSeconds, true),
+    coinbaseBook: evidence.source === "kalshi-pyth"
+      ? { status: "quiet", receiptAgeMs: null, eventAgeMs: null }
+      : classify(evidence.bookReceivedAtSeconds, evidence.bookObservedAtSeconds),
     kalshiQuote: classify(evidence.marketQuoteObservedAtSeconds, evidence.marketQuoteObservedAtSeconds),
     kalshiBook: classify(evidence.marketBookObservedAtSeconds, evidence.marketBookObservedAtSeconds),
   };
@@ -439,20 +464,26 @@ export function captureSmartExitRegularEntry(position: OpenPosition): void {
   void (async () => {
     const symbol = position.symbol.toUpperCase();
     const definition = PRODUCT_BY_SYMBOL.get(symbol);
-    if (!definition || definition.category === "commodity" || position.cryptoPriceAtEntry == null) return;
+    if (!definition) return;
     const market = exactMarket(symbol, position.ticker, position.windowKey);
-    const evidence = await collector.collect(
+    const evidence = await collectSlowEvidence(
       symbol,
       definition.product,
-      marketProbabilityForSide(position.direction, position.entryYesPrice),
     );
     const provisional = regularSnapshot(position, evidence);
+    const baselineObservedAt = evidence.spotObservedAtSeconds ?? position.openedAt / 1_000;
+    if (!smartExitSettlementSpotIsFresh(
+      evidence,
+      Date.now() / 1_000,
+      config.maxEvidenceAgeSeconds,
+    )) return;
     const baseline = modelWinProbability(
       provisional,
-      { ...evidence, underlyingPrice: position.cryptoPriceAtEntry },
+      evidence,
       config,
-      position.openedAt / 1_000,
+      baselineObservedAt,
     );
+    if (baseline == null) return;
     const key = identityKey("regular", position.id);
     modelEntryBaselines.set(key, baseline);
     await upsertSmartExitPositionState({
@@ -500,10 +531,6 @@ function scalperSnapshot(
     ?? marketProbabilityForSide(side, avgFillPrice)
     ?? marketProbabilityForSide(side, entryYesPrice)
     ?? 0;
-  const guard = row.entry_guard_evidence && typeof row.entry_guard_evidence === "object"
-    ? row.entry_guard_evidence as Record<string, unknown>
-    : {};
-  const entrySpot = Number(guard.underlyingPrice);
   const key = identityKey("scalper", positionId);
   let baseline = modelEntryBaselines.get(key);
   const provisional: SmartExitPosition = {
@@ -527,16 +554,21 @@ function scalperSnapshot(
       observedAtSeconds: openedAt,
     },
   };
-  if (!modelEntryBaselines.has(key)) {
-    baseline = Number.isFinite(entrySpot) && entrySpot > 0
-      ? modelWinProbability(
-          provisional,
-          { ...evidence, underlyingPrice: entrySpot },
-          config,
-          provisional.openedAtSeconds,
-        )
-      : null;
-    modelEntryBaselines.set(key, baseline ?? null);
+  if (
+    !modelEntryBaselines.has(key)
+    && smartExitSettlementSpotIsFresh(
+      evidence,
+      Date.now() / 1_000,
+      config.maxEvidenceAgeSeconds,
+    )
+  ) {
+    baseline = modelWinProbability(
+      provisional,
+      evidence,
+      config,
+      evidence.spotObservedAtSeconds ?? provisional.openedAtSeconds,
+    );
+    if (baseline != null) modelEntryBaselines.set(key, baseline);
   }
   return { ...provisional, modelAtEntry: { winProbability: baseline ?? null, observedAtSeconds: openedAt } };
 }
@@ -544,7 +576,8 @@ function scalperSnapshot(
 function reasonCode(disposition: string, reason: string): string {
   if (disposition === "OFF") return "disabled";
   if (disposition === "UNAVAILABLE") {
-    if (reason.includes("commodity")) return "commodity_microstructure_unavailable";
+    if (reason.includes("Pyth")) return "commodity_spot_unavailable";
+    if (reason.includes("CF Benchmarks")) return "crypto_spot_unavailable";
     if (reason.includes("entry")) return "entry_baseline_unavailable";
     if (reason.includes("stale")) return "stale_evidence";
     return "incomplete_evidence";
@@ -625,7 +658,7 @@ async function executeAuthorizedExit(
     validatedAtMs: number;
   } | null = null;
   const revalidateRisk = async (): Promise<SmartExitExecutionConstraint | null> => {
-    if (!definition || definition.category === "commodity") return null;
+    if (!definition) return null;
     const hot = await collectHotSpot(position.symbol.toUpperCase(), definition.product);
     await refreshBook(position.ticker);
     const finalEvidence = withMarketEvidence(
@@ -1400,7 +1433,7 @@ async function runHotCycle(): Promise<void> {
     const evidenceBySymbol = new Map<string, Promise<SmartExitEvidence>>();
     for (const entry of entries) {
       const definition = PRODUCT_BY_SYMBOL.get(entry.symbol);
-      if (!definition || definition.category === "commodity") continue;
+      if (!definition) continue;
       const ticker = entry.owner === "regular"
         ? (entry.value as OpenPosition).ticker
         : String((entry.value as Record<string, unknown>).ticker ?? "");
@@ -1615,17 +1648,38 @@ export async function emergencyDisableSmartExit(): Promise<SmartExitConfig> {
 
 export function getSmartExitHealth(): SmartExitHealth {
   const evidence = collector.health();
+  const nowSeconds = Date.now() / 1_000;
   const evidenceBySymbol: SmartExitHealth["evidenceBySymbol"] = Object.fromEntries(
-    Object.entries(evidence.latestBySymbol).map(([symbol, item]) => [symbol, {
-      source: item.source,
-      ready: item.ready,
-      reason: item.ready ? null : item.source === "unsupported"
-        ? "qualifying futures tape/L2 provider unavailable"
-        : "spot/tape/L2 evidence warming or incomplete",
-      observedAt: Number.isFinite(item.observedAtSeconds)
-        ? new Date(item.observedAtSeconds * 1_000).toISOString()
-        : null,
-    }]),
+    Object.entries(evidence.latestBySymbol).map(([symbol, item]) => {
+      const settlementSource = item.source === "kalshi-pyth"
+        || item.source === "kalshi-cfbenchmarks";
+      const settlementSourceFresh = !settlementSource || (
+        item.spotReceivedAtSeconds != null
+        && item.spotObservedAtSeconds != null
+        && item.spotReceivedAtSeconds <= nowSeconds
+        && item.spotObservedAtSeconds <= nowSeconds
+        && nowSeconds - item.spotReceivedAtSeconds <= config.maxEvidenceAgeSeconds
+        && nowSeconds - item.spotObservedAtSeconds <= config.maxEvidenceAgeSeconds
+      );
+      const ready = item.ready && settlementSourceFresh;
+      return [symbol, {
+        source: item.source,
+        ready,
+        reason: ready ? null : item.reason
+          ?? (!settlementSourceFresh
+            ? "Kalshi settlement source publication is stale or unavailable"
+            : item.source === "kalshi-pyth"
+              ? "Kalshi Pyth spot trajectory warming or incomplete"
+              : item.source === "kalshi-cfbenchmarks"
+                ? "Kalshi CF Benchmarks spot/tape/L2 evidence warming or incomplete"
+              : item.source === "unsupported"
+                ? "qualifying evidence provider unavailable"
+                : "spot/tape/L2 evidence warming or incomplete"),
+        observedAt: Number.isFinite(item.observedAtSeconds)
+          ? new Date(item.observedAtSeconds * 1_000).toISOString()
+          : null,
+      }];
+    }),
   );
   const readinessValues = Object.values(evidenceBySymbol);
   const dataReadiness = readinessValues.length === 0

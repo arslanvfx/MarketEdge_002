@@ -886,8 +886,19 @@ function isFresh(receivedAt: number | null, now: number, maxAge: number): boolea
   return receivedAt !== null && receivedAt <= now && now - receivedAt <= maxAge;
 }
 
+export function smartExitSettlementSpotIsFresh(
+  evidence: SmartExitEvidence,
+  now: number,
+  maxAge: number,
+): boolean {
+  return (
+    (evidence.source === "kalshi-pyth" || evidence.source === "kalshi-cfbenchmarks")
+    && isFresh(evidence.spotReceivedAtSeconds, now, maxAge)
+    && isFresh(evidence.spotObservedAtSeconds, now, maxAge)
+  );
+}
+
 function evidenceProblem(position: SmartExitPosition, evidence: SmartExitEvidence, config: SmartExitConfig, now: number): string | null {
-  if (position.underlyingKind === "commodity") return "commodity microstructure is unsupported";
   if (config.totalWindowSeconds <= 0 || config.minVolatilityLogReturnPerSqrtSecond <= 0 ||
       config.fatTailVolatilityMultiplier <= 0 || config.debounceCount < 1 ||
       config.deepLossHoldThreshold < 0 || config.deepLossHoldThreshold > 1 ||
@@ -897,6 +908,12 @@ function evidenceProblem(position: SmartExitPosition, evidence: SmartExitEvidenc
   if (now - evidence.observedAtSeconds > config.maxEvidenceAgeSeconds || evidence.observedAtSeconds > now) return "evidence is stale or clock-invalid";
   if (!isFresh(evidence.spotReceivedAtSeconds, now, config.maxEvidenceAgeSeconds)) {
     return "spot transport is stale or unavailable";
+  }
+  if (
+    (evidence.source === "kalshi-pyth" || evidence.source === "kalshi-cfbenchmarks")
+    && !smartExitSettlementSpotIsFresh(evidence, now, config.maxEvidenceAgeSeconds)
+  ) {
+    return "Kalshi settlement source publication is stale or unavailable";
   }
   if (!finite(evidence.underlyingPrice)) return "spot evidence is missing";
   if (evidence.underlyingPrice <= 0
@@ -911,7 +928,10 @@ export function missingSmartExitCrossingEvidence(
     "volatilityLogReturnPerSqrtSecond" | "momentumLogReturn" | "momentumWindowSeconds"
       | "tradeFlowImbalance" | "bookImbalance"
   >,
-  options: { readonly tradeFlowOptional?: boolean } = {},
+  options: {
+    readonly tradeFlowOptional?: boolean;
+    readonly bookImbalanceOptional?: boolean;
+  } = {},
 ): string[] {
   const missing: string[] = [];
   if (!finite(evidence.volatilityLogReturnPerSqrtSecond)) missing.push("volatility");
@@ -919,7 +939,7 @@ export function missingSmartExitCrossingEvidence(
       || !finite(evidence.momentumWindowSeconds)
       || evidence.momentumWindowSeconds <= 0) missing.push("momentum");
   if (!options.tradeFlowOptional && !finite(evidence.tradeFlowImbalance)) missing.push("trade_flow");
-  if (!finite(evidence.bookImbalance)) missing.push("book_imbalance");
+  if (!options.bookImbalanceOptional && !finite(evidence.bookImbalance)) missing.push("book_imbalance");
   return missing;
 }
 
@@ -953,6 +973,8 @@ export function evaluateSmartExit(
     tradeFlowImbalance: tapeDirectionFresh ? evidence.tradeFlowImbalance : null,
     bookImbalance: bookDirectionFresh ? evidence.bookImbalance : null,
   };
+  const trajectoryObservedAt = evidence.spotTrajectoryAtSeconds
+    ?? evidence.spotObservedAtSeconds;
   const targetAlreadyCrossed = position.side === "yes"
     ? evidence.underlyingPrice! <= position.strikePrice
     : evidence.underlyingPrice! >= position.strikePrice;
@@ -960,9 +982,9 @@ export function evaluateSmartExit(
     && (position.side === "yes"
       ? state.previousUnderlyingPrice <= position.strikePrice
       : state.previousUnderlyingPrice >= position.strikePrice);
-  const spotContinuityGap = finite(evidence.spotObservedAtSeconds)
+  const spotContinuityGap = finite(trajectoryObservedAt)
     && finite(state.previousUnderlyingAtSeconds)
-    ? evidence.spotObservedAtSeconds - state.previousUnderlyingAtSeconds
+    ? trajectoryObservedAt! - state.previousUnderlyingAtSeconds
     : null;
   const crossingIsContinuous = previousTargetAlreadyCrossed
     && spotContinuityGap !== null
@@ -972,20 +994,20 @@ export function evaluateSmartExit(
     ? crossingIsContinuous
       ? state.targetCrossedSinceSeconds
         ?? state.previousUnderlyingAtSeconds
-        ?? evidence.spotObservedAtSeconds
+        ?? trajectoryObservedAt
         ?? nowSeconds
-      : evidence.spotObservedAtSeconds ?? nowSeconds
+      : trajectoryObservedAt ?? nowSeconds
     : null;
   const targetCrossedDurationSeconds = crossedSinceSeconds == null
     ? 0 : Math.max(
         0,
-        (evidence.spotObservedAtSeconds ?? nowSeconds) - crossedSinceSeconds,
+        (trajectoryObservedAt ?? nowSeconds) - crossedSinceSeconds,
       );
   const trajectory = assessSmartExitTrajectory({
     side: position.side,
     strikePrice: position.strikePrice,
     price: evidence.underlyingPrice!,
-    observedAtSeconds: evidence.spotObservedAtSeconds,
+    observedAtSeconds: trajectoryObservedAt,
     nowSeconds,
     remainingSeconds: remaining,
     previousState: state,
@@ -1040,7 +1062,7 @@ export function evaluateSmartExit(
   const preflightState: SmartExitState = {
     ...state,
     previousUnderlyingPrice: evidence.underlyingPrice,
-    previousUnderlyingAtSeconds: evidence.spotObservedAtSeconds,
+    previousUnderlyingAtSeconds: trajectoryObservedAt,
     previousAdverseVelocity: adverseVelocity,
     trajectorySamples: trajectory.samples,
     adverseLatchUntilSeconds: trajectory.adverseLatchUntilSeconds,
@@ -1057,8 +1079,10 @@ export function evaluateSmartExit(
   };
   const missingAtCrossing = targetAlreadyCrossed
     ? missingSmartExitCrossingEvidence(directionalEvidence, {
-        tradeFlowOptional: timeBandParameters.band === "critical"
+        tradeFlowOptional: position.underlyingKind === "commodity"
+          || timeBandParameters.band === "critical"
           || valuePreservationCandidate,
+        bookImbalanceOptional: position.underlyingKind === "commodity",
       })
     : [];
   if (missingAtCrossing.length > 0) {
@@ -1178,12 +1202,12 @@ export function evaluateSmartExit(
     ? clamp((position.entryStake - estimatedSaleValue) / position.entryStake, 0, 1)
     : null;
   const degradedComponents: string[] = [];
-  if (!tapeDirectionFresh) degradedComponents.push("coinbase_tape");
-  if (!bookDirectionFresh) degradedComponents.push("coinbase_book");
+  if (position.underlyingKind !== "commodity" && !tapeDirectionFresh) degradedComponents.push("coinbase_tape");
+  if (position.underlyingKind !== "commodity" && !bookDirectionFresh) degradedComponents.push("coinbase_book");
   if (!quoteFresh) degradedComponents.push("kalshi_quote");
   if (!marketBookFresh) degradedComponents.push("kalshi_book");
-  if (!finite(directionalEvidence.tradeFlowImbalance)) degradedComponents.push("trade_flow");
-  if (!finite(directionalEvidence.bookImbalance)) degradedComponents.push("book_imbalance");
+  if (position.underlyingKind !== "commodity" && !finite(directionalEvidence.tradeFlowImbalance)) degradedComponents.push("trade_flow");
+  if (position.underlyingKind !== "commodity" && !finite(directionalEvidence.bookImbalance)) degradedComponents.push("book_imbalance");
   if (!hasModelEntryBaseline) degradedComponents.push("model_entry_baseline");
   const common = {
     modelWinProbability: probability,

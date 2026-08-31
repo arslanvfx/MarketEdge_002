@@ -47,7 +47,23 @@ const fmtEasternDate = (iso: string) => {
   }
 };
 
-function HealthDot({ label, health }: { label: string; health?: SmartExitComponentHealth }) {
+function HealthDot({
+  label,
+  health,
+  notApplicable = false,
+}: {
+  label: string;
+  health?: SmartExitComponentHealth;
+  notApplicable?: boolean;
+}) {
+  if (notApplicable) {
+    return (
+      <div className="flex flex-col items-center gap-1.5 cursor-default" title={`${label}: not applicable for Kalshi Pyth commodities`}>
+        <span className="text-[8px] font-mono text-slate-700 leading-none">{label}</span>
+        <div className="w-1.5 h-1.5 rounded-full bg-slate-800 ring-1 ring-slate-700" />
+      </div>
+    );
+  }
   const safeHealth = health ?? {
     status: "unavailable" as const,
     receiptAgeMs: null,
@@ -823,8 +839,8 @@ export function BotSmartExitPanel({ authPost }: Props) {
                           </div>
                         <div className="flex items-center justify-between w-full pr-2">
                            <HealthDot label="SPT" health={ev.liveComponentHealth?.spot} />
-                           <HealthDot label="TPE" health={ev.liveComponentHealth?.tape} />
-                           <HealthDot label="CBK" health={ev.liveComponentHealth?.coinbaseBook} />
+                           <HealthDot label="TPE" health={ev.liveComponentHealth?.tape} notApplicable={ev.source === "kalshi-pyth"} />
+                           <HealthDot label="CBK" health={ev.liveComponentHealth?.coinbaseBook} notApplicable={ev.source === "kalshi-pyth"} />
                            <HealthDot label="KQU" health={ev.liveComponentHealth?.kalshiQuote} />
                            <HealthDot label="KBK" health={ev.liveComponentHealth?.kalshiBook} />
                         </div>

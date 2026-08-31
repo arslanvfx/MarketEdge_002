@@ -87,8 +87,14 @@ export interface SmartExitPosition {
  * Momentum is the log return measured over `momentumWindowSeconds`.
  */
 export interface SmartExitEvidence {
-  readonly source: "coinbase-rest" | "unsupported";
+  readonly source: "coinbase-rest" | "kalshi-cfbenchmarks" | "kalshi-pyth" | "unsupported";
   readonly observedAtSeconds: number;
+  /** Upstream publication identity; repeated local reads must retain this exact value. */
+  readonly spotSourceSequence?: string | null;
+  /** Receipt-time ordering for distinct upstream publications, separate from source event time. */
+  readonly spotTrajectoryAtSeconds?: number | null;
+  /** Explicit collector failure for operator health reporting; never used as decision evidence. */
+  readonly failureReason?: string | null;
   /** Receipt times prove transport freshness; exchange event times may be older in a quiet market. */
   readonly spotReceivedAtSeconds: number | null;
   readonly tapeReceivedAtSeconds: number | null;

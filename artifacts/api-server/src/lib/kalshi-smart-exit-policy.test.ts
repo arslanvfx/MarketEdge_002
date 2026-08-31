@@ -9,6 +9,7 @@ import {
   assessSmartExitDeepLossHold,
   evaluateSmartExit, modelWinProbability, probabilityDropThreshold,
   resolveSmartExitSensitivity,
+  smartExitSettlementSpotIsFresh,
   resolveSmartExitTimeBand,
   resolveAuthoritativeHeldSideMarketEvidence,
 } from "./kalshi-smart-exit-policy.ts";
@@ -122,14 +123,144 @@ test("continuation is adverse-side aligned", () => {
   assert.ok(adverseContinuationScore("yes", evidence(), config)! > 0);
   assert.ok(adverseContinuationScore("no", evidence(), config)! < 0);
 });
-test("missing, stale, and commodity evidence fail closed", () => {
+test("missing and stale evidence fail closed while complete commodity evidence is supported", () => {
   assert.notEqual(evaluateSmartExit(position, evidence({
     underlyingPrice: 110,
     tradeFlowImbalance: null,
   }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit(position, evidence({ observedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
   assert.equal(evaluateSmartExit(position, evidence({ spotReceivedAtSeconds: 1 }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
-  assert.equal(evaluateSmartExit({ ...position, underlyingKind: "commodity" }, evidence(), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
+  assert.notEqual(evaluateSmartExit({
+    ...position,
+    symbol: "GOLD",
+    underlyingKind: "commodity",
+  }, evidence({
+    source: "kalshi-pyth",
+    tapeReceivedAtSeconds: null,
+    tapeObservedAtSeconds: null,
+    bookReceivedAtSeconds: null,
+    bookObservedAtSeconds: null,
+    tradeFlowImbalance: null,
+    bookImbalance: null,
+  }), INITIAL_SMART_EXIT_STATE, config, 100).disposition, "UNAVAILABLE");
+});
+
+test("commodity target crossing uses Pyth trajectory without requiring Coinbase-only signals", () => {
+  const commodityPosition = {
+    ...position,
+    symbol: "SILVER",
+    underlyingKind: "commodity" as const,
+    expirySeconds: 900,
+  };
+  const decision = evaluateSmartExit(
+    commodityPosition,
+    evidenceAt(850, {
+      source: "kalshi-pyth",
+      spotTrajectoryAtSeconds: 850,
+      underlyingPrice: 99.9,
+      volatilityLogReturnPerSqrtSecond: 0.0001,
+      momentumLogReturn: -0.0003,
+      tapeReceivedAtSeconds: null,
+      tapeObservedAtSeconds: null,
+      bookReceivedAtSeconds: null,
+      bookObservedAtSeconds: null,
+      tradeFlowImbalance: null,
+      bookImbalance: null,
+    }),
+    {
+      ...INITIAL_SMART_EXIT_STATE,
+      previousUnderlyingPrice: 100.1,
+      previousUnderlyingAtSeconds: 849,
+    },
+    config,
+    850,
+  );
+  assert.notEqual(decision.disposition, "UNAVAILABLE");
+  assert.equal(decision.targetAlreadyCrossed, true);
+  assert.equal(decision.trajectorySampleCount >= 2, true);
+  assert.equal(decision.degradedComponents.includes("coinbase_tape"), false);
+  assert.equal(decision.degradedComponents.includes("coinbase_book"), false);
+});
+
+test("commodity Pyth source time must remain inside the configured evidence age even with fresh transport", () => {
+  const commodityPosition = {
+    ...position,
+    symbol: "WTI",
+    underlyingKind: "commodity" as const,
+  };
+  const staleSource = evaluateSmartExit(
+    commodityPosition,
+    evidenceAt(100, {
+      source: "kalshi-pyth",
+      spotReceivedAtSeconds: 100,
+      spotObservedAtSeconds: 96.5,
+      spotTrajectoryAtSeconds: 100,
+      tapeReceivedAtSeconds: null,
+      tapeObservedAtSeconds: null,
+      bookReceivedAtSeconds: null,
+      bookObservedAtSeconds: null,
+      tradeFlowImbalance: null,
+      bookImbalance: null,
+    }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, maxEvidenceAgeSeconds: 3 },
+    100,
+  );
+  assert.equal(staleSource.disposition, "UNAVAILABLE");
+  assert.match(staleSource.reason, /settlement source publication is stale/);
+  assert.equal(staleSource.mayExecuteExit, false);
+  assert.equal(staleSource.executionEvidenceReady, false);
+});
+
+test("crypto CF Benchmarks source time must remain inside the configured evidence age", () => {
+  const staleSource = evaluateSmartExit(
+    position,
+    evidenceAt(100, {
+      source: "kalshi-cfbenchmarks",
+      spotReceivedAtSeconds: 100,
+      spotObservedAtSeconds: 96.5,
+      spotTrajectoryAtSeconds: 100,
+    }),
+    INITIAL_SMART_EXIT_STATE,
+    { ...config, maxEvidenceAgeSeconds: 3 },
+    100,
+  );
+  assert.equal(staleSource.disposition, "UNAVAILABLE");
+  assert.match(staleSource.reason, /settlement source publication is stale/);
+  assert.equal(staleSource.mayExecuteExit, false);
+});
+
+test("entry baselines require fresh authenticated settlement receipt and source time", () => {
+  const fresh = evidenceAt(100, {
+    source: "kalshi-cfbenchmarks",
+    spotReceivedAtSeconds: 99.8,
+    spotObservedAtSeconds: 99.7,
+  });
+  assert.equal(smartExitSettlementSpotIsFresh(fresh, 100, 3), true);
+  assert.equal(
+    smartExitSettlementSpotIsFresh(
+      { ...fresh, spotReceivedAtSeconds: 96.5 },
+      100,
+      3,
+    ),
+    false,
+  );
+  assert.equal(
+    smartExitSettlementSpotIsFresh(
+      { ...fresh, spotObservedAtSeconds: 96.5 },
+      100,
+      3,
+    ),
+    false,
+  );
+  assert.equal(
+    smartExitSettlementSpotIsFresh(
+      { ...fresh, source: "coinbase-rest" },
+      100,
+      3,
+    ),
+    false,
+  );
 });
 
 test("missing trade flow blocks execution without erasing fresh spot trajectory", () => {

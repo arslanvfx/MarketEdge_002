@@ -24,6 +24,7 @@ const PRODUCT_TO_UNDERLYING = new Map(
 export interface KalshiPythTickerEvidence {
   price: number;
   publishedAtMs: number;
+  receivedAtMs: number;
   sourceSequence: string;
 }
 
@@ -90,6 +91,7 @@ export class KalshiPythValueService {
     return {
       price: evidence.price,
       publishedAtMs: evidence.sourceTsMs,
+      receivedAtMs: evidence.receivedAtMs,
       sourceSequence: evidence.sourceSequence,
     };
   }

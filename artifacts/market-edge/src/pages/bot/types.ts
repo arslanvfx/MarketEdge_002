@@ -1515,6 +1515,7 @@ export interface SmartExitLiveHealth {
 }
 
 export interface SmartExitEvaluation {
+  source: string;
   id?: string;
   symbol: string;
   windowKey?: string;

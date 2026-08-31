@@ -1,5 +1,6 @@
 /**
- * A deliberately independent Coinbase REST evidence feed for Smart Exit.
+ * Settlement-aligned Kalshi spot plus independent Coinbase microstructure for
+ * Smart Exit.
  *
  * This module does not use crypto-data.ts (or any of its caches): an exit
  * decision must be auditable as a fresh ticker, tape, and L2 observation.
@@ -25,6 +26,17 @@ export type SmartExitEvidenceFetch = (
   },
 ) => Promise<SmartExitEvidenceFetchResponse>;
 
+export interface SmartExitSettlementPublication {
+  readonly price: number;
+  readonly publishedAtMs: number;
+  readonly receivedAtMs: number;
+  readonly sourceSequence: string;
+}
+
+export type SmartExitSettlementRead = (
+  product: string,
+) => SmartExitSettlementPublication | Promise<SmartExitSettlementPublication>;
+
 export interface SmartExitEvidenceCollectorOptions {
   /** Injectable clock, returning Unix milliseconds. */
   readonly now?: () => number;
@@ -37,6 +49,8 @@ export interface SmartExitEvidenceCollectorOptions {
   readonly bookLevels?: number;
   readonly tradeLimit?: number;
   readonly requestTimeoutMs?: number;
+  readonly readPyth?: SmartExitSettlementRead;
+  readonly readCfBenchmarks?: SmartExitSettlementRead;
 }
 
 export interface SmartExitEvidenceCollectorHealth {
@@ -47,6 +61,9 @@ export interface SmartExitEvidenceCollectorHealth {
     readonly source: SmartExitEvidence["source"];
     readonly observedAtSeconds: number;
     readonly ready: boolean;
+    readonly reason: string | null;
+    readonly spotReceivedAtSeconds: number | null;
+    readonly spotObservedAtSeconds: number | null;
   }>>;
 }
 
@@ -56,6 +73,9 @@ type State = {
   prices: PriceSample[];
   trades: TradeSample[];
   seenTradeIds: Set<string>;
+  lastSpotSourceSequence: string | null;
+  lastSpotSourceAtSeconds: number | null;
+  lastSpotReceivedAtSeconds: number | null;
   latest: SmartExitEvidence | null;
 };
 type FetchResult = { body: unknown | null; receivedAtSeconds: number | null };
@@ -80,6 +100,7 @@ function emptyEvidence(
 ): SmartExitEvidence {
   return {
     source, observedAtSeconds,
+    spotSourceSequence: null, spotTrajectoryAtSeconds: null, failureReason: null,
     spotReceivedAtSeconds: null, tapeReceivedAtSeconds: null, bookReceivedAtSeconds: null,
     spotObservedAtSeconds: null, tapeObservedAtSeconds: null,
     bookObservedAtSeconds: null, underlyingPrice: null,
@@ -103,6 +124,8 @@ export class KalshiSmartExitEvidenceCollector {
   private readonly bookLevels: number;
   private readonly tradeLimit: number;
   private readonly requestTimeoutMs: number;
+  private readonly readPyth: SmartExitSettlementRead | null;
+  private readonly readCfBenchmarks: SmartExitSettlementRead | null;
   private readonly states = new Map<string, State>();
 
   constructor(options: SmartExitEvidenceCollectorOptions = {}) {
@@ -116,12 +139,22 @@ export class KalshiSmartExitEvidenceCollector {
     this.bookLevels = Math.max(1, Math.floor(options.bookLevels ?? 10));
     this.tradeLimit = Math.max(1, Math.floor(options.tradeLimit ?? 100));
     this.requestTimeoutMs = Math.max(100, Math.floor(options.requestTimeoutMs ?? 800));
+    this.readPyth = options.readPyth ?? null;
+    this.readCfBenchmarks = options.readCfBenchmarks ?? null;
   }
 
   private state(symbol: string): State {
     let state = this.states.get(symbol);
     if (!state) {
-      state = { prices: [], trades: [], seenTradeIds: new Set(), latest: null };
+      state = {
+        prices: [],
+        trades: [],
+        seenTradeIds: new Set(),
+        lastSpotSourceSequence: null,
+        lastSpotSourceAtSeconds: null,
+        lastSpotReceivedAtSeconds: null,
+        latest: null,
+      };
       this.states.set(symbol, state);
     }
     return state;
@@ -145,143 +178,56 @@ export class KalshiSmartExitEvidenceCollector {
    * fields derived from that subfeed; no cached quote or neutral value is used.
    */
   async collect(symbol: string, product: string, marketWinProbability: number | null): Promise<SmartExitEvidence> {
-    const startedAtSeconds = this.now() / 1_000;
     const currentMarketProbability = marketProbability(marketWinProbability);
     if (isPythProduct(product)) {
-      const evidence = emptyEvidence("unsupported", startedAtSeconds, currentMarketProbability);
-      this.state(symbol).latest = evidence;
-      return evidence;
+      return this.collectPyth(symbol, product, currentMarketProbability);
     }
 
     const encoded = encodeURIComponent(product);
-    const [tickerResult, tradesResult, bookResult] = await Promise.all([
-      this.json(`${COINBASE_REST}/products/${encoded}/ticker`),
+    const [spotEvidence, tradesResult, bookResult] = await Promise.all([
+      this.collectCfBenchmarks(symbol, product, currentMarketProbability),
       this.json(`${COINBASE_REST}/products/${encoded}/trades?limit=${this.tradeLimit}`),
       this.json(`${COINBASE_REST}/products/${encoded}/book?level=2`),
     ]);
     const observedAtSeconds = this.now() / 1_000;
-    const tickerRaw = tickerResult.body;
     const tradesRaw = tradesResult.body;
     const bookRaw = bookResult.body;
     const state = this.state(symbol);
-    const ticker = this.ticker(tickerRaw);
-    const previous = state.latest;
-    const tickerIsMonotonic = ticker?.at != null
-      && (previous?.spotObservedAtSeconds == null || ticker.at >= previous.spotObservedAtSeconds);
-    if (ticker && tickerIsMonotonic) {
-      const latestPrice = state.prices.at(-1);
-      if (
-        latestPrice == null
-        || ticker.at! > latestPrice.at
-        || Math.abs(ticker.price - latestPrice.price) > Math.max(1e-12, ticker.price * 1e-12)
-      ) {
-        state.prices.push({ at: ticker.at!, price: ticker.price });
-      }
-      this.prunePrices(state, observedAtSeconds);
-    }
     const tapeObservedAtSeconds = this.addTrades(state, tradesRaw, observedAtSeconds);
     this.pruneTrades(state, observedAtSeconds);
-    const tapePrices = state.trades
-      .map((trade) => ({ at: trade.at, price: trade.price }))
-      .sort((a, b) => a.at - b.at);
-    const calculationPrices = ticker && tickerIsMonotonic
-      ? [...tapePrices, { at: ticker.at!, price: ticker.price }].sort((a, b) => a.at - b.at)
-      : tapePrices;
     const bookValid = this.bookIsValid(bookRaw);
     const evidence: SmartExitEvidence = {
-      ...emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability),
-      spotReceivedAtSeconds: ticker && tickerIsMonotonic ? tickerResult.receivedAtSeconds : null,
+      ...spotEvidence,
+      observedAtSeconds,
       tapeReceivedAtSeconds: Array.isArray(tradesRaw) ? tradesResult.receivedAtSeconds : null,
       bookReceivedAtSeconds: bookValid ? bookResult.receivedAtSeconds : null,
-      spotObservedAtSeconds: tickerIsMonotonic ? ticker!.at : null,
       tapeObservedAtSeconds,
       // Coinbase's REST L2 response has no exchange timestamp. Receipt time is
       // explicit and may be used only for this component.
       bookObservedAtSeconds: bookValid ? bookResult.receivedAtSeconds : null,
-      underlyingPrice: tickerIsMonotonic ? ticker!.price : null,
-      volatilityLogReturnPerSqrtSecond: tickerIsMonotonic ? this.volatility(calculationPrices) : null,
-      momentumLogReturn: tickerIsMonotonic ? this.momentum(calculationPrices, observedAtSeconds) : null,
-      momentumWindowSeconds: tickerIsMonotonic && this.momentum(calculationPrices, observedAtSeconds) !== null
-        ? this.momentumWindowSeconds : null,
       tradeFlowImbalance: tapeObservedAtSeconds != null ? this.tradeFlow(state.trades) : null,
       bookImbalance: this.bookImbalance(bookRaw),
+      marketWinProbability: currentMarketProbability,
     };
     state.latest = evidence;
     return evidence;
   }
 
   /**
-   * Lightweight hot-lane sample. It fetches only the ticker and overlays the
-   * last slow tape/L2 snapshot; failed spot transport is explicit, never cached
-   * as if it were fresh.
+   * Lightweight hot-lane sample. It reads only the settlement-aligned Kalshi
+   * feed and overlays the last slow tape/L2 snapshot; failed spot transport is
+   * explicit, never cached as if it were fresh.
    */
   async collectSpot(
     symbol: string,
     product: string,
     marketWinProbability: number | null,
   ): Promise<SmartExitEvidence> {
-    const observedAtSeconds = this.now() / 1_000;
     const currentMarketProbability = marketProbability(marketWinProbability);
     if (isPythProduct(product)) {
-      const evidence = emptyEvidence("unsupported", observedAtSeconds, currentMarketProbability);
-      this.state(symbol).latest = evidence;
-      return evidence;
+      return this.collectPyth(symbol, product, currentMarketProbability);
     }
-    const state = this.state(symbol);
-    const previous = state.latest;
-    const encoded = encodeURIComponent(product);
-    const tickerResult = await this.json(`${COINBASE_REST}/products/${encoded}/ticker`);
-    const ticker = this.ticker(tickerResult.body);
-    // Coinbase's REST ticker `time` is the last trade time. On thinner products
-    // it can remain unchanged for tens of seconds even though this request is a
-    // fresh, successful spot observation. The hot lane therefore timestamps
-    // the observation at receipt. Duplicate prices are still excluded from the
-    // distinct trajectory below, so polling does not manufacture movement.
-    const spotObservedAtSeconds = tickerResult.receivedAtSeconds;
-    const tickerIsMonotonic = ticker != null
-      && spotObservedAtSeconds != null
-      && (previous?.spotReceivedAtSeconds == null
-        || spotObservedAtSeconds >= previous.spotReceivedAtSeconds);
-    if (!ticker || !tickerIsMonotonic) {
-      const failed = {
-        ...(previous ?? emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability)),
-        observedAtSeconds,
-        spotReceivedAtSeconds: null,
-        spotObservedAtSeconds: null,
-        underlyingPrice: null,
-        marketWinProbability: currentMarketProbability,
-      };
-      state.latest = failed;
-      return failed;
-    }
-    const latestPrice = state.prices.at(-1);
-    if (
-      latestPrice == null
-      || Math.abs(ticker.price - latestPrice.price) > Math.max(1e-12, ticker.price * 1e-12)
-    ) {
-      state.prices.push({ at: spotObservedAtSeconds!, price: ticker.price });
-    }
-    this.prunePrices(state, observedAtSeconds);
-    const volatility = this.volatility(state.prices)
-      ?? previous?.volatilityLogReturnPerSqrtSecond
-      ?? 0;
-    const momentum = this.momentum(state.prices, observedAtSeconds)
-      ?? previous?.momentumLogReturn
-      ?? 0;
-    const evidence: SmartExitEvidence = {
-      ...(previous ?? emptyEvidence("coinbase-rest", observedAtSeconds, currentMarketProbability)),
-      source: "coinbase-rest",
-      observedAtSeconds,
-      spotReceivedAtSeconds: tickerResult.receivedAtSeconds,
-      spotObservedAtSeconds,
-      underlyingPrice: ticker.price,
-      volatilityLogReturnPerSqrtSecond: volatility,
-      momentumLogReturn: momentum,
-      momentumWindowSeconds: this.momentumWindowSeconds,
-      marketWinProbability: currentMarketProbability,
-    };
-    state.latest = evidence;
-    return evidence;
+    return this.collectCfBenchmarks(symbol, product, currentMarketProbability);
   }
 
   latest(symbol: string): SmartExitEvidence | null {
@@ -291,15 +237,34 @@ export class KalshiSmartExitEvidenceCollector {
   health(): SmartExitEvidenceCollectorHealth {
     let priceSamples = 0;
     let tradeSamples = 0;
-    const latestBySymbol: Record<string, { source: SmartExitEvidence["source"]; observedAtSeconds: number; ready: boolean }> = {};
+    const latestBySymbol: Record<string, {
+      source: SmartExitEvidence["source"];
+      observedAtSeconds: number;
+      ready: boolean;
+      reason: string | null;
+      spotReceivedAtSeconds: number | null;
+      spotObservedAtSeconds: number | null;
+    }> = {};
     for (const [symbol, state] of this.states) {
       priceSamples += state.prices.length;
       tradeSamples += state.trades.length;
       if (state.latest) {
+        const pythReady = state.latest.source === "kalshi-pyth"
+          && state.latest.underlyingPrice !== null
+          && state.latest.volatilityLogReturnPerSqrtSecond !== null
+          && state.latest.momentumLogReturn !== null;
+        const cfBenchmarksReady = state.latest.source === "kalshi-cfbenchmarks"
+          && state.latest.underlyingPrice !== null
+          && state.latest.volatilityLogReturnPerSqrtSecond !== null
+          && state.latest.momentumLogReturn !== null
+          && state.latest.tradeFlowImbalance !== null
+          && state.latest.bookImbalance !== null;
         latestBySymbol[symbol] = {
           source: state.latest.source, observedAtSeconds: state.latest.observedAtSeconds,
-          ready: state.latest.underlyingPrice !== null && state.latest.volatilityLogReturnPerSqrtSecond !== null &&
-            state.latest.momentumLogReturn !== null && state.latest.tradeFlowImbalance !== null && state.latest.bookImbalance !== null,
+          ready: pythReady || cfBenchmarksReady,
+          reason: state.latest.failureReason ?? null,
+          spotReceivedAtSeconds: state.latest.spotReceivedAtSeconds,
+          spotObservedAtSeconds: state.latest.spotObservedAtSeconds,
         };
       }
     }
@@ -316,11 +281,126 @@ export class KalshiSmartExitEvidenceCollector {
     this.clear();
   }
 
-  private ticker(raw: unknown): { price: number; at: number | null } | null {
-    if (!raw || typeof raw !== "object") return null;
-    const value = raw as Record<string, unknown>;
-    const price = number(value.price);
-    return price !== null && price > 0 ? { price, at: timestampSeconds(value.time) } : null;
+  private async collectPyth(
+    symbol: string,
+    product: string,
+    marketWinProbability: number | null,
+  ): Promise<SmartExitEvidence> {
+    return this.collectSettlementSpot(
+      symbol,
+      product,
+      marketWinProbability,
+      "kalshi-pyth",
+      "Kalshi Pyth",
+      this.readPyth,
+    );
+  }
+
+  private async collectCfBenchmarks(
+    symbol: string,
+    product: string,
+    marketWinProbability: number | null,
+  ): Promise<SmartExitEvidence> {
+    return this.collectSettlementSpot(
+      symbol,
+      product,
+      marketWinProbability,
+      "kalshi-cfbenchmarks",
+      "Kalshi CF Benchmarks",
+      this.readCfBenchmarks,
+    );
+  }
+
+  private async collectSettlementSpot(
+    symbol: string,
+    product: string,
+    marketWinProbability: number | null,
+    source: "kalshi-cfbenchmarks" | "kalshi-pyth",
+    sourceLabel: string,
+    reader: SmartExitSettlementRead | null,
+  ): Promise<SmartExitEvidence> {
+    const nowMs = this.now();
+    const nowSeconds = nowMs / 1_000;
+    const state = this.state(symbol);
+    const previous = state.latest;
+    if (!reader) {
+      const unsupported = {
+        ...emptyEvidence("unsupported", nowSeconds, marketWinProbability),
+        failureReason: `${sourceLabel} evidence reader is not configured`,
+      };
+      state.latest = unsupported;
+      return unsupported;
+    }
+    let publication: SmartExitSettlementPublication;
+    try {
+      publication = await reader(product);
+    } catch (error) {
+      const failed = {
+        ...emptyEvidence(source, nowSeconds, marketWinProbability),
+        failureReason: error instanceof Error ? error.message : String(error),
+      };
+      state.latest = failed;
+      return failed;
+    }
+    const publishedAtSeconds = publication.publishedAtMs / 1_000;
+    const receivedAtSeconds = publication.receivedAtMs / 1_000;
+    const valid = Number.isFinite(publication.price)
+      && publication.price > 0
+      && Number.isFinite(publishedAtSeconds)
+      && publishedAtSeconds > 0
+      && publishedAtSeconds <= nowSeconds + 5
+      && Number.isFinite(receivedAtSeconds)
+      && receivedAtSeconds > 0
+      && receivedAtSeconds <= nowSeconds + 1
+      && typeof publication.sourceSequence === "string"
+      && publication.sourceSequence.length > 0;
+    if (!valid) {
+      const failed = {
+        ...emptyEvidence(source, nowSeconds, marketWinProbability),
+        failureReason: `${sourceLabel} publication is malformed or clock-invalid`,
+      };
+      state.latest = failed;
+      return failed;
+    }
+    if (
+      (state.lastSpotSourceAtSeconds != null
+        && publishedAtSeconds < state.lastSpotSourceAtSeconds)
+      || (state.lastSpotReceivedAtSeconds != null
+        && receivedAtSeconds < state.lastSpotReceivedAtSeconds)
+    ) {
+      const failed = {
+        ...emptyEvidence(source, nowSeconds, marketWinProbability),
+        failureReason: `${sourceLabel} publication regressed`,
+      };
+      state.latest = failed;
+      return failed;
+    }
+    const distinctPublication = publication.sourceSequence !== state.lastSpotSourceSequence;
+    if (distinctPublication) {
+      state.prices.push({ at: receivedAtSeconds, price: publication.price });
+      state.lastSpotSourceSequence = publication.sourceSequence;
+      state.lastSpotSourceAtSeconds = publishedAtSeconds;
+      state.lastSpotReceivedAtSeconds = receivedAtSeconds;
+    }
+    this.prunePrices(state, nowSeconds);
+    const volatility = this.volatility(state.prices);
+    const momentum = this.momentum(state.prices, nowSeconds);
+    const trajectoryAtSeconds = distinctPublication
+      ? receivedAtSeconds
+      : previous?.spotTrajectoryAtSeconds ?? receivedAtSeconds;
+    const evidence: SmartExitEvidence = {
+      ...emptyEvidence(source, nowSeconds, marketWinProbability),
+      spotSourceSequence: publication.sourceSequence,
+      spotTrajectoryAtSeconds: trajectoryAtSeconds,
+      spotReceivedAtSeconds: receivedAtSeconds,
+      spotObservedAtSeconds: publishedAtSeconds,
+      underlyingPrice: publication.price,
+      volatilityLogReturnPerSqrtSecond: volatility,
+      momentumLogReturn: momentum,
+      momentumWindowSeconds: momentum == null ? null : this.momentumWindowSeconds,
+    };
+    state.latest = evidence;
+    return evidence;
   }
 
   private addTrades(state: State, raw: unknown, receiptAt: number): number | null {

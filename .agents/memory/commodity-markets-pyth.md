@@ -11,10 +11,12 @@ Commodity defs carry `category: "commodity"` and a `PYTH:`-prefixed product id;
 all data fetchers route on that prefix.
 
 **Why Pyth:** Kalshi settles KXGOLD15M/KXSILVER15M/KXWTI15M against Pyth
-(settlement_sources "Pyth - Gold/Silver/WTI"), so Pyth spot/candles are
-settlement-consistent by construction. Yahoo WTI futures were minutes stale;
-Pyth `Commodities.Index.PYTHOIL/USD` is stale too — use `Commodities.USOILSPOT`
-for WTI, `Metal.XAU/USD` gold, `Metal.XAG/USD` silver.
+(settlement_sources "Pyth - Gold/Silver/WTI"), so execution-safety decisions
+must use Kalshi's authenticated Pyth publications rather than unrelated
+Coinbase/Yahoo movement. The authenticated Kalshi identities are
+`Metal.XAU/USD`, `Metal.XAG/USD`, and `Commodities.Index.PYTHOIL/USD`.
+External Hermes market-data routes may use a different WTI identity; never
+substitute that identity for Kalshi's own execution-safety stream.
 
 **How to apply:**
 - Spot: Hermes v2 `/updates/price/latest` (feed id resolved once via
@@ -29,6 +31,11 @@ for WTI, `Metal.XAU/USD` gold, `Metal.XAG/USD` silver.
   neutral at zero volume.
 - Order book: none exists (oracle, not exchange) — return empty book, never
   throw; imbalance features go neutral.
+- Smart Exit: source publication time governs freshness; immutable publication
+  identity prevents repeated local reads from inventing movement; local receipt
+  time may order distinct same-timestamp publications. Coinbase tape/L2 are not
+  applicable and must stay absent, not neutral. A live exit still requires
+  fresh authenticated Kalshi held-side depth covering the full position.
 - Settlement fallback close price: route `fetchWindowClosePrice` by prefix to
   the Pyth 1-min candle for the window's last minute (same slot convention as
   the Coinbase path).

@@ -4,21 +4,31 @@ import { KalshiSmartExitEvidenceCollector, type SmartExitEvidenceFetch } from ".
 
 const reply = (body: unknown) => ({ ok: true, json: async () => body });
 
-test("collects independent Coinbase ticker, tape, and L2 evidence", async () => {
+test("collects Kalshi CF spot with independent Coinbase tape and L2 evidence", async () => {
   let clock = 1_000_000;
   const fetch: SmartExitEvidenceFetch = async (url) => {
-    if (url.includes("/ticker")) return reply({ price: "110", time: "1970-01-01T00:16:40.000Z" });
     if (url.includes("/trades")) return reply([
       { trade_id: 2, price: "110", size: "3", side: "sell", time: "1970-01-01T00:16:40.000Z" },
       { trade_id: 1, price: "109", size: "1", side: "buy", time: "1970-01-01T00:16:40.000Z" },
     ]);
     return reply({ bids: [["109", "4"]], asks: [["111", "1"]] });
   };
-  const collector = new KalshiSmartExitEvidenceCollector({ fetch, now: () => clock, momentumWindowSeconds: 1 });
+  const collector = new KalshiSmartExitEvidenceCollector({
+    fetch,
+    now: () => clock,
+    momentumWindowSeconds: 1,
+    readCfBenchmarks: async () => ({
+      price: 110,
+      publishedAtMs: clock,
+      receivedAtMs: clock,
+      sourceSequence: `BRTI:${clock}:110`,
+    }),
+  });
   await collector.collect("BTC", "BTC-USD", 0.6);
   clock += 1_000;
   const evidence = await collector.collect("BTC", "BTC-USD", 0.6);
   assert.equal(evidence.underlyingPrice, 110);
+  assert.equal(evidence.source, "kalshi-cfbenchmarks");
   assert.equal(evidence.spotReceivedAtSeconds, 1001);
   assert.equal(evidence.tapeReceivedAtSeconds, 1001);
   assert.equal(evidence.bookReceivedAtSeconds, 1001);
@@ -28,7 +38,7 @@ test("collects independent Coinbase ticker, tape, and L2 evidence", async () => 
   assert.equal(collector.health().tradeSamples, 2); // repeated tape IDs dedupe
 });
 
-test("unsupported Pyth products never become tape or book evidence", async () => {
+test("Pyth products require an authoritative reader and never synthesize tape or book evidence", async () => {
   const collector = new KalshiSmartExitEvidenceCollector({
     now: () => 1_000,
     fetch: async () => { throw new Error("must not fetch"); },
@@ -42,13 +52,114 @@ test("unsupported Pyth products never become tape or book evidence", async () =>
   assert.equal(collector.latest("GOLD"), null);
 });
 
+test("Kalshi Pyth evidence uses distinct upstream publications and fails closed on stale transport", async () => {
+  let clock = 20_000;
+  let publication = {
+    price: 100,
+    publishedAtMs: 20_000,
+    receivedAtMs: 20_000,
+    sourceSequence: "20000:100",
+  };
+  const collector = new KalshiSmartExitEvidenceCollector({
+    now: () => clock,
+    momentumWindowSeconds: 2,
+    readPyth: async () => publication,
+  });
+  await collector.collectSpot("GOLD", "PYTH:Metal.XAU/USD", null);
+  clock += 1_000;
+  const duplicate = await collector.collectSpot("GOLD", "PYTH:Metal.XAU/USD", null);
+  assert.equal(duplicate.source, "kalshi-pyth");
+  assert.equal(duplicate.spotTrajectoryAtSeconds, 20);
+  assert.equal(collector.health().priceSamples, 1);
+
+  publication = {
+    price: 99.8,
+    publishedAtMs: 21_000,
+    receivedAtMs: 21_000,
+    sourceSequence: "21000:99.8",
+  };
+  await collector.collectSpot("GOLD", "PYTH:Metal.XAU/USD", null);
+  clock += 1_000;
+  publication = {
+    price: 99.6,
+    publishedAtMs: 22_000,
+    receivedAtMs: 22_000,
+    sourceSequence: "22000:99.6",
+  };
+  const ready = await collector.collectSpot("GOLD", "PYTH:Metal.XAU/USD", null);
+  assert.equal(ready.momentumLogReturn !== null, true);
+  assert.equal(ready.tradeFlowImbalance, null);
+  assert.equal(ready.bookImbalance, null);
+  assert.equal(collector.health().priceSamples, 3);
+  assert.equal(
+    collector.health().latestBySymbol.GOLD?.spotObservedAtSeconds,
+    ready.spotObservedAtSeconds,
+  );
+
+  clock += 1_000;
+  publication = {
+    price: 99.5,
+    publishedAtMs: 21_000,
+    receivedAtMs: 21_000,
+    sourceSequence: "regressed",
+  };
+  const regressed = await collector.collectSpot("GOLD", "PYTH:Metal.XAU/USD", null);
+  assert.equal(regressed.underlyingPrice, null);
+  assert.match(regressed.failureReason ?? "", /regressed/);
+
+  publication = {
+    price: 99.4,
+    publishedAtMs: 21_500,
+    receivedAtMs: 23_000,
+    sourceSequence: "still-old-after-failure",
+  };
+  const stillRegressed = await collector.collectSpot("GOLD", "PYTH:Metal.XAU/USD", null);
+  assert.equal(stillRegressed.underlyingPrice, null);
+  assert.match(stillRegressed.failureReason ?? "", /regressed/);
+});
+
+test("GOLD, SILVER, and WTI all route through Kalshi Pyth publication identity", async () => {
+  const products = [
+    "PYTH:Metal.XAU/USD",
+    "PYTH:Metal.XAG/USD",
+    "PYTH:Commodities.Index.PYTHOIL/USD",
+  ];
+  for (const [index, product] of products.entries()) {
+    const nowMs = 50_000 + index;
+    const collector = new KalshiSmartExitEvidenceCollector({
+      now: () => nowMs,
+      readPyth: async (requestedProduct) => {
+        assert.equal(requestedProduct, product);
+        return {
+          price: 70 + index,
+          publishedAtMs: nowMs - 50,
+          receivedAtMs: nowMs - 25,
+          sourceSequence: `${product}:${index}`,
+        };
+      },
+    });
+    const result = await collector.collectSpot(`commodity-${index}`, product, null);
+    assert.equal(result.source, "kalshi-pyth");
+    assert.equal(result.spotSourceSequence, `${product}:${index}`);
+    assert.equal(result.spotTrajectoryAtSeconds, (nowMs - 25) / 1_000);
+  }
+});
+
 test("a failed subfeed is null rather than a cached or neutral substitute", async () => {
   const fetch: SmartExitEvidenceFetch = async (url) => {
-    if (url.includes("/ticker")) return reply({ price: "100", time: "1970-01-01T00:00:01.000Z" });
     if (url.includes("/trades")) return { ok: false, json: async () => ({}) };
     return reply({ bids: [["99", "2"]], asks: [["101", "2"]] });
   };
-  const collector = new KalshiSmartExitEvidenceCollector({ fetch, now: () => 1_000 });
+  const collector = new KalshiSmartExitEvidenceCollector({
+    fetch,
+    now: () => 1_000,
+    readCfBenchmarks: async () => ({
+      price: 100,
+      publishedAtMs: 1_000,
+      receivedAtMs: 1_000,
+      sourceSequence: "BRTI:1000:100",
+    }),
+  });
   const evidence = await collector.collect("BTC", "BTC-USD", 0.5);
   assert.equal(evidence.underlyingPrice, 100);
   assert.equal(evidence.tapeObservedAtSeconds, null);
@@ -58,13 +169,21 @@ test("a failed subfeed is null rather than a cached or neutral substitute", asyn
 
 test("freshly received quiet tape keeps transport freshness separate from event age", async () => {
   const fetch: SmartExitEvidenceFetch = async (url) => {
-    if (url.includes("/ticker")) return reply({ price: "100", time: "1970-01-01T00:01:40.000Z" });
     if (url.includes("/trades")) return reply([
       { trade_id: 1, price: "100", size: "1", side: "sell", time: "1970-01-01T00:01:30.000Z" },
     ]);
     return reply({ bids: [["99", "2"]], asks: [["101", "2"]] });
   };
-  const collector = new KalshiSmartExitEvidenceCollector({ fetch, now: () => 100_000 });
+  const collector = new KalshiSmartExitEvidenceCollector({
+    fetch,
+    now: () => 100_000,
+    readCfBenchmarks: async () => ({
+      price: 100,
+      publishedAtMs: 100_000,
+      receivedAtMs: 100_000,
+      sourceSequence: "BRTI:100000:100",
+    }),
+  });
   const evidence = await collector.collect("BTC", "BTC-USD", 0.5);
   assert.equal(evidence.tapeReceivedAtSeconds, 100);
   assert.equal(evidence.tapeObservedAtSeconds, 90);
@@ -74,10 +193,6 @@ test("bounded pre-position collection is ready for a newly opened position and s
   let clock = 20_000;
   let tick = 0;
   const fetch: SmartExitEvidenceFetch = async (url) => {
-    if (url.includes("/ticker")) {
-      tick += 1;
-      return reply({ price: String(100 + tick), time: new Date(clock).toISOString() });
-    }
     if (url.includes("/trades")) return reply([
       { trade_id: `old-${tick}`, price: "99", size: "1", side: "buy", time: new Date(clock - 16_000).toISOString() },
       { trade_id: `new-${tick}`, price: "101", size: "2", side: "sell", time: new Date(clock).toISOString() },
@@ -85,7 +200,16 @@ test("bounded pre-position collection is ready for a newly opened position and s
     return reply({ bids: [["100", "2"]], asks: [["102", "1"]] });
   };
   const collector = new KalshiSmartExitEvidenceCollector({
-    fetch, now: () => clock, momentumWindowSeconds: 15, maxPriceSamples: 3, maxTradeSamples: 4,
+    fetch, now: () => clock, momentumWindowSeconds: 3, maxPriceSamples: 4, maxTradeSamples: 4,
+    readCfBenchmarks: async () => {
+      tick += 1;
+      return {
+        price: 100 + tick,
+        publishedAtMs: clock,
+        receivedAtMs: clock,
+        sourceSequence: `ZECUSD_RTI:${clock}:${100 + tick}`,
+      };
+    },
   });
   for (let index = 0; index < 5; index += 1) {
     await collector.collect("ZEC", "ZEC-USD", null);
@@ -95,21 +219,22 @@ test("bounded pre-position collection is ready for a newly opened position and s
   assert.notEqual(atOpen.volatilityLogReturnPerSqrtSecond, null);
   assert.notEqual(atOpen.momentumLogReturn, null);
   assert.notEqual(atOpen.tradeFlowImbalance, null);
-  assert.equal(collector.health().priceSamples <= 3, true);
+  assert.equal(collector.health().priceSamples <= 4, true);
   assert.equal(collector.health().tradeSamples <= 4, true);
 });
 
-test("hot ticker observations stay fresh while duplicate prices do not manufacture movement", async () => {
+test("hot Kalshi CF observations preserve publication identity and do not manufacture movement", async () => {
   let clock = 100_000;
-  let price = "100";
+  let publication = {
+    price: 100,
+    publishedAtMs: 100_000,
+    receivedAtMs: 100_000,
+    sourceSequence: "BNBUSD_RTI:100000:100",
+  };
   const collector = new KalshiSmartExitEvidenceCollector({
     now: () => clock,
     momentumWindowSeconds: 1,
-    fetch: async () => reply({
-      price,
-      // Coinbase may return the same old last-trade timestamp repeatedly.
-      time: "1970-01-01T00:00:01.000Z",
-    }),
+    readCfBenchmarks: async () => publication,
   });
 
   const first = await collector.collectSpot("BNB", "BNB-USD", null);
@@ -117,14 +242,45 @@ test("hot ticker observations stay fresh while duplicate prices do not manufactu
   const duplicate = await collector.collectSpot("BNB", "BNB-USD", null);
 
   assert.equal(first.spotObservedAtSeconds, 100);
-  assert.equal(duplicate.spotObservedAtSeconds, 100.5);
-  assert.equal(duplicate.volatilityLogReturnPerSqrtSecond, 0);
-  assert.equal(duplicate.momentumLogReturn, 0);
+  assert.equal(duplicate.spotObservedAtSeconds, 100);
+  assert.equal(duplicate.spotTrajectoryAtSeconds, 100);
   assert.equal(collector.health().priceSamples, 1);
 
-  price = "99";
   clock += 500;
+  publication = {
+    price: 99,
+    publishedAtMs: 101_000,
+    receivedAtMs: 101_000,
+    sourceSequence: "BNBUSD_RTI:101000:99",
+  };
+  clock = 101_000;
   const changed = await collector.collectSpot("BNB", "BNB-USD", null);
   assert.equal(changed.spotObservedAtSeconds, 101);
   assert.equal(collector.health().priceSamples, 2);
+});
+
+test("all nine crypto products route through Kalshi CF Benchmarks identities", async () => {
+  const products = [
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "HYPE-USD",
+    "BNB-USD", "DOGE-USD", "NEAR-USD", "ZEC-USD",
+  ];
+  for (const [index, product] of products.entries()) {
+    const nowMs = 200_000 + index;
+    const collector = new KalshiSmartExitEvidenceCollector({
+      now: () => nowMs,
+      readCfBenchmarks: async (requestedProduct) => {
+        assert.equal(requestedProduct, product);
+        return {
+          price: 1_000 + index,
+          publishedAtMs: nowMs - 20,
+          receivedAtMs: nowMs - 10,
+          sourceSequence: `${product}:${nowMs}`,
+        };
+      },
+    });
+    const result = await collector.collectSpot(`crypto-${index}`, product, null);
+    assert.equal(result.source, "kalshi-cfbenchmarks");
+    assert.equal(result.underlyingPrice, 1_000 + index);
+    assert.equal(result.spotSourceSequence, `${product}:${nowMs}`);
+  }
 });
