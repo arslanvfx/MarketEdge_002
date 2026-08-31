@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getAuth } from "@clerk/express";
 import { getAiSpendLevel, setAiSpendLevel, getStockAiEnabled, setStockAiEnabled, AI_SPEND_LABELS, isAiFeatureEnabled, type AiSpendLevel } from "../lib/ai-spend";
 import { kalshiTargetCache } from "../lib/crypto-kalshi";
+import { parseKalshiFloorStrike } from "../lib/crypto-kalshi-market-selection.ts";
 import {
   fetchCryptoPredictions,
   fetchCryptoPrices,
@@ -441,12 +442,10 @@ async function fetchKalshiTargetRoute(symbol: string): Promise<KalshiTargetPaylo
   if (!resp.ok) return { available: false, targetPrice: null };
 
   const body = (await resp.json()) as { markets?: Record<string, unknown>[] };
-  let found: Record<string, unknown> | null = null;
-  let targetPrice: number | null = null;
-  for (const m of body.markets ?? []) {
-    const strike = m.floor_strike as number | undefined;
-    if (typeof strike === "number" && strike > 0) { found = m; targetPrice = strike; break; }
-  }
+  const found = body.markets?.[0] ?? null;
+  const targetPrice = parseKalshiFloorStrike(
+    found?.floor_strike as number | string | undefined,
+  );
   if (!found) {
     // Do NOT cache this result. The new window's market often takes 10-30 s
     // to be published after the boundary fires. Caching available:false for

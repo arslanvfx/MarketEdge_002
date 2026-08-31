@@ -4,6 +4,10 @@
 
 import { logger } from "./logger";
 import { hasKalshiCredentials, makeKalshiSignedHeaders } from "./kalshi-auth.ts";
+import {
+  parseKalshiFloorStrike,
+  selectKalshiMarket,
+} from "./crypto-kalshi-market-selection.ts";
 
 // Map of symbol → Kalshi series ticker for coins that have 15-min markets.
 // KALSHI_SERIES lives in market-defs.ts (pure module) alongside the market
@@ -258,10 +262,14 @@ export async function fetchKalshiTarget(
   }
 
   try {
+    const marketPath = "/trade-api/v2/markets";
+    const marketHeaders = hasKalshiCredentials()
+      ? makeKalshiSignedHeaders("GET", marketPath, false)
+      : { accept: "application/json" };
     const resp = await fetch(
-      `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${series}&status=open&limit=10`,
+      `https://api.elections.kalshi.com${marketPath}?series_ticker=${series}&status=open&limit=10`,
       {
-        headers: { accept: "application/json" },
+        headers: marketHeaders,
         signal: signal
           ? AbortSignal.any([signal, AbortSignal.timeout(5000)])
           : AbortSignal.timeout(5000),
@@ -302,37 +310,26 @@ export async function fetchKalshiTarget(
       }[];
     };
 
-    const markets = (body.markets ?? []).filter(
-      (m) => Number(m.floor_strike) > 0,
-    );
+    // Kalshi can publish the current contract with live quotes while its
+    // target is still "TBD" and floor_strike is absent. Keep that market for
+    // ticker/quote selection; target-dependent trading remains fail-closed
+    // because the cached target value below stays null.
+    const markets = body.markets ?? [];
 
-    let selected: (typeof markets)[0] | undefined;
-
-    if (targetTime) {
-      const targetMs = targetTime.getTime();
-      const marketsWithCloseTime = markets.filter((m) => m.close_time);
-      if (marketsWithCloseTime.length > 0) {
-        let bestDiff = Infinity;
-        for (const m of marketsWithCloseTime) {
-          const diff = Math.abs(new Date(m.close_time!).getTime() - targetMs);
-          if (diff < 8 * 60_000 && diff < bestDiff) { bestDiff = diff; selected = m; }
-        }
-        if (!selected) {
-          logger.info("[kalshi] %s: no market within 8 min of %s — will retry", sym, targetTime.toISOString());
-          return null;
-        }
-      } else {
-        selected = markets[0];
-        if (selected) {
-          logger.warn({ sym, floor_strike: selected.floor_strike }, "[kalshi] close_time absent from API response — using first market. Consider checking the API format.");
-        }
-      }
-    } else {
-      selected = markets[0];
+    const selected = selectKalshiMarket(markets, targetTime);
+    if (targetTime && !selected) {
+      logger.info("[kalshi] %s: no market within 8 min of %s — will retry", sym, targetTime.toISOString());
+      return null;
+    }
+    if (targetTime && selected && !markets.some((market) => market.close_time)) {
+      logger.warn(
+        { sym, floor_strike: selected.floor_strike },
+        "[kalshi] close_time absent from API response — using first market. Consider checking the API format.",
+      );
     }
 
     if (selected) {
-      const floorStrike = Number(selected.floor_strike);
+      const floorStrike = parseKalshiFloorStrike(selected.floor_strike);
       const rawExchangeIndex = selected.exchange_index;
       const parsedExchangeIndex =
         typeof rawExchangeIndex === "number"
@@ -432,7 +429,7 @@ export async function fetchKalshiTarget(
       if (selected.ticker && !kalshiWindowStore.has(selected.ticker)) {
         kalshiWindowStore.set(selected.ticker, { priceAtOpen: null, openedAt: getCurrentWindowOpenMs() });
       }
-      if (selected.ticker) {
+      if (selected.ticker && floorStrike != null) {
         const prevConf = confirmedTargetStore.get(sym);
         if (!prevConf || prevConf.ticker !== selected.ticker) {
           confirmedTargetStore.set(sym, {
