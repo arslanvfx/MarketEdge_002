@@ -90,6 +90,8 @@ interface HourCellProps {
   isDataGathering?: boolean;
   dgCap?: number;
   dgOverride?: DGCellOverride;
+  /** False means this cell edits a prepared plan that is not currently enforced. */
+  enforcementActive?: boolean;
   onToggleSilence: (h: number) => void;
   onSetReducedPct: (h: number, pct: number) => void;
   onClearReducedPct: (h: number) => void;
@@ -110,6 +112,7 @@ function HourCell({
   isDataGathering = false,
   dgCap = 1,
   dgOverride,
+  enforcementActive = true,
   onToggleSilence,
   onSetReducedPct,
   onClearReducedPct,
@@ -148,19 +151,23 @@ function HourCell({
   };
 
   const isSilenced = mode === "silenced";
+  const restrictionPrepared = !enforcementActive && mode !== "active";
+  const isSilencedActive = isSilenced && enforcementActive;
   // Trading state owns the cell treatment. Historical performance colors are
   // useful context, but must never make a silenced window look active.
-  const cellStateStyle = isSilenced
+  const cellStateStyle = restrictionPrepared
+    ? "bg-muted/10 border-slate-500/35 border-dashed"
+    : isSilencedActive
     ? "bg-background/60 border-red-500/55 shadow-[inset_0_0_18px_rgba(239,68,68,0.06)]"
     : tierStyles[tier];
   const currentRing = isCurrentHour
-    ? isSilenced
+    ? isSilencedActive
       ? "ring-2 ring-red-500/75 ring-offset-1 ring-offset-background"
       : "ring-2 ring-cyan-400/70 ring-offset-1 ring-offset-background"
     : "";
-  const reducedRing = reducedPct != null && mode !== "silenced" ? "ring-1 ring-amber-400/50" : "";
+  const reducedRing = enforcementActive && reducedPct != null && mode !== "silenced" ? "ring-1 ring-amber-400/50" : "";
   const dgIsPercent = dgOverride?.type === 'percent';
-  const dgRing = isDataGathering && mode !== "silenced"
+  const dgRing = enforcementActive && isDataGathering && mode !== "silenced"
     ? (dgIsPercent ? "ring-1 ring-amber-400/50" : "ring-1 ring-violet-400/40")
     : "";
 
@@ -178,21 +185,31 @@ function HourCell({
           onToggleSilence(utcHour);
         }
       }}
-      title={isSilenced ? `${estLabel}: SILENCED — click to activate` : `${estLabel}: ${mode}`}
+      title={restrictionPrepared
+        ? `${estLabel}: prepared ${mode} plan — Smart Hours master is off`
+        : isSilenced
+          ? `${estLabel}: SILENCED — click to activate`
+          : `${estLabel}: ${mode}`}
       className={`cursor-pointer relative flex flex-col gap-0.5 rounded-lg border px-1.5 py-1.5 transition-all select-none ${cellStateStyle} ${currentRing} ${reducedRing} ${dgRing}`}
     >
       {/* Top row: time label + mode icon + dot */}
       <div className="flex items-center justify-between gap-1">
         <div className="flex items-center gap-1 min-w-0">
           <span className="text-[9px] sm:text-[10px] font-mono text-foreground/70 leading-none shrink-0">{estLabel}</span>
-          {mode === "silenced" && (
+          {restrictionPrepared && (
+            <>
+              <Calendar className="w-2.5 h-2.5 text-slate-400 shrink-0" />
+              <span className="text-[8px] font-bold tracking-wide text-slate-400 leading-none">PLAN</span>
+            </>
+          )}
+          {mode === "silenced" && enforcementActive && (
             <>
               <VolumeX className="w-2.5 h-2.5 text-red-400 shrink-0" />
               <span className="text-[8px] font-bold tracking-wide text-red-300/90 leading-none">OFF</span>
             </>
           )}
-          {mode === "reduced" && <TrendingDown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
-          {isDataGathering && mode !== "silenced" && (
+          {mode === "reduced" && enforcementActive && <TrendingDown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
+          {isDataGathering && mode !== "silenced" && enforcementActive && (
             dgIsPercent ? (
               <span className="text-[10px] font-mono font-bold text-amber-400 bg-amber-500/15 px-1 py-px rounded leading-none border border-amber-500/30 shrink-0" title={`Data-gathering: ${dgOverride!.pct}% of regular bet`}>
                 {(dgOverride as { type: 'percent'; pct: number }).pct}%
@@ -205,18 +222,18 @@ function HourCell({
             )
           )}
         </div>
-        {tier !== "empty" && !isSilenced && (
+        {tier !== "empty" && !isSilencedActive && !restrictionPrepared && (
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor[tier]}`} />
         )}
       </div>
 
       {/* Win rate */}
-      <div className={`text-[10px] sm:text-[11px] font-semibold leading-none ${isSilenced ? "text-foreground/45" : winRateColor[tier]}`}>
+      <div className={`text-[10px] sm:text-[11px] font-semibold leading-none ${isSilencedActive || restrictionPrepared ? "text-foreground/45" : winRateColor[tier]}`}>
         {winRatePct != null ? `${winRatePct}%` : "—"}
       </div>
 
       {/* Win / loss record */}
-      <div className={`text-[9px] leading-none ${isSilenced ? "opacity-45 saturate-50" : ""}`}>
+      <div className={`text-[9px] leading-none ${isSilencedActive || restrictionPrepared ? "opacity-45 saturate-50" : ""}`}>
         {totalBets > 0 ? (
           <span className="flex items-center gap-0.5">
             <span className="text-emerald-400/70">{wins}W</span>
@@ -414,9 +431,23 @@ interface QuietHoursGridProps {
   onSave?: (updated: QuietHoursV2) => void;
   /** Dollar cap shown on cells in dataGatheringByDow (hours with ≤ 2 historical bets). */
   dgCap?: number;
+  /** Per-market grids edit prepared schedules; the global grid owns enforcement. */
+  enabledControlMode?: "enforcement" | "schedule";
+  /** Authoritative master state for a prepared per-market schedule. */
+  enforcementMasterEnabled?: boolean;
 }
 
-export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLastChanges, symbolFilter, onSave, dgCap = 1 }: QuietHoursGridProps) {
+export function QuietHoursGrid({
+  value,
+  onChange,
+  autoTuneLastRunAt,
+  autoTuneLastChanges,
+  symbolFilter,
+  onSave,
+  dgCap = 1,
+  enabledControlMode = "enforcement",
+  enforcementMasterEnabled = false,
+}: QuietHoursGridProps) {
   const { getToken } = useAuth();
   const [days, setDays] = useState(90); // match calibration window so all history is visible by default
   const [targetWinRate, setTargetWinRate] = useState(85);
@@ -624,6 +655,8 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
   const activeHourStats = getActiveHourStats();
   const suggestedHours  = computeSuggestedHours(activeHourStats);
   const silencedCount   = countDaySilenced(value, selectedDow);
+  const isPreparedSchedule = enabledControlMode === "schedule";
+  const enforcementActive = value.enabled && (!isPreparedSchedule || enforcementMasterEnabled);
 
   // Build UTC-hour arrays for each ET time band.
   // utcToEst converts UTC→ET, so ET hour X = UTC hour (X + etOffset) % 24.
@@ -641,31 +674,45 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
       {/* ── Header ── */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 flex-wrap">
-          <span className="text-sm font-semibold text-foreground">Smart Quiet Hours</span>
-          {value.enabled && silencedCount > 0 && (
+          <span className="text-sm font-semibold text-foreground">{isPreparedSchedule ? "Smart Hours Schedule" : "Smart Quiet Hours"}</span>
+          {enforcementActive && silencedCount > 0 && (
             <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-slate-500/10 text-slate-400 border border-slate-500/20">
               <VolumeX className="w-3 h-3" /> {silencedCount} silenced {DOW_NAMES[selectedDow]}
             </span>
           )}
-          {value.enabled && hasDowEntry(value, selectedDow) && (
+          {enforcementActive && hasDowEntry(value, selectedDow) && (
             <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">
               <Calendar className="w-2.5 h-2.5" /> per-day rules active
             </span>
           )}
+          {isPreparedSchedule && !enforcementMasterEnabled && (
+            <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-slate-500/10 text-slate-400 border border-slate-500/20">
+              Schedule prepared · not enforced
+            </span>
+          )}
         </div>
-        <label className="flex items-center gap-2 cursor-pointer shrink-0" title="When OFF, this coin's quiet-hour restrictions are bypassed and it can bet at any time">
-          <span className="text-xs text-muted-foreground">Enforce hours</span>
-          <div
-            className={`w-9 h-5 rounded-full transition-colors relative ${value.enabled ? "bg-cyan-500" : "bg-muted"}`}
-            onClick={() => {
-              const updated = { ...value, enabled: !value.enabled };
-              onChange(updated);
-              onSave?.(updated); // persist immediately — no manual Save click needed
-            }}
-          >
-            <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value.enabled ? "translate-x-4" : "translate-x-0.5"}`} />
-          </div>
-        </label>
+        {isPreparedSchedule && !enforcementMasterEnabled ? (
+          <span className="shrink-0 text-xs text-muted-foreground/60" title="Turn on the Smart Hours master above to enforce prepared market schedules.">
+            Master is off
+          </span>
+        ) : (
+          <label className="flex items-center gap-2 cursor-pointer shrink-0" title={isPreparedSchedule ? "Choose whether this market schedule is used while the Smart Hours master is on" : "Turn Smart Hours enforcement on or off"}>
+            <span className="text-xs text-muted-foreground">{isPreparedSchedule ? `Use ${symbolFilter ?? "market"} schedule` : "Enforce hours"}</span>
+            <div
+              role="switch"
+              aria-label={isPreparedSchedule ? `Use ${symbolFilter ?? "market"} Smart Hours schedule` : "Enforce Smart Hours"}
+              aria-checked={value.enabled}
+              className={`w-9 h-5 rounded-full transition-colors relative ${value.enabled ? "bg-cyan-500" : "bg-muted"}`}
+              onClick={() => {
+                const updated = { ...value, enabled: !value.enabled };
+                onChange(updated);
+                onSave?.(updated); // persist immediately — no manual Save click needed
+              }}
+            >
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value.enabled ? "translate-x-4" : "translate-x-0.5"}`} />
+            </div>
+          </label>
+        )}
       </div>
 
       {/* ── Day-of-week tabs ── */}
@@ -691,12 +738,12 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
           );
         })}
         <span className="hidden sm:inline ml-2 text-[11px] text-muted-foreground/50">
-          {DOW_NAMES[selectedDow]} rules · tap a cell to silence/activate
+          {DOW_NAMES[selectedDow]} {isPreparedSchedule && !enforcementMasterEnabled ? "prepared plan" : "rules"} · tap a cell to {isPreparedSchedule && !enforcementMasterEnabled ? "edit the schedule" : "silence/activate"}
         </span>
       </div>
       {/* Mobile-only tab hint */}
       <p className="sm:hidden text-[10px] text-muted-foreground/50 -mt-2">
-        {DOW_NAMES[selectedDow]} · tap cell to silence/activate for this day only
+        {DOW_NAMES[selectedDow]} · tap cell to {isPreparedSchedule && !enforcementMasterEnabled ? "edit the prepared schedule" : "silence/activate for this day only"}
       </p>
 
       {/* ── Legend ── */}
@@ -704,8 +751,14 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0" /> ≥85% win rate</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0" /> 75–84%</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-400 shrink-0" /> &lt;75%</span>
-        <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-red-400 shrink-0" /> Silenced = red OFF cell (tap to toggle)</span>
-        <span className="flex items-center gap-1.5"><TrendingDown className="w-3 h-3 text-amber-400 shrink-0" /> Reduced bets</span>
+        {isPreparedSchedule && !enforcementMasterEnabled ? (
+          <span className="flex items-center gap-1.5"><Calendar className="w-3 h-3 text-slate-400 shrink-0" /> Dashed PLAN cells are prepared only — no hours are enforced</span>
+        ) : (
+          <>
+            <span className="flex items-center gap-1.5"><VolumeX className="w-3 h-3 text-red-400 shrink-0" /> Silenced = red OFF cell (tap to toggle)</span>
+            <span className="flex items-center gap-1.5"><TrendingDown className="w-3 h-3 text-amber-400 shrink-0" /> Reduced bets</span>
+          </>
+        )}
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded bg-muted/30 border border-border/30 shrink-0" /> No data yet</span>
         <span className="flex items-center gap-1.5"><DollarSign className="w-3 h-3 text-violet-400 shrink-0" /> Sparse data (capped)</span>
       </div>
@@ -744,6 +797,7 @@ export function QuietHoursGrid({ value, onChange, autoTuneLastRunAt, autoTuneLas
                     isDataGathering={isDataGatheringHour(h, value, selectedDow)}
                     dgCap={dgCap}
                     dgOverride={getDgOverride(h)}
+                    enforcementActive={!isPreparedSchedule || enforcementMasterEnabled}
                     onToggleSilence={toggleSilence}
                     onSetReducedPct={setReducedPct}
                     onClearReducedPct={clearReducedPct}

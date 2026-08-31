@@ -906,20 +906,18 @@ export function computeSymbolQuietHoursV2(
  * Calibration owns only silence/data-collection classification and its stamp;
  * operator fields such as reduced percentages and per-cell overrides survive.
  *
- * When forceEnable is true the merged schedule is enabled regardless of the
- * stored value. This mirrors the manual "Calibrate & Apply All Markets" action,
- * which force-enables every calibrated symbol so the automatic hourly run and the
- * manual button reach identical enablement state.
+ * Calibration never changes whether the market schedule is selected. Existing
+ * operator enablement is preserved; a newly discovered schedule is prepared by
+ * default but remains inert unless the global Smart Hours master is on.
  */
 export function mergeCalibratedSymbolQuietHours(
   current: QuietHoursV2 | undefined,
   calibrated: QuietHoursV2,
-  forceEnable = false,
 ): QuietHoursV2 {
   return {
     ...calibrated,
     ...(current ?? {}),
-    enabled: forceEnable ? true : (current?.enabled ?? true),
+    enabled: current?.enabled ?? true,
     silencedByDow: calibrated.silencedByDow,
     dataGatheringByDow: calibrated.dataGatheringByDow,
     silencedUtcHours: calibrated.silencedUtcHours,

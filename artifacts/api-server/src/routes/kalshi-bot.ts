@@ -53,6 +53,7 @@ import {
 import { clearRegularOrderIntent } from "../lib/kalshi-regular-order-intent.ts";
 import { getDailyHourlyPnl, getDailyPnlSimulation, getDailyTradingPnl } from "../lib/kalshi-daily-pnl.ts";
 import { getRegularPlacementFunnelSnapshot } from "../lib/kalshi-regular-placement-funnel.ts";
+import { logger } from "../lib/logger";
 
 // ── Decision-mode preset helpers ──────────────────────────────────────────────
 
@@ -841,6 +842,7 @@ router.post("/crypto/bot/pause", requireAuth, (req, res) => {
 
 // POST /crypto/bot/config  — update one or more config fields
 router.post("/crypto/bot/config", requireAuth, async (req, res) => {
+  const previousSmartHoursMasterEnabled = getBotState().config.quietHoursV2?.enabled === true;
   const {
     betSize,
     dailyLossLimit,
@@ -1717,6 +1719,22 @@ router.post("/crypto/bot/config", requireAuth, async (req, res) => {
   }
 
   const { config: updated, persisted } = await updateBotConfig(partial);
+  const updatedSmartHoursMasterEnabled = updated.quietHoursV2?.enabled === true;
+  if (
+    partial.quietHoursV2 !== undefined
+    && updatedSmartHoursMasterEnabled !== previousSmartHoursMasterEnabled
+  ) {
+    logger.info(
+      {
+        actor: "authenticated-config-route",
+        previousEnabled: previousSmartHoursMasterEnabled,
+        enabled: updatedSmartHoursMasterEnabled,
+        quietHoursMode: updated.quietHoursMode ?? "global",
+        persisted,
+      },
+      "[kalshi-bot] Smart Hours master changed by explicit config update",
+    );
+  }
   res.json({ ok: true, config: updated, persisted });
 });
 
@@ -1891,10 +1909,10 @@ router.post("/crypto/bot/quiet-hours-calibrate-all", requireAuth, async (req, re
     const rawThreshold = (req.body as Record<string, unknown>)?.threshold;
     const thresholdOverride = typeof rawThreshold === "number" && rawThreshold >= 40 && rawThreshold <= 100
       ? rawThreshold : undefined;
-    // Route the manual button through the shared Smart Hours operation. Unlike
-    // background recalibration, this explicit "Apply" action also enables the
-    // visible per-market master switch after at least one schedule is saved.
-    const result = await runSmartHoursCalibration({ thresholdOverride, activateMaster: true });
+    // Calibration only refreshes and persists schedule recommendations.
+    // Enforcement can be activated exclusively through the Smart Hours master
+    // switch handled by the config route.
+    const result = await runSmartHoursCalibration({ thresholdOverride });
     if (result.skipped) {
       res.status(409).json({ ok: false, error: "calibration already in progress" });
       return;

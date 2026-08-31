@@ -874,7 +874,17 @@ async function _runBotTick(
   const qhEntry = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
   if (qhEntry.action === "block") {
     logger.info(
-      { sym, windowKey, qhMode: qhEntry.qhMode, utcHour: qhEntry.utcHour, botMode: S.botMode, source: "tick-entry-gate" },
+      {
+        sym,
+        windowKey,
+        masterEnabled: S.config.quietHoursV2?.enabled === true,
+        quietHoursMode: S.config.quietHoursMode ?? "global",
+        symbolScheduleEnabled: S.config.perSymbolQuietHours?.[sym]?.enabled ?? null,
+        qhMode: qhEntry.qhMode,
+        utcHour: qhEntry.utcHour,
+        botMode: S.botMode,
+        source: "tick-entry-gate",
+      },
       "[kalshi-bot] smart-hours entry gate: hour is silenced — blocking new entry",
     );
     setTickAbortReason(sym, windowKey, "smart hours: current hour is silenced — new entries blocked");
@@ -1786,18 +1796,13 @@ async function _runBotTick(
   // betRandomizerApplied so neither can bypass this reduction.
   //
   // The percentage is RE-RESOLVED here at sizing time (qhSizing) rather than
-  // read from the loop's tick-start snapshot (S.quietHoursV2ReducedBet): a
-  // tick that crosses an hour boundary — or a direct-dispatch entry that never
-  // went through the loop — must use the rule for the hour the bet is actually
-  // placed in.  The loop snapshot is kept as a fallback for safety (larger
-  // reduction wins).
+  // read from the loop's tick-start snapshot: a tick that crosses an hour
+  // boundary, a direct-dispatch entry, or a master switch change during the
+  // tick must use the authoritative current config. In particular, a stale
+  // reduced snapshot must never keep restricting entries after the master is
+  // explicitly turned off.
   const qhSizing = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
-  const effectiveReducedPct = (() => {
-    const fresh = qhSizing.reducedPct;
-    const snap  = S.quietHoursV2ReducedBet;
-    if (fresh != null && snap != null) return Math.min(fresh, snap); // most conservative
-    return fresh ?? snap;
-  })();
+  const effectiveReducedPct = qhSizing.reducedPct;
   // Remembered for the FINAL pre-order gate: if the clock crosses into a
   // stricter reduced hour between here and order submission, the contract
   // count is rescaled there using this as the already-applied baseline.
@@ -1807,7 +1812,19 @@ async function _runBotTick(
     const reducedSize = +(targetBetSize * (reducedPct / 100)).toFixed(2);
     if (reducedSize < targetBetSize) {
       logger.info(
-        { sym, reducedPct, prev: +targetBetSize.toFixed(2), next: reducedSize, randomizerApplied: betRandomizerApplied },
+        {
+          sym,
+          masterEnabled: S.config.quietHoursV2?.enabled === true,
+          quietHoursMode: S.config.quietHoursMode ?? "global",
+          symbolScheduleEnabled: S.config.perSymbolQuietHours?.[sym]?.enabled ?? null,
+          qhMode: qhSizing.qhMode,
+          utcHour: qhSizing.utcHour,
+          reducedPct,
+          prev: +targetBetSize.toFixed(2),
+          next: reducedSize,
+          randomizerApplied: betRandomizerApplied,
+          source: "entry-sizing",
+        },
         "[kalshi-bot] quiet-hours-v2 reduced bet % applied",
       );
       targetBetSize = reducedSize;
@@ -2814,6 +2831,9 @@ async function _runBotTick(
         sym,
         windowKey,
         direction,
+        masterEnabled: S.config.quietHoursV2?.enabled === true,
+        quietHoursMode: S.config.quietHoursMode ?? "global",
+        symbolScheduleEnabled: S.config.perSymbolQuietHours?.[sym]?.enabled ?? null,
         storedMarker: S.config.smartHoursCalibratedUtcHour ?? null,
         source: "pre-order-readiness",
       },
@@ -2834,7 +2854,18 @@ async function _runBotTick(
   const qhFinal = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
   if (qhFinal.action === "block") {
     logger.warn(
-      { sym, windowKey, direction, qhMode: qhFinal.qhMode, utcHour: qhFinal.utcHour, botMode: S.botMode, source: "pre-order-final-gate" },
+      {
+        sym,
+        windowKey,
+        direction,
+        masterEnabled: S.config.quietHoursV2?.enabled === true,
+        quietHoursMode: S.config.quietHoursMode ?? "global",
+        symbolScheduleEnabled: S.config.perSymbolQuietHours?.[sym]?.enabled ?? null,
+        qhMode: qhFinal.qhMode,
+        utcHour: qhFinal.utcHour,
+        botMode: S.botMode,
+        source: "pre-order-final-gate",
+      },
       "[kalshi-bot] smart-hours FINAL gate: hour is silenced — order rejected at placement time",
     );
     releaseConvictionEntryReservation("final smart-hours block");
@@ -3276,6 +3307,24 @@ async function _runBotTick(
           preSubmitGuard: () => {
             if (!S.config.enabled || S.paused || S.botMode !== "live" || entryMode !== "live") return false;
             const currentQh = resolveEntryQuietHoursDecisionForSymbol(S.config, S.botMode, sym);
+            if (currentQh.action === "block" || currentQh.forcedPaper) {
+              logger.warn(
+                {
+                  sym,
+                  windowKey,
+                  direction,
+                  masterEnabled: S.config.quietHoursV2?.enabled === true,
+                  quietHoursMode: S.config.quietHoursMode ?? "global",
+                  symbolScheduleEnabled: S.config.perSymbolQuietHours?.[sym]?.enabled ?? null,
+                  qhMode: currentQh.qhMode,
+                  utcHour: currentQh.utcHour,
+                  botMode: S.botMode,
+                  forcedPaper: currentQh.forcedPaper,
+                  source: "exchange-pre-submit-guard",
+                },
+                "[kalshi-bot] smart-hours exchange pre-submit guard blocked order",
+              );
+            }
             return currentQh.action !== "block"
               && !currentQh.forcedPaper
               && hasAuthorizedRegularRouteFundingHold(expectedTicker, _intentReservationId)

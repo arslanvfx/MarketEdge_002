@@ -989,7 +989,7 @@ test("per-market recalibration preserves manual percentage and dollar limits", (
   assert.equal(merged.calibratedAt, calibrated.calibratedAt);
 });
 
-test("forceEnable calibration enables a disabled symbol (auto == manual enablement parity)", () => {
+test("calibration preserves a disabled symbol and operator-owned fields", () => {
   const current = {
     enabled: false, // operator-disabled symbol
     silencedUtcHours: [],
@@ -1013,19 +1013,13 @@ test("forceEnable calibration enables a disabled symbol (auto == manual enableme
     calibratedAt: "2026-08-19T15:00:00.000Z",
   };
 
-  // Default (no forceEnable): stored enabled:false is preserved.
   const preserved = mergeCalibratedSymbolQuietHours(current, calibrated);
   assert.equal(preserved.enabled, false);
-
-  // forceEnable:true → enabled flips to true, exactly like the manual button.
-  const forced = mergeCalibratedSymbolQuietHours(current, calibrated, true);
-  assert.equal(forced.enabled, true);
-  // Operator-owned fields still preserved under forceEnable.
-  assert.equal(forced.autoTuneEnabled, false);
-  assert.deepEqual(forced.reducedByDow, current.reducedByDow);
-  assert.deepEqual(forced.dataGatheringOverrides, current.dataGatheringOverrides);
+  assert.equal(preserved.autoTuneEnabled, false);
+  assert.deepEqual(preserved.reducedByDow, current.reducedByDow);
+  assert.deepEqual(preserved.dataGatheringOverrides, current.dataGatheringOverrides);
   // Calibration still owns the classification + timestamp.
-  assert.deepEqual(forced.silencedByDow, calibrated.silencedByDow);
-  assert.deepEqual(forced.dataGatheringByDow, calibrated.dataGatheringByDow);
-  assert.equal(forced.calibratedAt, calibrated.calibratedAt);
+  assert.deepEqual(preserved.silencedByDow, calibrated.silencedByDow);
+  assert.deepEqual(preserved.dataGatheringByDow, calibrated.dataGatheringByDow);
+  assert.equal(preserved.calibratedAt, calibrated.calibratedAt);
 });

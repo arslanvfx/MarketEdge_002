@@ -40,7 +40,6 @@ export interface PerSymbolQuietHoursPanelProps {
   calibrationThreshold?: number;
   onCalibrationThresholdChange?: (threshold: number) => void;
   onChange: (symbol: string, value: QuietHoursV2) => void;
-  onCalibrationApplied?: () => void;
   onImmediateSaveError?: (message: string) => void;
   authPost: (path: string, body: object) => Promise<unknown>;
   dgCap?: number;
@@ -49,7 +48,7 @@ export interface PerSymbolQuietHoursPanelProps {
 }
 
 export function PerSymbolQuietHoursPanel({
-  perSymbolQuietHours, masterEnabled, onChange, onCalibrationApplied, onImmediateSaveError, authPost,
+  perSymbolQuietHours, masterEnabled, onChange, onImmediateSaveError, authPost,
   calibrationThreshold = 84.5, onCalibrationThresholdChange,
   dgCap: dgCapProp = 1, dgEnabled: dgEnabledProp = true,
   symbolSmartHoursModes,
@@ -79,12 +78,16 @@ export function PerSymbolQuietHoursPanel({
       };
       if (!result.perSymbolQuietHours || Object.keys(result.perSymbolQuietHours).length === 0) throw new Error("No markets could be calibrated");
       for (const [symbol, schedule] of Object.entries(result.perSymbolQuietHours)) {
-        onChange(symbol, { ...(perSymbolQuietHours[symbol] ?? {}), ...schedule, enabled: true });
+        onChange(symbol, { ...(perSymbolQuietHours[symbol] ?? {}), ...schedule });
       }
-      onCalibrationApplied?.();
       const count = result.calibratedSymbols?.length ?? Object.keys(result.perSymbolQuietHours).length;
       const skipped = result.skippedSymbols?.length ?? 0;
-      setMessageOk(true); setMessage(skipped ? `✓ ${count} markets applied & saved · ${skipped} failed` : `✓ ${count} coins · all days applied & saved`);
+      setMessageOk(true);
+      setMessage(
+        `${skipped ? `✓ ${count} schedules refreshed · ${skipped} failed` : `✓ ${count} schedules refreshed & saved`} · ${
+          masterEnabled ? "active master will use enabled schedules" : "prepared, not enforced"
+        }`,
+      );
     } catch (error) {
       const text = error instanceof Error ? error.message : "Calibration failed";
       setMessageOk(false); setMessage(text); onImmediateSaveError?.(text);
@@ -107,6 +110,11 @@ export function PerSymbolQuietHoursPanel({
     return getQuietHoursHourMode(currentUtcHour, symbolSchedule, currentEtDow);
   };
   const tabStyle = (mode: "active" | "silenced" | "reduced", selected: boolean): string => {
+    if (!masterEnabled) {
+      return `border-slate-500/30 bg-slate-500/5 text-slate-400 hover:bg-slate-500/10 ${
+        selected ? "ring-2 ring-slate-400/35 ring-offset-1 ring-offset-background shadow-sm" : ""
+      }`;
+    }
     const stateStyle = mode === "silenced"
       ? "border-red-500/60 bg-red-500/15 text-red-300 hover:bg-red-500/25"
       : mode === "reduced"
@@ -133,10 +141,10 @@ export function PerSymbolQuietHoursPanel({
           </select>
         </label>
         <button type="button" onClick={calibrate} disabled={calibrating} className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-medium transition-all disabled:opacity-50 ${message ? messageOk ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400" : "border-red-500/50 bg-red-500/10 text-red-400" : "border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20"}`}>
-          {calibrating ? <><RefreshCw className="h-3 w-3 animate-spin" /> Calibrating all markets…</> : <><Zap className="h-3 w-3" /> {message ?? "Calibrate & Apply All Markets"}</>}
+          {calibrating ? <><RefreshCw className="h-3 w-3 animate-spin" /> Refreshing market schedules…</> : <><Zap className="h-3 w-3" /> {message ?? "Refresh All Market Schedules"}</>}
         </button>
       </div>
-      <p className="text-[10px] leading-snug text-muted-foreground/50">Analyzes 90 days of bet history per coin · silences hours below the chosen win-rate threshold for each day of the week · applies &amp; saves across all markets at once.</p>
+      <p className="text-[10px] leading-snug text-muted-foreground/50">Analyzes 90 days of bet history per coin · refreshes and saves schedule recommendations without turning on enforcement · use the master switch above to activate Smart Hours.</p>
       <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground/70">
         <DollarSign className="h-3 w-3 shrink-0 text-violet-400" /><span className="font-medium text-violet-300/80">Sparse hours bet cap</span>
         <span className="flex items-center gap-0.5">$<input type="number" min={.5} max={50} step={.5} disabled={!dgEnabled} value={dgCap} onChange={e => { const value = parseFloat(e.target.value); if (value >= .5 && value <= 50) setDgCap(value); }} onBlur={() => void post({ dataGatheringBetCap: dgCap })} className="w-14 rounded border border-violet-500/30 bg-background px-1 py-0.5 text-right text-[11px] text-violet-300 disabled:opacity-40" /></span>
@@ -146,24 +154,24 @@ export function PerSymbolQuietHoursPanel({
     <div className="flex flex-wrap items-center gap-1.5">
       {REGULAR_BOT_SYMBOLS.map(symbol => {
         const mode = tabMode(symbol);
-        const label = mode === "silenced" ? "Off" : mode === "reduced" ? "Restricted" : "On";
+        const label = !masterEnabled ? "Prepared" : mode === "silenced" ? "Off" : mode === "reduced" ? "Restricted" : "On";
         return (
           <button
             type="button"
             key={symbol}
             onClick={() => setSelectedSymbol(symbol)}
             className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${tabStyle(mode, selectedSymbol === symbol)}`}
-            title={`${symbol}: Smart Hours ${label}`}
-            aria-label={`${symbol}: Smart Hours ${label}`}
+            title={`${symbol}: Smart Hours ${label}${!masterEnabled ? " schedule, not enforced" : ""}`}
+            aria-label={`${symbol}: Smart Hours ${label}${!masterEnabled ? " schedule, not enforced" : ""}`}
             data-smart-hours-mode={mode}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${mode === "silenced" ? "bg-red-400" : mode === "reduced" ? "bg-amber-300" : "bg-emerald-400"}`} />
+            <span className={`h-1.5 w-1.5 rounded-full ${!masterEnabled ? "bg-slate-500" : mode === "silenced" ? "bg-red-400" : mode === "reduced" ? "bg-amber-300" : "bg-emerald-400"}`} />
             {symbol}
           </button>
         );
       })}
     </div>
     <div className="rounded-lg border border-border/50 bg-secondary/20 p-2 text-[11px] text-muted-foreground"><Activity className="mr-1 inline h-3 w-3 text-cyan-400" /> Market Status Right Now · {masterEnabled ? "Smart Hours enforcement is on" : "Smart Hours enforcement is off"}</div>
-    <QuietHoursGrid key={selectedSymbol} value={schedule} onChange={value => onChange(selectedSymbol, value)} symbolFilter={selectedSymbol} dgCap={dgCap} onSave={value => { onChange(selectedSymbol, value); void post({ perSymbolQuietHours: { ...schedulesRef.current, [selectedSymbol]: value } }); }} />
+    <QuietHoursGrid key={selectedSymbol} value={schedule} onChange={value => onChange(selectedSymbol, value)} symbolFilter={selectedSymbol} enabledControlMode="schedule" enforcementMasterEnabled={masterEnabled} dgCap={dgCap} onSave={value => { onChange(selectedSymbol, value); void post({ perSymbolQuietHours: { ...schedulesRef.current, [selectedSymbol]: value } }); }} />
   </div>;
 }

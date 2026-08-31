@@ -150,13 +150,6 @@ export function SmartQuietHoursControls({
                 [symbol]: schedule,
               },
             }))}
-            onCalibrationApplied={() => setDraft(current => ({
-              ...current,
-              quietHoursV2: {
-                ...(merged.quietHoursV2 ?? EMPTY_QUIET_HOURS),
-                enabled: true,
-              },
-            }))}
             authPost={authPost}
             onImmediateSaveError={onImmediateSaveError}
             dgCap={merged.dataGatheringBetCap ?? 1}

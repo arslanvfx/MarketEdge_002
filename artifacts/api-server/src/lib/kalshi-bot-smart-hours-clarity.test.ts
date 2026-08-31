@@ -36,6 +36,10 @@ const botDbSource = readFileSync(join(here, "kalshi-bot-db.ts"), "utf8");
 const botLoopSource = readFileSync(join(here, "kalshi-bot-loop.ts"), "utf8");
 const botTickSource = readFileSync(join(here, "kalshi-bot-tick.ts"), "utf8");
 const routeSource = readFileSync(join(here, "../routes/kalshi-bot.ts"), "utf8");
+const marketEdgeBotDir = join(here, "../../../market-edge/src/pages/bot");
+const smartHoursControlsSource = readFileSync(join(marketEdgeBotDir, "smart-quiet-hours-controls.tsx"), "utf8");
+const perSymbolPanelSource = readFileSync(join(marketEdgeBotDir, "per-symbol-quiet-hours-panel.tsx"), "utf8");
+const quietHoursGridSource = readFileSync(join(marketEdgeBotDir, "quiet-hours-grid.tsx"), "utf8");
 
 test("manual Smart Hours threshold is persisted for subsequent hourly calibrations", () => {
   assert.match(
@@ -101,6 +105,38 @@ test("concurrent Smart Hours callers can await the shared calibration operation"
     /return _enqueueSmartHoursCalibration\(opts\)/,
     "all timer/manual/startup callers must receive completion from the same serialized queue",
   );
+});
+
+test("calibration cannot activate the Smart Hours master or force-enable market schedules", () => {
+  assert.doesNotMatch(routeSource, /runSmartHoursCalibration\(\{[^}]*activateMaster:\s*true/);
+  assert.doesNotMatch(botDbSource, /activateMaster/);
+  assert.doesNotMatch(botDbSource, /recomputeAllSymbolQuietHours\([^;]*forceEnable:\s*true/);
+  assert.match(
+    routeSource,
+    /Smart Hours master changed by explicit config update/,
+    "explicit config updates need an audit record when the master changes",
+  );
+});
+
+test("current Smart Hours master state is authoritative for sizing", () => {
+  assert.match(botTickSource, /const effectiveReducedPct = qhSizing\.reducedPct/);
+  assert.doesNotMatch(
+    botTickSource,
+    /const snap\s*=\s*S\.quietHoursV2ReducedBet/,
+    "a stale loop snapshot must not reduce a bet after the master is switched off",
+  );
+});
+
+test("per-market Smart Hours UI labels schedules as prepared while the master is off", () => {
+  assert.doesNotMatch(smartHoursControlsSource, /onCalibrationApplied=/);
+  assert.doesNotMatch(perSymbolPanelSource, /Calibrate & Apply All Markets/);
+  assert.match(perSymbolPanelSource, /Refresh All Market Schedules/);
+  assert.match(perSymbolPanelSource, /enabledControlMode="schedule"/);
+  assert.match(perSymbolPanelSource, /enforcementMasterEnabled=\{masterEnabled\}/);
+  assert.match(quietHoursGridSource, /Schedule prepared · not enforced/);
+  assert.match(quietHoursGridSource, /Master is off/);
+  assert.match(quietHoursGridSource, /Dashed PLAN cells are prepared only — no hours are enforced/);
+  assert.match(perSymbolPanelSource, /const label = !masterEnabled \? "Prepared"/);
 });
 
 // ---------------------------------------------------------------------------

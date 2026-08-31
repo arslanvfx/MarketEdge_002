@@ -1052,16 +1052,14 @@ const _ALL_PER_MARKET_SYMBOLS = ["BTC", "ETH", "XRP", "HYPE", "BNB", "SOL", "DOG
  */
 export async function recomputeAllSymbolQuietHours(
   thresholdOverride?: number,
-  opts?: { forceEnable?: boolean },
 ): Promise<{
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   calibratedSymbols: string[];
   skippedSymbols: string[];
 }> {
-  // forceEnable mirrors the manual "Calibrate & Apply All Markets" action, which
-  // enables every calibrated symbol.  Both the manual endpoint and the automatic
-  // hourly run pass forceEnable:true so they reach identical enablement state.
-  const forceEnable = opts?.forceEnable ?? false;
+  // Calibration preserves an operator's per-symbol enable/disable selections.
+  // It never activates enforcement; the global Smart Hours master is the sole
+  // enforcement switch.
   const qhv2 = S.config.quietHoursV2;
   // Default to 84.5 (matches global auto-tune default and the grid's Silence threshold UI).
   // Callers may pass an explicit threshold — the API route forwards the client's chosen value.
@@ -1138,7 +1136,7 @@ export async function recomputeAllSymbolQuietHours(
     // so spreading the full result last would silently flip a user-disabled auto-tune back on.
     const fullMerged: typeof current = { ...current };
     for (const [sym, cal] of Object.entries(result)) {
-      const mergedEntry = mergeCalibratedSymbolQuietHours(current[sym], cal, forceEnable);
+      const mergedEntry = mergeCalibratedSymbolQuietHours(current[sym], cal);
       fullMerged[sym] = mergedEntry;
       // Track only the calibrated entries (not the full psqh map) for the API response.
       mergedResult[sym] = mergedEntry;
@@ -1158,14 +1156,12 @@ export async function recomputeAllSymbolQuietHours(
 
 /**
  * The single, canonical Smart Hours calibration used by BOTH the manual
- * "Calibrate & Apply All Markets" button and the automatic hourly UTC run.
+ * "Refresh All Market Schedules" button and the automatic hourly UTC run.
  *
- * It always force-enables every calibrated symbol (enablement parity with the
- * manual action, which previously force-enabled only on the client), preserves
- * operator-owned fields (per-cell percentages, dollar caps, auto-tune / manual
- * restrictions) via mergeCalibratedSymbolQuietHours over the freshest serialized
- * config, and stamps a durable per-UTC-hour marker on success so a duplicate run
- * in the same hour is skipped and a restart can catch up exactly once.
+ * It preserves operator-owned fields and per-symbol enablement via
+ * mergeCalibratedSymbolQuietHours over the freshest serialized config, then
+ * stamps a durable per-UTC-hour marker on success so a duplicate run in the same
+ * hour is skipped and a restart can catch up exactly once.
  *
  * All invocations funnel through one non-overlapping guard so a manual click and
  * the hourly boundary can never run concurrently.
@@ -1173,9 +1169,6 @@ export async function recomputeAllSymbolQuietHours(
 async function _runSmartHoursCalibrationInner(opts?: {
   thresholdOverride?: number;
   nowMs?: number;
-  /** Explicit manual "Apply" actions may turn on the per-market master.
-   * Automatic recalibration must preserve an operator's intentional OFF state. */
-  activateMaster?: boolean;
 }): Promise<{
   perSymbolQuietHours: Record<string, QuietHoursV2>;
   calibratedSymbols: string[];
@@ -1201,26 +1194,9 @@ async function _runSmartHoursCalibrationInner(opts?: {
       },
     });
   }
-  const result = await recomputeAllSymbolQuietHours(opts?.thresholdOverride, { forceEnable: true });
+  const result = await recomputeAllSymbolQuietHours(opts?.thresholdOverride);
   const isCompleteRun = result.calibratedSymbols.length > 0 && result.skippedSymbols.length === 0;
-  const shouldActivateMaster =
-    opts?.activateMaster === true
-    && result.calibratedSymbols.length > 0
-    && S.config.quietHoursMode === "per_market"
-    && S.config.quietHoursV2?.enabled !== true;
   const configPatch = {
-    ...(shouldActivateMaster
-      ? {
-          quietHoursV2: {
-            ...(S.config.quietHoursV2 ?? {
-              enabled: false,
-              silencedUtcHours: [],
-              reducedBetUtcHours: {},
-            }),
-            enabled: true,
-          },
-        }
-      : {}),
     ...(isCompleteRun && S.config.smartHoursCalibratedUtcHour !== utcHourMarker(nowMs)
       ? { smartHoursCalibratedUtcHour: utcHourMarker(nowMs) }
       : {}),
@@ -1228,12 +1204,6 @@ async function _runSmartHoursCalibrationInner(opts?: {
 
   if (Object.keys(configPatch).length > 0) {
     await updateBotConfig(configPatch);
-  }
-  if (shouldActivateMaster) {
-    logger.info(
-      { calibratedSymbols: result.calibratedSymbols },
-      "[qh-per-symbol] manual calibration applied schedules and enabled Smart Hours master",
-    );
   }
 
   if (isCompleteRun) {
@@ -1284,25 +1254,20 @@ type SmartHoursCalibrationResult = {
 type SmartHoursCalibrationOptions = {
   thresholdOverride?: number;
   nowMs?: number;
-  /** Turn on the per-market Smart Hours master after applying at least one
-   * schedule. Reserved for the explicit manual "Calibrate & Apply" action. */
-  activateMaster?: boolean;
   /** Retained for API compatibility. All callers are now durably serialized. */
   queueIfBusy?: boolean;
 };
 
 /**
  * Manual/auto execution queue. Every caller receives its own completion
- * promise and retains its requested threshold/master options. Redundant
+ * promise and retains its requested threshold option. Redundant
  * automatic requests collapse at execution time once the current-hour marker
  * is already committed.
  */
 const _enqueueSmartHoursCalibration = createSerializedAsyncOperation(
   async (opts: SmartHoursCalibrationOptions): Promise<SmartHoursCalibrationResult> => {
     const targetNowMs = opts.nowMs ?? Date.now();
-    const isAutomaticRequest =
-      opts.thresholdOverride === undefined
-      && opts.activateMaster !== true;
+    const isAutomaticRequest = opts.thresholdOverride === undefined;
     if (
       isAutomaticRequest
       && S.config.smartHoursCalibratedUtcHour === utcHourMarker(targetNowMs)
@@ -1316,7 +1281,6 @@ const _enqueueSmartHoursCalibration = createSerializedAsyncOperation(
     }
     const result = await _runSmartHoursCalibrationInner({
       thresholdOverride: opts.thresholdOverride,
-      activateMaster: opts.activateMaster,
       nowMs: targetNowMs,
     });
     return { skipped: false, ...result };
