@@ -33,6 +33,7 @@ import { CRYPTO_COINS, KALSHI_SERIES } from "./market-defs.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const botDbSource = readFileSync(join(here, "kalshi-bot-db.ts"), "utf8");
+const calibrationServiceSource = readFileSync(join(here, "kalshi-smart-hours-calibration.ts"), "utf8");
 const botLoopSource = readFileSync(join(here, "kalshi-bot-loop.ts"), "utf8");
 const botTickSource = readFileSync(join(here, "kalshi-bot-tick.ts"), "utf8");
 const routeSource = readFileSync(join(here, "../routes/kalshi-bot.ts"), "utf8");
@@ -93,18 +94,21 @@ test("direct and final entry paths defer while the current-hour calibration mark
 
 test("concurrent Smart Hours callers can await the shared calibration operation", () => {
   assert.match(
-    botDbSource,
+    calibrationServiceSource,
     /createSerializedAsyncOperation/,
   );
   assert.match(
-    botDbSource,
+    calibrationServiceSource,
     /export async function ensureSmartHoursCalibrationCurrent/,
   );
   assert.match(
-    botDbSource,
-    /return _enqueueSmartHoursCalibration\(opts\)/,
-    "all timer/manual/startup callers must receive completion from the same serialized queue",
+    calibrationServiceSource,
+    /return _enqueueEvaluateThenCalibrate\(opts\)/,
+    "all timer/manual/startup callers must receive completion from the same evaluate-then-calibrate queue",
   );
+  assert.match(calibrationServiceSource, /await evalClosedBets\(\)/);
+  assert.match(calibrationServiceSource, /MAX_EVAL_DRAIN_PASSES/);
+  assert.match(calibrationServiceSource, /decideSmartHoursEvaluationDrain/);
 });
 
 test("calibration cannot activate the Smart Hours master or force-enable market schedules", () => {

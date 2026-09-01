@@ -17,7 +17,7 @@ import { initResearchFromDB } from "./lib/stock/research";
 import { runBotCycle as runStockBotCycle, initDecisionLogFromDB } from "./lib/stock/bot";
 import { alpacaConfigured } from "./lib/stock/alpaca";
 import { initAiSpend } from "./lib/ai-spend";
-import { scheduleAtTopOfEveryUtcHour } from "./lib/kalshi-quiet-hours-scheduler";
+import { scheduleSmartHoursCalibrationHourly } from "./lib/kalshi-quiet-hours-scheduler";
 import { reconcileReservedRegularIntents, runRegularOrderIntentMigrations } from "./lib/kalshi-regular-order-intent";
 import { runRegularIntentReconciliationPass } from "./lib/kalshi-regular-order-reconcile";
 import { dashboard2KalshiOrderbookService } from "./lib/kalshi-orderbook-service";
@@ -713,13 +713,14 @@ app.listen(port, async (err) => {
       // right before a restart and confuse operators who just applied per-day adjustments.
       setInterval(runQHAutoTune, 30 * 60_000);
 
-      // Per-symbol Smart Hours calibration runs at every exact UTC hour
-      // boundary. Restart catch-up below closes the mid-hour blind spot, and
-      // the shared operation skips overlap with a manual run.
+      // Per-symbol Smart Hours calibration runs two minutes after every UTC
+      // hour boundary. The grace period lets the just-closed bets receive their
+      // outcomes before the schedule query runs; otherwise HH:00 calibration
+      // misses them and incorrectly marks the whole hour complete.
       // The hourly run uses the same serialized schedule computation as the
       // manual action, but deliberately preserves the visible Smart Hours
       // master state so an operator's intentional OFF choice is not reversed.
-      scheduleAtTopOfEveryUtcHour(async () => {
+      scheduleSmartHoursCalibrationHourly(async () => {
         try {
           const result = await runSmartHoursCalibration({ queueIfBusy: true });
           if (result.skipped) {

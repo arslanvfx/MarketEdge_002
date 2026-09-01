@@ -7,10 +7,15 @@ import {
   createSerializedAsyncOperation,
   millisecondsUntilNextUtcHour,
   scheduleAtTopOfEveryUtcHour,
+  scheduleSmartHoursCalibrationHourly,
+  smartHoursCalibrationMarker,
+  millisecondsUntilNextSmartHoursCalibration,
+  SMART_HOURS_SETTLEMENT_GRACE_MS,
   utcHourMarker,
   isSmartHoursCalibrationCurrent,
   shouldRunSmartHoursCatchUp,
   shouldAttemptSmartHoursLoopRecovery,
+  decideSmartHoursEvaluationDrain,
 } from "./kalshi-quiet-hours-scheduler.ts";
 
 test("Smart Hours UTC marker is stable within an hour and changes at the boundary", () => {
@@ -19,7 +24,7 @@ test("Smart Hours UTC marker is stable within an hour and changes at the boundar
   assert.equal(utcHourMarker(Date.parse("2026-08-19T15:00:00.000Z")), "2026-08-19T15");
 });
 
-test("Smart Hours readiness rejects a prior-hour marker at the exact boundary", () => {
+test("Smart Hours readiness keeps the prior-hour schedule during settlement grace", () => {
   assert.equal(
     isSmartHoursCalibrationCurrent(
       "2026-08-19T14",
@@ -31,6 +36,13 @@ test("Smart Hours readiness rejects a prior-hour marker at the exact boundary", 
     isSmartHoursCalibrationCurrent(
       "2026-08-19T14",
       Date.parse("2026-08-19T15:00:00.000Z"),
+    ),
+    true,
+  );
+  assert.equal(
+    isSmartHoursCalibrationCurrent(
+      "2026-08-19T14",
+      Date.parse("2026-08-19T15:02:00.000Z"),
     ),
     false,
   );
@@ -118,6 +130,101 @@ test("hourly Smart Hours scheduler waits for the next exact UTC hour", () => {
   assert.equal(
     millisecondsUntilNextUtcHour(Date.parse("2026-08-19T14:37:15.250Z")),
     22 * 60_000 + 44_750,
+  );
+});
+
+test("Smart Hours keeps the prior schedule current during settlement grace", () => {
+  assert.equal(
+    smartHoursCalibrationMarker(Date.parse("2026-08-19T15:01:59.999Z")),
+    "2026-08-19T14",
+  );
+  assert.equal(
+    smartHoursCalibrationMarker(Date.parse("2026-08-19T15:02:00.000Z")),
+    "2026-08-19T15",
+  );
+});
+
+test("Smart Hours hourly calibration runs after closed bets have settled", () => {
+  assert.equal(SMART_HOURS_SETTLEMENT_GRACE_MS, 2 * 60_000);
+  assert.equal(
+    millisecondsUntilNextSmartHoursCalibration(Date.parse("2026-08-19T14:37:15.250Z")),
+    24 * 60_000 + 44_750,
+  );
+  assert.equal(
+    millisecondsUntilNextSmartHoursCalibration(Date.parse("2026-08-19T15:01:30.000Z")),
+    30_000,
+  );
+  assert.equal(
+    millisecondsUntilNextSmartHoursCalibration(Date.parse("2026-08-19T15:02:00.000Z")),
+    UTC_HOUR_MS,
+  );
+});
+
+test("Smart Hours scheduler uses the post-settlement hourly boundary", async () => {
+  const timeoutCallbacks: Array<() => void> = [];
+  const timeoutDelays: number[] = [];
+  let now = Date.parse("2026-08-19T14:45:00.000Z");
+  let runs = 0;
+
+  scheduleSmartHoursCalibrationHourly(
+    async () => { runs++; },
+    {
+      now: () => now,
+      setTimeout: (callback, delayMs) => {
+        timeoutCallbacks.push(callback);
+        timeoutDelays.push(delayMs);
+        return timeoutCallbacks.length;
+      },
+      clearTimeout: () => {},
+    },
+  );
+
+  assert.equal(timeoutDelays[0], 17 * 60_000);
+  now = Date.parse("2026-08-19T15:02:10.000Z");
+  timeoutCallbacks[0]?.();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runs, 1);
+  assert.equal(timeoutDelays[1], UTC_HOUR_MS - 10_000);
+});
+
+test("automatic Smart Hours refuses a short deferred evaluation batch", () => {
+  assert.equal(
+    decideSmartHoursEvaluationDrain(
+      { selected: 14, evaluated: 0, failed: 0, hadOuterError: false },
+      true,
+      20,
+    ),
+    "retry",
+  );
+});
+
+test("automatic Smart Hours refuses a partial batch with a retryable failure", () => {
+  assert.equal(
+    decideSmartHoursEvaluationDrain(
+      { selected: 7, evaluated: 6, failed: 1, hadOuterError: false },
+      true,
+      20,
+    ),
+    "retry",
+  );
+});
+
+test("automatic Smart Hours drains full batches and accepts only a fully evaluated tail", () => {
+  assert.equal(
+    decideSmartHoursEvaluationDrain(
+      { selected: 20, evaluated: 20, failed: 0, hadOuterError: false },
+      true,
+      20,
+    ),
+    "continue",
+  );
+  assert.equal(
+    decideSmartHoursEvaluationDrain(
+      { selected: 9, evaluated: 9, failed: 0, hadOuterError: false },
+      true,
+      20,
+    ),
+    "ready",
   );
 });
 

@@ -86,11 +86,12 @@ import {
 import {
   _persistModeToConfig, updateBotConfig, loadDailyPnlFromDB, loadCoinDailyLossFromDB,
   loadCoinStreakStateFromDB, loadWindowBetCountsFromDB, loadRegimeCache,
-  loadBorderProximityCache, getTimingAccuracy, ensureSmartHoursCalibrationCurrent,
+  loadBorderProximityCache, getTimingAccuracy,
 } from "./kalshi-bot-db";
+import { ensureSmartHoursCalibrationCurrent } from "./kalshi-smart-hours-calibration";
 import {
   shouldAttemptSmartHoursLoopRecovery,
-  utcHourMarker,
+  smartHoursCalibrationMarker,
 } from "./kalshi-quiet-hours-scheduler";
 
 // ---------------------------------------------------------------------------
@@ -283,7 +284,7 @@ function recoverCurrentSmartHoursHourlyCalibration(nowMs: number): void {
     || S.config.quietHoursV2?.enabled !== true
   ) return;
 
-  const marker = utcHourMarker(nowMs);
+  const marker = smartHoursCalibrationMarker(nowMs);
   if (S.config.smartHoursCalibratedUtcHour === marker) return;
 
   if (!shouldAttemptSmartHoursLoopRecovery(

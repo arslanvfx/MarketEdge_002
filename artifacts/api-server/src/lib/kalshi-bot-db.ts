@@ -46,7 +46,7 @@ import {
 import { AsyncSerialQueue } from "./async-serial-queue";
 import {
   createSerializedAsyncOperation,
-  utcHourMarker,
+  smartHoursCalibrationMarker,
   shouldRunSmartHoursCatchUp,
 } from "./kalshi-quiet-hours-scheduler";
 import {
@@ -1197,8 +1197,8 @@ async function _runSmartHoursCalibrationInner(opts?: {
   const result = await recomputeAllSymbolQuietHours(opts?.thresholdOverride);
   const isCompleteRun = result.calibratedSymbols.length > 0 && result.skippedSymbols.length === 0;
   const configPatch = {
-    ...(isCompleteRun && S.config.smartHoursCalibratedUtcHour !== utcHourMarker(nowMs)
-      ? { smartHoursCalibratedUtcHour: utcHourMarker(nowMs) }
+    ...(isCompleteRun && S.config.smartHoursCalibratedUtcHour !== smartHoursCalibrationMarker(nowMs)
+      ? { smartHoursCalibratedUtcHour: smartHoursCalibrationMarker(nowMs) }
       : {}),
   };
 
@@ -1228,7 +1228,7 @@ async function _runSmartHoursCalibrationInner(opts?: {
     }
     logger.info(
       {
-        marker: utcHourMarker(nowMs),
+        marker: smartHoursCalibrationMarker(nowMs),
         threshold: S.config.quietHoursV2?.autoTuneThreshold ?? 84.5,
         activeSymbols,
         silencedSymbols,
@@ -1270,7 +1270,7 @@ const _enqueueSmartHoursCalibration = createSerializedAsyncOperation(
     const isAutomaticRequest = opts.thresholdOverride === undefined;
     if (
       isAutomaticRequest
-      && S.config.smartHoursCalibratedUtcHour === utcHourMarker(targetNowMs)
+      && S.config.smartHoursCalibratedUtcHour === smartHoursCalibrationMarker(targetNowMs)
     ) {
       return {
         skipped: false,
@@ -1287,48 +1287,10 @@ const _enqueueSmartHoursCalibration = createSerializedAsyncOperation(
   }
 );
 
-export function runSmartHoursCalibration(
+export function runSmartHoursCalibrationCore(
   opts: SmartHoursCalibrationOptions = {},
 ): Promise<SmartHoursCalibrationResult> {
   return _enqueueSmartHoursCalibration(opts);
-}
-
-/**
- * Current-hour readiness barrier.
- *
- * Waits for an already-running manual/timer/startup calibration instead of
- * interpreting "already in flight" as success. If the run that completed was
- * for the previous UTC hour, one fresh current-hour run is performed.
- */
-export async function ensureSmartHoursCalibrationCurrent(nowMs: number = Date.now()): Promise<boolean> {
-  const marker = utcHourMarker(nowMs);
-  if (S.config.smartHoursCalibratedUtcHour === marker) return true;
-
-  await runSmartHoursCalibration({ nowMs, queueIfBusy: true }).catch(() => null);
-  return S.config.smartHoursCalibratedUtcHour === marker;
-}
-
-/**
- * Startup catch-up: run once when the current UTC hour has not already been
- * calibrated. This never changes the selected quiet-hours mode.
- */
-export async function runSmartHoursCalibrationCatchUpIfNeeded(nowMs: number = Date.now()): Promise<boolean> {
-  const marker = utcHourMarker(nowMs);
-  if (!shouldRunSmartHoursCatchUp(S.config.quietHoursMode, S.config.smartHoursCalibratedUtcHour, nowMs)) {
-    logger.info({ marker }, "[qh-per-symbol] startup catch-up skipped — current UTC hour already calibrated");
-    return false;
-  }
-  logger.info({ marker }, "[qh-per-symbol] startup catch-up: current UTC hour not calibrated — running once");
-  const res = await runSmartHoursCalibration({ nowMs, queueIfBusy: true });
-  if (res.skipped) {
-    logger.info("[qh-per-symbol] startup catch-up skipped — calibration already in flight");
-    return false;
-  }
-  logger.info(
-    { calibratedSymbols: res.calibratedSymbols, skippedSymbols: res.skippedSymbols, marker },
-    "[qh-per-symbol] startup catch-up calibration complete",
-  );
-  return true;
 }
 
 export async function runQuietHoursAutoTune(opts?: { force?: boolean }): Promise<void> {

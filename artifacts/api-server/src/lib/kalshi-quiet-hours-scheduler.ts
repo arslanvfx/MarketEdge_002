@@ -1,4 +1,5 @@
 export const UTC_HOUR_MS = 60 * 60_000;
+export const SMART_HOURS_SETTLEMENT_GRACE_MS = 2 * 60_000;
 
 /**
  * Durable per-hour marker key for a given instant: the UTC calendar hour as
@@ -10,11 +11,22 @@ export function utcHourMarker(nowMs: number = Date.now()): string {
   return new Date(nowMs).toISOString().slice(0, 13);
 }
 
+/**
+ * Smart Hours deliberately changes hours shortly after the UTC boundary, not
+ * exactly on it. Bets from the window that just closed are evaluated
+ * asynchronously and are not guaranteed to have outcome='win'/'loss' at
+ * HH:00:00. Treat the previous schedule as current during this short settlement
+ * grace, then require the new hour's calibration.
+ */
+export function smartHoursCalibrationMarker(nowMs: number = Date.now()): string {
+  return utcHourMarker(nowMs - SMART_HOURS_SETTLEMENT_GRACE_MS);
+}
+
 export function isSmartHoursCalibrationCurrent(
   calibratedUtcHour: string | undefined,
   nowMs: number = Date.now(),
 ): boolean {
-  return calibratedUtcHour === utcHourMarker(nowMs);
+  return calibratedUtcHour === smartHoursCalibrationMarker(nowMs);
 }
 
 /**
@@ -28,7 +40,7 @@ export function shouldRunSmartHoursCatchUp(
   storedMarker: string | undefined,
   nowMs: number = Date.now(),
 ): boolean {
-  return storedMarker !== utcHourMarker(nowMs);
+  return storedMarker !== smartHoursCalibrationMarker(nowMs);
 }
 
 /**
@@ -43,7 +55,7 @@ export function shouldAttemptSmartHoursLoopRecovery(
   nowMs: number = Date.now(),
   retryIntervalMs: number = 5 * 60_000,
 ): boolean {
-  if (storedMarker === utcHourMarker(nowMs)) return false;
+  if (storedMarker === smartHoursCalibrationMarker(nowMs)) return false;
   if (!Number.isFinite(lastAttemptAtMs) || lastAttemptAtMs <= 0) return true;
   const elapsedMs = nowMs - lastAttemptAtMs;
   return elapsedMs < 0 || elapsedMs >= retryIntervalMs;
@@ -52,6 +64,31 @@ export function shouldAttemptSmartHoursLoopRecovery(
 export function millisecondsUntilNextUtcHour(nowMs: number = Date.now()): number {
   const remainder = ((nowMs % UTC_HOUR_MS) + UTC_HOUR_MS) % UTC_HOUR_MS;
   return remainder === 0 ? UTC_HOUR_MS : UTC_HOUR_MS - remainder;
+}
+
+export function millisecondsUntilNextSmartHoursCalibration(nowMs: number = Date.now()): number {
+  const remainder = ((nowMs % UTC_HOUR_MS) + UTC_HOUR_MS) % UTC_HOUR_MS;
+  const thisHourTarget = SMART_HOURS_SETTLEMENT_GRACE_MS;
+  if (remainder < thisHourTarget) return thisHourTarget - remainder;
+  return UTC_HOUR_MS - remainder + thisHourTarget;
+}
+
+export type SmartHoursEvaluationDrainDecision = "continue" | "ready" | "retry";
+
+export function decideSmartHoursEvaluationDrain(
+  evaluation: { selected: number; evaluated: number; failed: number; hadOuterError: boolean },
+  automatic: boolean,
+  batchSize: number,
+): SmartHoursEvaluationDrainDecision {
+  if (evaluation.hadOuterError) return "retry";
+  if (evaluation.selected < batchSize) {
+    if (!automatic) return "ready";
+    return evaluation.failed === 0 && evaluation.evaluated === evaluation.selected
+      ? "ready"
+      : "retry";
+  }
+  if (evaluation.evaluated > 0) return "continue";
+  return automatic ? "retry" : "ready";
 }
 
 export function createNonOverlappingAsyncJob(
@@ -120,6 +157,26 @@ export function scheduleAtTopOfEveryUtcHour(
   job: () => Promise<void>,
   timers: HourlyTimerApi = systemTimers,
 ): { cancel: () => void } {
+  return scheduleHourly(job, millisecondsUntilNextUtcHour, timers);
+}
+
+/**
+ * Schedule Smart Hours after the settlement grace each UTC hour. This prevents
+ * the automatic pass from racing the outcome evaluator at HH:00 and then
+ * suppressing a corrected pass for the rest of the hour.
+ */
+export function scheduleSmartHoursCalibrationHourly(
+  job: () => Promise<void>,
+  timers: HourlyTimerApi = systemTimers,
+): { cancel: () => void } {
+  return scheduleHourly(job, millisecondsUntilNextSmartHoursCalibration, timers);
+}
+
+function scheduleHourly(
+  job: () => Promise<void>,
+  nextDelay: (nowMs: number) => number,
+  timers: HourlyTimerApi,
+): { cancel: () => void } {
   const run = createNonOverlappingAsyncJob(job);
   let cancelled = false;
   let timeoutHandle: unknown;
@@ -131,7 +188,7 @@ export function scheduleAtTopOfEveryUtcHour(
       // calibration cannot suppress the following hour's timer.
       scheduleNextBoundary();
       void run();
-    }, millisecondsUntilNextUtcHour(timers.now()));
+    }, nextDelay(timers.now()));
   };
   scheduleNextBoundary();
 

@@ -103,6 +103,7 @@
 - [Quiet hours byDow keyed by ET day](quiet-hours-et-dow.md) — silencedByDow/reducedByDow keys are ET days (UI tabs) with UTC hour cells; enforcement must use getEtDow(), never getUTCDay(), and the % cap applies after the randomizer
 - [Quiet-hours placement-time gate](quiet-hours-placement-gate.md) — Smart Hours must be enforced inside the tick (entry + pre-order, fail-closed) not just the loop; direct-dispatch paths skip loop gates; auto-tune writes merge per-cell deltas onto fresh config
 - [Per-symbol smart hours architecture](per-symbol-smart-hours.md) — exact-hour calibration; 0–2 bets collect data; manual limits survive promotion; config persistence is serialized
+- [Smart Hours settlement barrier](smart-hours-settlement-barrier.md) — hourly schedules must evaluate and drain closed bets before committing the hour marker.
 - [Eval stuck-forever fix](eval-stuck-fix.md) — rows with no price + no stored pnl past 90-s defer now commit conservative loss; reEvaluateSettledBets auto-corrects; scheduled every 30 min via _lastReEvalAt in runBotLoopTick
 - [Conviction ROI gate bypass](conviction-roi-gate-bypass.md) — roi-too-low SKIP in makeBotDecision must be gated on `decisionMode !== "conviction"`; kills ALL bets when market prices a direction strongly
 - [Direction guard live-price feed](direction-guard-live-price.md) — convictionPriceTicks MUST be fed the fresh live spot price (getTickerFresh, 1s poller), NOT getCachedPrediction; predCache is 15s-stale so every tick was identical → net slope ≈0 → guard never blocked

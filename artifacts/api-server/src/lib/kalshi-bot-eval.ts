@@ -87,7 +87,29 @@ async function fetchKalshiResultWithRetry(
   return last ?? { result: "unknown" as const, status: "unknown" };
 }
 
-export async function evalClosedBets(): Promise<void> {
+export type EvalClosedBetsResult = {
+  selected: number;
+  evaluated: number;
+  failed: number;
+  hadOuterError: boolean;
+};
+
+let _evalClosedBetsInFlight: Promise<EvalClosedBetsResult> | null = null;
+
+/**
+ * Coalesce all outcome-evaluation callers onto one active pass. The bot loop,
+ * hourly Smart Hours refresh, and operator actions can otherwise select and
+ * apply side effects to the same unresolved rows concurrently.
+ */
+export function evalClosedBets(): Promise<EvalClosedBetsResult> {
+  if (_evalClosedBetsInFlight) return _evalClosedBetsInFlight;
+  _evalClosedBetsInFlight = _evalClosedBetsPass().finally(() => {
+    _evalClosedBetsInFlight = null;
+  });
+  return _evalClosedBetsInFlight;
+}
+
+async function _evalClosedBetsPass(): Promise<EvalClosedBetsResult> {
   const deferCutoff = new Date(Date.now() - EVAL_DEFER_MS);
 
   try {
@@ -159,9 +181,12 @@ export async function evalClosedBets(): Promise<void> {
       .orderBy(asc(kalshiBotBetsTable.windowKey)) // chronological order for correct streak sequencing
       .limit(20); // process in small batches — each expired row makes a network call
 
-    if (rows.length === 0) return;
+    if (rows.length === 0) {
+      return { selected: 0, evaluated: 0, failed: 0, hadOuterError: false };
+    }
 
     let evaluated = 0;
+    let failed = 0;
     for (const row of rows) {
       let outcome: "win" | "loss" | "push" = "loss"; // always overwritten before use; TS needs initialization
       let correctedPnl: number | null = null;
@@ -527,6 +552,7 @@ export async function evalClosedBets(): Promise<void> {
       }
 
       } catch (rowErr) {
+        failed++;
         // DB write (or price fetch) failed for this row — log and continue so
         // other rows in the batch are still processed.  This row keeps
         // evaluatedAt=NULL and will be retried on the next evalClosedBets call.
@@ -544,8 +570,15 @@ export async function evalClosedBets(): Promise<void> {
     // Back-fill any snapshots whose window closed without a bet row (coins we
     // tracked but didn't bet on) using prediction_records as the source of truth.
     recoverBotEntryTimingSnapshots().catch(() => {});
+    return {
+      selected: rows.length,
+      evaluated,
+      failed,
+      hadOuterError: false,
+    };
   } catch (err) {
     logger.warn({ err }, "[kalshi-bot] evalClosedBets error (non-fatal)");
+    return { selected: 0, evaluated: 0, failed: 0, hadOuterError: true };
   }
 }
 
