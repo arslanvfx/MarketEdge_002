@@ -136,7 +136,7 @@ test("FastLane bypasses authenticated-book quote and revalidation for every mark
 test("FastLane honors enabled proximity and freefall guards without adding waits or requests", () => {
   const source = readFileSync(new URL("./kalshi-bot-tick.ts", import.meta.url), "utf8");
   const proximityStart = source.indexOf("Price-triggered strike-proximity re-check (tick-time)");
-  const freefallStart = source.indexOf("const regularFreefallEnabled");
+  const freefallStart = source.indexOf("const initialRegularFreefallEnabled");
   const intentStart = source.indexOf("claimRegularOrderIntent", freefallStart);
 
   assert.ok(proximityStart >= 0);
@@ -148,7 +148,23 @@ test("FastLane honors enabled proximity and freefall guards without adding waits
   assert.ok(intentStart > freefallStart);
   assert.match(
     source.slice(freefallStart, intentStart),
-    /enabled: regularFreefallEnabled,\s*samples: regularFreefallEnabled \? \(convictionPriceTicks\.get\(sym\) \?\? \[\]\) : \[\]/,
+    /enabled,\s*samples: enabled \? \(convictionPriceTicks\.get\(sym\) \?\? \[\]\) : \[\]/,
+  );
+  assert.match(
+    source.slice(freefallStart, intentStart),
+    /consecutiveSeconds,\s*requireConsecutiveFavorableTrend: isFastLane/,
+  );
+  assert.match(
+    source.slice(intentStart),
+    /preSubmitGuard: \(\) => \{[\s\S]*if \(isFastLane\)[\s\S]*S\.config\.convictionDirectionGuardEnabled[\s\S]*S\.config\.convictionDirectionGuardMinSeconds[\s\S]*evaluateCurrentRegularFreefall\(/,
+  );
+  assert.match(
+    source.slice(intentStart),
+    /exchangeBoundaryFreefallRevocation[\s\S]*boundary: "exchange_pre_submit"[\s\S]*await persistBoundarySkip\("live", true\)[\s\S]*await resolveRegularOrderIntent\([\s\S]*releaseRegularRouteFundingHold[\s\S]*releaseConvictionEntryReservation/,
+  );
+  assert.match(
+    source.slice(intentStart),
+    /catch \(durabilityErr\)[\s\S]*windowFailedFills\.add[\s\S]*retaining reservations[\s\S]*return;/,
   );
   assert.doesNotMatch(source.slice(proximityStart, intentStart), /await getTickerFresh|setTimeout|sleep\(/);
 });

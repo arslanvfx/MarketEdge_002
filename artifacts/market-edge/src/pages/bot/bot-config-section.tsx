@@ -1218,7 +1218,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                       {(merged.convictionDirectionGuardEnabled ?? true) && (
                         <div className="flex flex-col gap-2 mt-1">
                           <label className="flex flex-col gap-1.5">
-                            <span className="text-xs text-muted-foreground">Lookback window</span>
+                            <span className="text-xs text-muted-foreground">Required trend duration</span>
                             <select
                               className="bg-background border border-sky-500/20 rounded-md px-3 py-1.5 text-sm text-foreground"
                               value={merged.convictionDirectionGuardMinSeconds ?? 4}
@@ -1228,7 +1228,7 @@ export function BotConfigSection({ cfg, merged, configDraft, setConfigDraft, sav
                                 <option key={n} value={n}>{n}s{n === 4 ? " — default" : n <= 3 ? " — tight" : n >= 7 ? " — wide" : ""}</option>
                               ))}
                             </select>
-                            <span className="text-[10px] text-muted-foreground/60">Compares the coin's spot price from N seconds ago against the current price. If the net move is toward the strike, entry is blocked. Shorter = reacts faster; longer = only catches sustained moves.</span>
+                            <span className="text-[10px] text-muted-foreground/60">FastLane requires N consecutive favorable one-second moves immediately before submission. A flat, repeated, missing, stale, or adverse update resets the sequence. Other Bot 1 modes retain their existing adverse-trend lookback behavior.</span>
                           </label>
                         </div>
                       )}

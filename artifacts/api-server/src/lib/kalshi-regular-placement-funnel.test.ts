@@ -110,7 +110,9 @@ test("bot wiring keeps paper preview read-only and unknown live outcomes fail cl
 
   const uncertainBranch = source.slice(
     source.indexOf("const uncertain = isUncertainOrderError"),
-    source.indexOf("DEFINITE pre-exposure failure"),
+    source.indexOf(
+      "const boundaryRevocation = exchangeBoundaryFreefallRevocation.value",
+    ),
   );
   assert.match(uncertainBranch, /markPlacementTerminal\(\s*"unknown"/);
   assert.match(uncertainBranch, /markRegularOrderIntentUnknown/);

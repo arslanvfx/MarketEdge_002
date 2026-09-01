@@ -42,3 +42,9 @@ FastLane emergency-close distance supports a per-market override with the global
 If an authoritative fill breaches the snapshotted emergency threshold, record the entry before beginning the emergency exit. Normalize NO fills to winning-side cost. Full exits finalize through an idempotent durable lifecycle; unknown or partial exits remain blocked with residual exposure visible, and recovery must work across pauses and restarts without another broker order.
 
 **Why:** A buy limit caps the worst price but cannot impose a lower execution bound. Immediate post-fill mitigation reduces abnormal price-improvement exposure, while durable exit identity prevents a timeout or partial sell from causing an oversell or silently dropping residual contracts.
+
+For FastLane, the shared Freefall duration means a trailing sequence of favorable authoritative publications: YES rises and NO falls throughout the configured span. Flat or adverse publications reset it; an endpoint bounce never qualifies.
+
+**Why:** The saved consecutive-seconds setting expresses sustained directional confirmation, not net movement between two endpoints.
+
+**How to apply:** Count distinct upstream publications, ignore duplicate local polls, and let every distinct publication participate in reset accounting. Re-read the current setting before submission; a durable revocation failure retains ownership.

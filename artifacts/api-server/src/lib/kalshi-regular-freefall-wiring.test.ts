@@ -8,7 +8,7 @@ test("paper and live share one regular freefall decision at pre-submit", () => {
     "utf8",
   );
   const decision = source.indexOf(
-    "const regularFreefall = evaluateRegularFreefallPreSubmitGuard",
+    "const regularFreefall = evaluateCurrentRegularFreefall",
   );
   const liveBoundary = source.indexOf('if (entryMode === "live")', decision);
   const intent = source.indexOf("claimRegularOrderIntent", decision);
@@ -51,11 +51,15 @@ test("one persisted false disables every regular direction guard checkpoint incl
   );
   assert.match(
     tickSource,
-    /const regularFreefallEnabled = S\.config\.convictionDirectionGuardEnabled \?\? true/,
+    /const initialRegularFreefallEnabled =\s*S\.config\.convictionDirectionGuardEnabled \?\? true/,
   );
   assert.match(
     tickSource,
-    /enabled: regularFreefallEnabled,\s*samples: regularFreefallEnabled \? \(convictionPriceTicks\.get\(sym\) \?\? \[\]\) : \[\]/,
+    /enabled,\s*samples: enabled \? \(convictionPriceTicks\.get\(sym\) \?\? \[\]\) : \[\]/,
+  );
+  assert.match(
+    tickSource,
+    /preSubmitGuard: \(\) => \{[\s\S]*const currentEnabled =\s*S\.config\.convictionDirectionGuardEnabled \?\? true/,
   );
 
   const routeSource = readFileSync(

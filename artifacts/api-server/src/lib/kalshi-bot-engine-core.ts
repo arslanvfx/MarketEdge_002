@@ -1663,7 +1663,7 @@ export interface BotConfig {
 
   // Conviction direction guard — blocks entry when price is moving toward the strike
   convictionDirectionGuardEnabled?: boolean;   // master toggle (default true)
-  convictionDirectionGuardMinSeconds?: number; // consecutive adverse seconds required to block (default 4, clamp 2–10)
+  convictionDirectionGuardMinSeconds?: number; // direction duration; FastLane requires this many consecutive favorable seconds (default 4, clamp 2–10)
   convictionDirectionLookbackCandles?: number; // candle fallback lookback when tick data unavailable (default 3, clamp 1–10)
   // Broader recent tick horizon (seconds) evaluated alongside the short window
   // so a sub-minute freefall toward the strike cannot hide behind a few flat

@@ -2976,51 +2976,87 @@ async function _runBotTick(
   // Evaluate one canonical final decision for both modes at the exact same
   // pre-submit boundary. Live fails closed; paper records the decision but
   // remains advisory so it can measure the guard without changing exposure.
-  const regularFreefallEnabled = S.config.convictionDirectionGuardEnabled ?? true;
-  // Keep the disabled path allocation-free with respect to guard evidence.
-  // The evaluator returns immediately and no samples are copied or inspected.
-  const freefallProduct = regularFreefallEnabled
-    ? CRYPTO_COINS.find(
-      (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
-    )
-    : undefined;
+  const initialRegularFreefallEnabled =
+    S.config.convictionDirectionGuardEnabled ?? true;
+  const initialRegularFreefallConsecutiveSeconds =
+    S.config.convictionDirectionGuardMinSeconds ?? 4;
+  // Resolve identity independently from the initial enabled state. The operator
+  // may enable or strengthen the guard while a durable intent is being claimed;
+  // the exchange-boundary callback must be able to enforce that current policy.
+  const freefallProduct = CRYPTO_COINS.find(
+    (product) => product.symbol.toUpperCase() === sym.toUpperCase(),
+  );
+  const evaluateCurrentRegularFreefall = (
+    nowMs: number,
+    enabled = initialRegularFreefallEnabled,
+    consecutiveSeconds = initialRegularFreefallConsecutiveSeconds,
+  ) =>
+    evaluateRegularFreefallPreSubmitGuard({
+      enabled,
+      samples: enabled ? (convictionPriceTicks.get(sym) ?? []) : [],
+      side: direction,
+      nowMs,
+      windowStartMs,
+      closeTimeMs: windowStartMs + 15 * 60_000,
+      targetPrice: kalshiTarget,
+      hasProduct: freefallProduct != null,
+      consecutiveSeconds,
+      requireConsecutiveFavorableTrend: isFastLane,
+      authoritativeCommodityCadence: freefallProduct?.product.startsWith("PYTH:") ?? false,
+      authoritativePublicationCadence: freefallProduct != null,
+    });
   const freefallStartedAt = Date.now();
-  const regularFreefall = evaluateRegularFreefallPreSubmitGuard({
-    enabled: regularFreefallEnabled,
-    samples: regularFreefallEnabled ? (convictionPriceTicks.get(sym) ?? []) : [],
-    side: direction,
-    nowMs: freefallStartedAt,
-    windowStartMs,
-    closeTimeMs: windowStartMs + 15 * 60_000,
-    targetPrice: kalshiTarget,
-    hasProduct: freefallProduct != null,
-    authoritativeCommodityCadence: freefallProduct?.product.startsWith("PYTH:") ?? false,
-    authoritativePublicationCadence: freefallProduct != null,
-  });
-  const freefallSamples = regularFreefallEnabled ? (convictionPriceTicks.get(sym) ?? []) : [];
-  const latestFreefallSample = freefallSamples[freefallSamples.length - 1];
-  const regularFreefallSignals = {
-    allowed: regularFreefall.allowed,
-    evidenceClass: regularFreefall.allowed
-      ? "clear"
-      : regularFreefall.guardResult?.evaluable === true ? "adverse" : "unavailable",
-    advisory: entryMode === "paper",
-    cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "cfbenchmarks",
-    source: latestFreefallSample?.source ?? null,
-    sourceIndex: latestFreefallSample?.sourceIndex ?? null,
-    sourceSequence: latestFreefallSample?.sourceSequence ?? null,
-    sourcePublishedAtMs: latestFreefallSample?.oraclePublishedAtMs ?? null,
-    sourceAgeMs: latestFreefallSample?.oracleAgeMs ?? null,
-    sampleValues: freefallSamples.slice(-8).map((sample) => ({
-      price: sample.price,
-      publishedAtMs: sample.oraclePublishedAtMs ?? null,
-      sourceSequence: sample.sourceSequence ?? null,
-    })),
-    reason: regularFreefall.reason,
-    guardResult: regularFreefall.guardResult,
-    sampleCoverageMs: regularFreefall.sampleCoverageMs,
-    secondsRemaining: regularFreefall.secondsRemaining,
-  } as const;
+  const regularFreefall = evaluateCurrentRegularFreefall(freefallStartedAt);
+  const buildRegularFreefallSignals = (
+    decision: ReturnType<typeof evaluateRegularFreefallPreSubmitGuard>,
+    enabled: boolean,
+    configuredConsecutiveSeconds: number,
+  ) => {
+    const currentSamples = enabled
+      ? (convictionPriceTicks.get(sym) ?? [])
+      : [];
+    const latestSample = currentSamples[currentSamples.length - 1];
+    return {
+      allowed: decision.allowed,
+      evidenceClass: decision.allowed
+        ? "clear"
+        : decision.guardResult?.evaluable === true ? "adverse" : "unavailable",
+      advisory: entryMode === "paper",
+      cadence: freefallProduct?.product.startsWith("PYTH:") ? "pyth" : "cfbenchmarks",
+      source: latestSample?.source ?? null,
+      sourceIndex: latestSample?.sourceIndex ?? null,
+      sourceSequence: latestSample?.sourceSequence ?? null,
+      sourcePublishedAtMs: latestSample?.oraclePublishedAtMs ?? null,
+      sourceAgeMs: latestSample?.oracleAgeMs ?? null,
+      sampleValues: currentSamples.slice(-8).map((sample) => ({
+        price: sample.price,
+        publishedAtMs: sample.oraclePublishedAtMs ?? null,
+        sourceSequence: sample.sourceSequence ?? null,
+      })),
+      reason: decision.reason,
+      guardResult: decision.guardResult,
+      sampleCoverageMs: decision.sampleCoverageMs,
+      secondsRemaining: decision.secondsRemaining,
+      configuredConsecutiveSeconds,
+      consecutiveFavorableMoves:
+        decision.guardResult?.consecutiveFavorableMoves ?? 0,
+      consecutiveFavorableSeconds:
+        decision.guardResult?.consecutiveFavorableSeconds ?? 0,
+      favorableTrendStartedAt:
+        decision.guardResult?.favorableTrendStartedAt ?? null,
+      favorableTrendEndedAt:
+        decision.guardResult?.favorableTrendEndedAt ?? null,
+      favorableTrendResetCount:
+        decision.guardResult?.favorableTrendResetCount ?? 0,
+      lastFavorableTrendResetAt:
+        decision.guardResult?.lastFavorableTrendResetAt ?? null,
+    } as const;
+  };
+  const regularFreefallSignals = buildRegularFreefallSignals(
+    regularFreefall,
+    initialRegularFreefallEnabled,
+    initialRegularFreefallConsecutiveSeconds,
+  );
   recordRegularSpotCandidateDecision({
     symbol: sym,
     product: freefallProduct?.product ?? "unavailable",
@@ -3227,6 +3263,12 @@ async function _runBotTick(
     //  the confirmed-fill resolve after persistBetRecord can reference them.)
     const intentStartedAt = Date.now();
     const zeroFillRetryCooldownMs = regularZeroFillRetryCooldownMs(S.config.decisionMode);
+    const exchangeBoundaryFreefallRevocation: {
+      value: {
+        decision: ReturnType<typeof evaluateRegularFreefallPreSubmitGuard>;
+        signals: ReturnType<typeof buildRegularFreefallSignals>;
+      } | null;
+    } = { value: null };
     try {
       const claim = await claimRegularOrderIntent({
         clientOrderId: _intentReservationId,
@@ -3374,6 +3416,56 @@ async function _runBotTick(
           // definite-error catch resolves this durable intent as skipped.
           preSubmitGuard: () => {
             if (!S.config.enabled || S.paused || S.botMode !== "live" || entryMode !== "live") return false;
+            if (isFastLane) {
+              const currentEnabled =
+                S.config.convictionDirectionGuardEnabled ?? true;
+              const currentConsecutiveSeconds =
+                S.config.convictionDirectionGuardMinSeconds ?? 4;
+              const exchangeBoundaryFreefall =
+                evaluateCurrentRegularFreefall(
+                  Date.now(),
+                  currentEnabled,
+                  currentConsecutiveSeconds,
+                );
+              if (!exchangeBoundaryFreefall.allowed) {
+                const evidence =
+                  describeRegularFreefallDecision(exchangeBoundaryFreefall);
+                exchangeBoundaryFreefallRevocation.value = {
+                  decision: exchangeBoundaryFreefall,
+                  signals: buildRegularFreefallSignals(
+                    exchangeBoundaryFreefall,
+                    currentEnabled,
+                    currentConsecutiveSeconds,
+                  ),
+                };
+                recordRegularSpotCandidateDecision({
+                  symbol: sym,
+                  product: freefallProduct?.product ?? "unavailable",
+                  evidenceClass:
+                    exchangeBoundaryFreefall.guardResult?.evaluable === true
+                      ? "adverse"
+                      : "unavailable",
+                  reason: exchangeBoundaryFreefall.reason,
+                  atMs: Date.now(),
+                  windowKey,
+                  mode: entryMode,
+                });
+                setTickAbortReason(sym, windowKey, evidence);
+                logger.warn(
+                  {
+                    sym,
+                    windowKey,
+                    direction,
+                    configuredConsecutiveSeconds:
+                      currentConsecutiveSeconds,
+                    reason: exchangeBoundaryFreefall.reason,
+                    guardResult: exchangeBoundaryFreefall.guardResult,
+                  },
+                  "[kalshi-bot] FastLane favorable-trend guard revoked order at exchange boundary",
+                );
+                return false;
+              }
+            }
             if (!placementTimingAllowsEntry(
               "exchange-pre-submit",
               authenticatedBookQuote?.marginalLimitCost ?? expectedFillCost,
@@ -3790,6 +3882,111 @@ async function _runBotTick(
         );
         setTickAbortReason(sym, windowKey,
           "order outcome uncertain — possible live exposure; blocked pending reconciliation (no retry)");
+        return;
+      }
+
+      const boundaryRevocation = exchangeBoundaryFreefallRevocation.value;
+      if (boundaryRevocation != null) {
+        const boundaryDecision = boundaryRevocation.decision;
+        const boundarySignals = boundaryRevocation.signals;
+        const evidence = describeRegularFreefallDecision(boundaryDecision);
+        const persistBoundarySkip = async (
+          mode: BotMode,
+          required: boolean,
+        ) => {
+          const persistAt = Date.now();
+          const reason =
+            boundaryDecision.reason ?? "freefall_blocked_exchange_boundary";
+          if (!required && !shouldPersistRegularFreefallSkip({
+            symbol: sym,
+            windowKey,
+            mode,
+            reason,
+            nowMs: persistAt,
+          })) return;
+          await persistBetRecord({
+            symbol: sym,
+            windowKey,
+            ticker: expectedTicker,
+            direction,
+            action: "skip",
+            signals: {
+              reason: "conviction_freefall_guard",
+              guardReason: boundaryDecision.reason,
+              guardResult: boundaryDecision.guardResult,
+              sampleCoverageMs: boundaryDecision.sampleCoverageMs,
+              secondsRemaining: boundaryDecision.secondsRemaining,
+              regularFreefall: {
+                ...boundarySignals,
+                advisory: mode === "paper",
+              },
+              boundary: "exchange_pre_submit",
+            },
+            entryPrice: yesPrice,
+            kalshiTarget,
+            mode,
+            insertId:
+              `${sym}:${windowKey}:freefall-boundary:${mode}:${persistAt}`,
+          });
+        };
+        // The broker POST was synchronously prevented. Before releasing any
+        // ownership, make the exact rejection evidence and durable intent
+        // transition survive a process interruption. A failed write retains
+        // the funding/entry reservations and blocks re-entry for reconciliation.
+        try {
+          await persistBoundarySkip("live", true);
+          await resolveRegularOrderIntent({
+            clientOrderId: _intentReservationId,
+            status: "skipped",
+            reason: evidence.slice(0, 240),
+          });
+        } catch (durabilityErr) {
+          windowFailedFills.add(`${sym}:${windowKey}:${entryMode}`);
+          markPlacementTerminal(
+            "intent_error",
+            "exchange-boundary freefall revocation durability failed",
+          );
+          const durabilityReason =
+            "FastLane order revoked before broker POST, but rejection persistence failed — ownership retained and re-entry blocked";
+          setTickAbortReason(sym, windowKey, durabilityReason);
+          logger.error(
+            {
+              err: durabilityErr,
+              sym,
+              windowKey,
+              direction,
+              clientOrderId: _intentReservationId,
+              reason: boundaryDecision.reason,
+            },
+            "[kalshi-bot] exchange-boundary freefall revocation durability failed — retaining reservations",
+          );
+          return;
+        }
+        if (_routeFundingHoldClaimed) {
+          releaseRegularRouteFundingHold(_intentReservationId);
+          _routeFundingHoldClaimed = false;
+        }
+        markPlacementTerminal("freefall", evidence);
+        releaseConvictionEntryReservation(evidence);
+        setTickAbortReason(sym, windowKey, evidence);
+        if (S.config.shadowPaperBets) {
+          void persistBoundarySkip("paper", false).catch((persistErr) =>
+            logger.warn(
+              { err: persistErr, sym, windowKey, mode: "paper" },
+              "[kalshi-bot] exchange-boundary shadow-paper evidence persist failed",
+            )
+          );
+        }
+        logger.warn(
+          {
+            sym,
+            windowKey,
+            direction,
+            reason: boundaryDecision.reason,
+            regularFreefall: boundarySignals,
+          },
+          "[kalshi-bot] FastLane order durably revoked by exchange-boundary favorable-trend guard",
+        );
         return;
       }
 

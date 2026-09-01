@@ -28,6 +28,10 @@ export interface RegularFreefallGuardInput {
   closeTimeMs: number;
   targetPrice: number;
   hasProduct: boolean;
+  /** Operator-configured real-time direction duration (default 4 seconds). */
+  consecutiveSeconds?: number;
+  /** FastLane requires the full configured trailing favorable sequence. */
+  requireConsecutiveFavorableTrend?: boolean;
   authoritativeCommodityCadence?: boolean;
   authoritativePublicationCadence?: boolean;
 }
@@ -64,6 +68,22 @@ export function evaluateRegularFreefallPreSubmitGuard(
       secondsRemaining,
     };
   }
+  const consecutiveSeconds =
+    input.consecutiveSeconds ?? REGULAR_FREEFALL_CONSECUTIVE_SECONDS;
+  if (
+    !Number.isInteger(consecutiveSeconds)
+    || consecutiveSeconds < 2
+    || consecutiveSeconds > 10
+  ) {
+    return {
+      allowed: false,
+      reason: "freefall_unavailable_config",
+      guardResult: null,
+      sampleCoverageMs: null,
+      deferredUnavailable: false,
+      secondsRemaining,
+    };
+  }
   if (!input.hasProduct) {
     return {
       allowed: false,
@@ -90,8 +110,10 @@ export function evaluateRegularFreefallPreSubmitGuard(
     nowMs: input.nowMs,
     directionEnabled: true,
     eligibilityStartMs: input.windowStartMs,
-    consecutiveSeconds: REGULAR_FREEFALL_CONSECUTIVE_SECONDS,
+    consecutiveSeconds,
     favorableTrendConfirmationEnabled: true,
+    requireConsecutiveFavorableTrend:
+      input.requireConsecutiveFavorableTrend ?? false,
     coordinatedDirectionClearanceEnabled: false,
     targetPrice: input.targetPrice,
     secondsRemaining,
@@ -135,6 +157,9 @@ export function describeRegularFreefallDecision(
     result?.targetPrice != null ? `target=${result.targetPrice}` : null,
     result?.directionalMovePct != null
       ? `directional=${result.directionalMovePct.toFixed(6)}%`
+      : null,
+    result != null
+      ? `favorable=${(result.consecutiveFavorableSeconds ?? 0).toFixed(1)}s/${result.requiredConsecutiveMoves}s`
       : null,
     result?.rapidMovePct != null
       ? `rapid=${result.rapidMovePct.toFixed(6)}%`

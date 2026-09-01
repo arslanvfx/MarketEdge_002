@@ -36,6 +36,10 @@ function evaluate(
   side: "yes" | "no",
   prices: number[],
   secondsRemaining = 120,
+  options?: {
+    consecutiveSeconds?: number;
+    requireConsecutiveFavorableTrend?: boolean;
+  },
 ) {
   return evaluateRegularFreefallPreSubmitGuard({
     samples: samples(prices),
@@ -45,6 +49,9 @@ function evaluate(
     closeTimeMs: NOW + secondsRemaining * 1_000,
     targetPrice: side === "yes" ? TARGET : 101,
     hasProduct: true,
+    consecutiveSeconds: options?.consecutiveSeconds,
+    requireConsecutiveFavorableTrend:
+      options?.requireConsecutiveFavorableTrend,
   });
 }
 
@@ -73,6 +80,124 @@ test("favorable movement below the rapid threshold is allowed", () => {
   assert.equal(result.allowed, true);
   assert.equal(result.guardResult?.favorableTrendConfirmed, true);
   assert.equal(result.guardResult?.targetSideWindowConfirmed, true);
+});
+
+test("FastLane requires the configured consecutive favorable seconds for YES", () => {
+  const insufficient = evaluate(
+    "yes",
+    [100.02, 100, 99.99, 100, 100.01, 100.01],
+    120,
+    {
+      consecutiveSeconds: 4,
+      requireConsecutiveFavorableTrend: true,
+    },
+  );
+  assert.equal(insufficient.allowed, false);
+  assert.equal(
+    insufficient.reason,
+    "freefall_favorable_trend_not_confirmed_yes",
+  );
+  assert.equal(insufficient.guardResult?.consecutiveFavorableMoves, 0);
+  assert.equal(insufficient.guardResult?.consecutiveFavorableSeconds, 0);
+  assert.equal(insufficient.guardResult?.favorableTrendResetCount, 1);
+
+  const confirmed = evaluate(
+    "yes",
+    [99.99, 100, 100.01, 100.02, 100.03, 100.04],
+    120,
+    {
+      consecutiveSeconds: 4,
+      requireConsecutiveFavorableTrend: true,
+    },
+  );
+  assert.equal(confirmed.allowed, true);
+  assert.equal(confirmed.guardResult?.consecutiveFavorableMoves, 4);
+  assert.equal(confirmed.guardResult?.consecutiveFavorableSeconds, 4);
+  assert.equal(confirmed.guardResult?.requiredConsecutiveMoves, 4);
+});
+
+test("FastLane applies the configured consecutive favorable seconds symmetrically to NO", () => {
+  const insufficient = evaluate(
+    "no",
+    [100.2, 100.1, 100.05, 100, 99.95, 99.95],
+    120,
+    {
+      consecutiveSeconds: 3,
+      requireConsecutiveFavorableTrend: true,
+    },
+  );
+  assert.equal(insufficient.allowed, false);
+  assert.equal(
+    insufficient.reason,
+    "freefall_favorable_trend_not_confirmed_no",
+  );
+
+  const confirmed = evaluate(
+    "no",
+    [100.02, 100.01, 100, 99.99, 99.98, 99.97],
+    120,
+    {
+      consecutiveSeconds: 3,
+      requireConsecutiveFavorableTrend: true,
+    },
+  );
+  assert.equal(confirmed.allowed, true);
+  assert.equal(confirmed.guardResult?.consecutiveFavorableMoves, 3);
+  assert.equal(confirmed.guardResult?.consecutiveFavorableSeconds, 3);
+  assert.equal(confirmed.guardResult?.requiredConsecutiveMoves, 3);
+});
+
+test("FastLane resets favorable confirmation on an adverse sub-cadence source update", () => {
+  const points = [
+    { offset: -5_000, price: 99.99 },
+    { offset: -4_000, price: 100 },
+    { offset: -3_000, price: 100.01 },
+    // The one-second cadence selector skips this 500ms update. Strict
+    // favorable accounting must still see it and reset the sequence.
+    { offset: -2_500, price: 100.005 },
+    { offset: -2_000, price: 100.02 },
+    { offset: -1_000, price: 100.03 },
+    { offset: 0, price: 100.04 },
+  ];
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    samples: points.map(({ offset, price }) => ({
+      price,
+      ts: NOW + offset,
+    })),
+    side: "yes",
+    nowMs: NOW,
+    windowStartMs: 0,
+    closeTimeMs: NOW + 120_000,
+    targetPrice: TARGET,
+    hasProduct: true,
+    consecutiveSeconds: 4,
+    requireConsecutiveFavorableTrend: true,
+  });
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "freefall_favorable_trend_not_confirmed_yes");
+  assert.equal(result.guardResult?.consecutiveFavorableMoves, 3);
+  assert.equal(result.guardResult?.consecutiveFavorableSeconds, 2.5);
+  assert.equal(result.guardResult?.favorableTrendResetCount, 1);
+  assert.equal(result.guardResult?.lastFavorableTrendResetAt, NOW - 2_500);
+});
+
+test("FastLane fails closed when the persisted favorable duration is invalid", () => {
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    samples: samples([100, 100.01, 100.02, 100.03, 100.04, 100.05]),
+    side: "yes",
+    nowMs: NOW,
+    windowStartMs: 0,
+    closeTimeMs: NOW + 120_000,
+    targetPrice: TARGET,
+    hasProduct: true,
+    consecutiveSeconds: 11,
+    requireConsecutiveFavorableTrend: true,
+  });
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "freefall_unavailable_config");
+  assert.equal(result.guardResult, null);
 });
 
 test("unavailable samples fail closed even before the final two minutes", () => {
@@ -288,4 +413,49 @@ test("August 31 ZEC Kalshi RTI replay blocks the 9:44 YES submission", () => {
   assert.equal(result.reason, "freefall_consecutive_falling");
   assert.equal(result.guardResult?.consecutiveWrongWayMoves, 4);
   assert.equal(result.guardResult?.latestPrice, 824.6);
+});
+
+test("September 1 XRP FastLane replay rejects a decline followed by one small bounce", () => {
+  const submittedAt = Date.parse("2026-09-01T20:40:00.000Z");
+  const prices = [
+    1.35258,
+    1.35241,
+    1.35233,
+    1.35240,
+    1.35248,
+    1.35248,
+  ];
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    samples: prices.map((price, index) => {
+      const publishedAtMs =
+        submittedAt - (prices.length - 1 - index) * 1_000;
+      return {
+        price,
+        ts: publishedAtMs,
+        oraclePublishedAtMs: publishedAtMs,
+        oracleAgeMs: 0,
+        source: "kalshi_cfbenchmarks",
+        sourceIndex: "XRPUSD_RTI",
+        sourceSequence: `XRPUSD_RTI:${publishedAtMs}:${price}`,
+        websocketSequence: index + 1,
+      };
+    }),
+    side: "yes",
+    nowMs: submittedAt,
+    windowStartMs: Date.parse("2026-09-01T20:30:00.000Z"),
+    closeTimeMs: Date.parse("2026-09-01T20:45:00.000Z"),
+    targetPrice: 1.351,
+    hasProduct: true,
+    consecutiveSeconds: 4,
+    requireConsecutiveFavorableTrend: true,
+    authoritativePublicationCadence: true,
+  });
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "freefall_favorable_trend_not_confirmed_yes");
+  assert.equal(result.guardResult?.requiredConsecutiveMoves, 4);
+  assert.equal(result.guardResult?.consecutiveFavorableMoves, 0);
+  assert.equal(result.guardResult?.consecutiveFavorableSeconds, 0);
+  assert.equal(result.guardResult?.favorableTrendConfirmed, false);
+  assert.ok((result.guardResult?.favorableTrendResetCount ?? 0) >= 1);
 });

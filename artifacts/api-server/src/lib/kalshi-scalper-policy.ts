@@ -605,6 +605,18 @@ export interface FreefallGuardResult {
   uniqueDirectionalSamples: number;
   /** True when the complete direction window moved away from the target. */
   favorableTrendConfirmed: boolean | null;
+  /** Trailing count of strictly favorable cadenced movements. */
+  consecutiveFavorableMoves?: number;
+  /** Real elapsed duration covered by the trailing favorable sequence. */
+  consecutiveFavorableSeconds?: number;
+  /** First sample timestamp in the active trailing favorable sequence. */
+  favorableTrendStartedAt?: number | null;
+  /** Latest sample timestamp when a trailing favorable sequence exists. */
+  favorableTrendEndedAt?: number | null;
+  /** Number of prior favorable sequences reset by flat/adverse movement. */
+  favorableTrendResetCount?: number;
+  /** Most recent flat/adverse timestamp that reset a favorable sequence. */
+  lastFavorableTrendResetAt?: number | null;
   /** True when the enabled complete-window confirmation rejected the entry. */
   favorableTrendBlocked: boolean;
   /** Exact complete-window confirmation failure, or null when clear/disabled. */
@@ -679,6 +691,12 @@ export interface FreefallGuardInput {
   consecutiveSeconds: number;
   /** Require positive net movement for YES and negative net movement for NO. */
   favorableTrendConfirmationEnabled: boolean;
+  /**
+   * Require the configured number of consecutive favorable cadenced movements,
+   * spanning the configured real elapsed seconds. When false, preserve the
+   * legacy complete-window endpoint confirmation.
+   */
+  requireConsecutiveFavorableTrend?: boolean;
   /** Opt-in coordination: a weak adverse net trend may clear only when the
    * side-aware projected close retains the target-proximity buffer. */
   coordinatedDirectionClearanceEnabled?: boolean;
@@ -868,6 +886,12 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     favorableTrendMinimumPct: FAVORABLE_TREND_MIN_MOVE_PCT,
     uniqueDirectionalSamples: 0,
     favorableTrendConfirmed: null,
+    consecutiveFavorableMoves: 0,
+    consecutiveFavorableSeconds: 0,
+    favorableTrendStartedAt: null,
+    favorableTrendEndedAt: null,
+    favorableTrendResetCount: 0,
+    lastFavorableTrendResetAt: null,
     favorableTrendBlocked: false,
     favorableTrendReason: null,
     coordinatedDirectionClearanceApplied: false,
@@ -999,6 +1023,32 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   }
 
   const directionSamples = directional?.ok ? directional.samples : [newest];
+  const favorableSamples = input.requireConsecutiveFavorableTrend === true
+    ? (() => {
+      const startAt = directionSamples[0].at;
+      const endAt = directionSamples[directionSamples.length - 1].at;
+      if (input.requireDistinctOraclePublishTimes) {
+        const byPublishTime = new Map<number, FreefallSample>();
+        for (const sample of relevant) {
+          if (!Number.isFinite(sample.oraclePublishedAtMs)) continue;
+          const publishedAtMs = sample.oraclePublishedAtMs as number;
+          if (publishedAtMs < startAt || publishedAtMs > endAt) continue;
+          byPublishTime.set(publishedAtMs, {
+            ...sample,
+            at: publishedAtMs,
+          });
+        }
+        return [...byPublishTime.values()].sort((a, b) => a.at - b.at);
+      }
+      // Strict favorable confirmation must see every fresh source update in
+      // the selected horizon. A sub-cadence flat/adverse update cannot be
+      // discarded by the one-second evidence selector and thereby disappear
+      // from reset accounting.
+      return relevant.filter((sample) =>
+        sample.at >= startAt && sample.at <= endAt
+      );
+    })()
+    : directionSamples;
   const excursionSelection = input.adverseExcursionEnabled
     ? input.authoritativeCommodityCadence
       ? selectCommodityOracleSamples(
@@ -1120,6 +1170,35 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     }
   }
   const consecutiveWrongWaySeconds = consecutiveWrongWayDurationMs / 1_000;
+  let consecutiveFavorableMoves = 0;
+  let consecutiveFavorableStartedAt: number | null = null;
+  let consecutiveFavorableDurationMs = 0;
+  let favorableTrendResetCount = 0;
+  let lastFavorableTrendResetAt: number | null = null;
+  for (let index = 1; index < favorableSamples.length; index += 1) {
+    const previousSample = favorableSamples[index - 1];
+    const currentSample = favorableSamples[index];
+    const movedFavorably = input.side === "yes"
+      ? currentSample.price > previousSample.price
+      : currentSample.price < previousSample.price;
+    if (movedFavorably) {
+      if (consecutiveFavorableMoves === 0) {
+        consecutiveFavorableStartedAt = previousSample.at;
+      }
+      consecutiveFavorableMoves += 1;
+      consecutiveFavorableDurationMs =
+        currentSample.at - (consecutiveFavorableStartedAt ?? currentSample.at);
+    } else {
+      if (consecutiveFavorableMoves > 0) {
+        favorableTrendResetCount += 1;
+        lastFavorableTrendResetAt = currentSample.at;
+      }
+      consecutiveFavorableMoves = 0;
+      consecutiveFavorableStartedAt = null;
+      consecutiveFavorableDurationMs = 0;
+    }
+  }
+  const consecutiveFavorableSeconds = consecutiveFavorableDurationMs / 1_000;
 
   const latestWrongTargetSide = input.directionEnabled && (
     input.side === "yes"
@@ -1145,11 +1224,19 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     latestWrongTargetSide || targetSideViolation != null;
   const favorableDirectionalMovePct =
     input.side === "yes" ? priceChangePct : -priceChangePct;
+  const requireConsecutiveFavorableTrend =
+    input.requireConsecutiveFavorableTrend === true;
   const favorableTrendConfirmed = favorableTrendConfirmationEnabled
-    ? (
-      uniqueDirectionalSamples >= 2
-      && favorableDirectionalMovePct >= FAVORABLE_TREND_MIN_MOVE_PCT
-    )
+    ? requireConsecutiveFavorableTrend
+      ? (
+        consecutiveFavorableMoves >= requiredMoves
+        && consecutiveFavorableDurationMs >= requiredMoves * 1_000
+        && favorableDirectionalMovePct >= FAVORABLE_TREND_MIN_MOVE_PCT
+      )
+      : (
+        uniqueDirectionalSamples >= 2
+        && favorableDirectionalMovePct >= FAVORABLE_TREND_MIN_MOVE_PCT
+      )
     : null;
   const favorableTrendBlocked =
     favorableTrendConfirmationEnabled && favorableTrendConfirmed !== true;
@@ -1377,6 +1464,15 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
     favorableTrendMinimumPct: FAVORABLE_TREND_MIN_MOVE_PCT,
     uniqueDirectionalSamples,
     favorableTrendConfirmed,
+    consecutiveFavorableMoves,
+    consecutiveFavorableSeconds,
+    favorableTrendStartedAt: consecutiveFavorableStartedAt,
+    favorableTrendEndedAt:
+      consecutiveFavorableMoves > 0
+        ? favorableSamples[favorableSamples.length - 1]?.at ?? null
+        : null,
+    favorableTrendResetCount,
+    lastFavorableTrendResetAt,
     favorableTrendBlocked,
     favorableTrendReason,
     coordinatedDirectionClearanceApplied,
