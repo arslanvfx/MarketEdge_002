@@ -1,0 +1,2614 @@
+Here it is. I also verified the key Kalshi mechanics before writing it: Kalshi says its crypto contracts settle from CF Benchmarks Real-Time Indexes sampled once per second, with the expiration value based on the average of the final 60 seconds, and that this RTI data is available through Kalshi’s API as a direct pass-through. That makes CF Benchmarks/Kalshi RTI substantially more useful to this project than simply watching a Coinbase or Binance candle. 
+
+Kalshi currently has active 15-minute markets across BTC, ETH, SOL, XRP, DOGE and several additional assets, and it is also running 15-minute commodity products such as Gold and WTI. 
+
+Copy everything inside this block and give it directly to Replit Agent.
+
+KALSHI 15-MINUTE MARKET STABILITY ENGINE
+
+Development Specification — Version 1.0
+
+PURPOSE
+
+Build a new, independent Market Stability Engine and Scheduler for Kalshi 15-minute markets.
+
+This system is not primarily a directional prediction model.
+
+Its main purpose is to answer:
+
+“How likely is this specific 15-minute market window to remain sufficiently stable for our existing trading strategy?”
+
+The engine should determine whether each upcoming/current 15-minute window is:
+
+RUN — conditions are historically and currently stable enough.
+
+CAUTION — conditions are borderline or uncertainty is elevated.
+
+SKIP — conditions are unstable enough that the bot should not trade.
+
+This system should run in parallel with the existing scheduler, not replace it initially.
+
+The existing scheduler and the new Stability Engine must both log their decisions independently so their performance can be compared over a statistically meaningful sample.
+
+⸻
+
+1. CORE PHILOSOPHY
+
+Do not attempt to determine whether BTC, ETH, XRP, DOGE, SOL, Gold, etc. will finish UP or DOWN unless directional information is useful as a secondary stability signal.
+
+We care primarily about:
+
+* volatility
+* sudden acceleration
+* price displacement
+* reversal frequency
+* market microstructure
+* liquidity
+* order-book behavior
+* end-of-window instability
+* abnormal market conditions
+* cross-market stress
+* scheduled economic events
+* historical behavior of each specific 15-minute time slot
+* current behavior relative to historical norms
+
+The existing bot already has proximity logic determining how close the underlying asset is to the Kalshi target.
+
+Do not remove that system.
+
+This Stability Engine should become an additional risk filter above it.
+
+Conceptually:
+
+Existing Entry Logic
++
+Existing Target Proximity Sensor
++
+NEW Market Stability Engine
++
+Risk / Scheduler Rules
+
+Trade Permission
+
+The stability system should be capable of saying:
+
+NO TRADE
+
+even if the existing proximity logic would otherwise permit an entry.
+
+⸻
+
+2. DO NOT HARD-CODE A “SAFE HOURS” SCHEDULE
+
+Do not simply write rules such as:
+
+2 AM–5 AM = SAFE
+
+or:
+
+9:30 AM–10:30 AM = BAD
+
+Those observations may be useful as priors, but the system must determine stability empirically from collected data.
+
+There is published evidence of meaningful intraday periodicity in cryptocurrency trading and volatility. Research using high-frequency BTC and ETH data has found recurring intraday liquidity/volatility patterns, and other research identifies activity peaks associated with major global trading sessions, including the U.S. market open.
+
+However:
+
+The application must independently calculate whether those patterns exist in the exact instruments we trade.
+
+Historical assumptions are allowed.
+
+Fabricated stability scores are not.
+
+⸻
+
+3. INITIAL MARKETS
+
+Design the architecture so markets can be added dynamically.
+
+Initial crypto support should include at least:
+
+* BTC
+* ETH
+* SOL
+* XRP
+* DOGE
+* BNB
+* ZEC
+* NEAR
+* HYPE
+
+Also support Kalshi 15-minute commodity markets where available, initially:
+
+* Gold
+* WTI Crude Oil
+
+Crypto and commodities must not automatically share identical thresholds.
+
+Each asset develops its own statistical baseline.
+
+⸻
+
+4. PRIMARY DATA SOURCE — CRITICAL
+
+Crypto
+
+The highest-priority underlying price feed should be:
+
+Kalshi / CF Benchmarks Real-Time Index data.
+
+Kalshi uses CF Benchmarks RTI pricing for crypto settlement.
+
+The CF Benchmark index aggregates multiple major exchanges and updates once per second.
+
+Kalshi provides CF Benchmark RTI data through its API.
+
+Therefore:
+
+Priority hierarchy
+
+Priority 1
+
+Kalshi CF Benchmarks RTI feed.
+
+Priority 2
+
+CF Benchmarks directly if appropriate access exists.
+
+Priority 3
+
+A multi-exchange composite constructed from major spot venues.
+
+Priority 4
+
+Individual highly liquid exchanges such as Coinbase/Kraken/etc. only as fallback/supporting sources.
+
+Do not silently replace the Kalshi settlement feed with one exchange.
+
+Record the data source used for every calculation.
+
+⸻
+
+5. DATA RESOLUTION
+
+Fifteen-minute OHLC candles alone are NOT sufficient.
+
+Preferred resolution:
+
+1-second
+
+Acceptable secondary resolution:
+
+trade/tick-level
+
+Fallback:
+
+5-second
+
+Absolute minimum for meaningful live stability analysis:
+
+1-minute, but mark results as LOW DATA QUALITY.
+
+Store 15-minute candles for summaries, but calculate stability from higher-resolution observations.
+
+⸻
+
+6. WHY 1-SECOND DATA MATTERS
+
+The strategy operates near short-duration expirations.
+
+A single 15-minute candle can hide an enormous amount of information.
+
+Example:
+
+Window opened:
+$80,000
+
+Window closed:
+$80,010
+
+A normal candle makes this look extremely stable.
+
+But the actual path could have been:
+
+80,000
+→ 80,400
+→ 79,600
+→ 80,500
+→ 80,010
+
+That is not a stable window.
+
+Therefore stability must be based on the complete price path, not merely open versus close.
+
+⸻
+
+7. KALSHI SETTLEMENT BEHAVIOR
+
+For crypto markets, design calculations knowing that Kalshi uses the relevant CF Benchmarks RTI and determines expiration using the average of the final 60 seconds of index readings.
+
+Therefore the final minute deserves special analysis.
+
+Calculate separately:
+
+* first 10 minutes
+* minutes 10–13
+* minute 13–14
+* final 60 seconds
+* final 30 seconds
+* final 15 seconds
+* final 10 seconds
+* final 5 seconds where data permits
+
+The system should learn whether volatility commonly accelerates toward expiration.
+
+⸻
+
+8. DATABASE MODEL
+
+Create a high-frequency observations table.
+
+Suggested conceptual schema:
+
+asset
+
+timestamp_utc
+
+timestamp_et
+
+source
+
+price
+
+bid
+
+ask
+
+spread
+
+volume
+
+trade_count
+
+kalshi_market_ticker
+
+kalshi_target
+
+kalshi_yes_price
+
+kalshi_no_price
+
+kalshi_yes_bid
+
+kalshi_yes_ask
+
+kalshi_no_bid
+
+kalshi_no_ask
+
+kalshi_orderbook_depth
+
+seconds_until_expiration
+
+window_id
+
+data_quality
+
+Not every source will provide every field.
+
+Nullable values are acceptable.
+
+Never fabricate missing values.
+
+⸻
+
+9. 15-MINUTE WINDOW TABLE
+
+Create one record for every asset/window.
+
+Example:
+
+BTC_2026-08-31_14:15_ET
+
+Store:
+
+* asset
+* date
+* weekday
+* start time ET
+* end time ET
+* session classification
+* open price
+* close price
+* high
+* low
+* range
+* realized volatility
+* max 1-second move
+* max 5-second move
+* max 10-second move
+* max 30-second move
+* max 60-second move
+* maximum drawup
+* maximum drawdown
+* reversal count
+* path efficiency
+* final-minute volatility
+* final-30-second volatility
+* final-10-second volatility
+* volume
+* volume acceleration
+* spread
+* spread acceleration
+* Kalshi liquidity
+* Kalshi contract volatility
+* distance from target statistics
+* stability score
+* stability classification
+* actual bot trades
+* wins
+* losses
+* P&L
+
+⸻
+
+10. NORMALIZED PRICE MOVEMENT
+
+Do not compare assets using raw dollars.
+
+A $100 BTC move is completely different from a $100 ETH move.
+
+Calculate percentage or basis-point movement.
+
+Use:
+
+return_t = (price_t / price_previous) - 1
+
+Also calculate basis points:
+
+bps = return × 10,000
+
+Normalize all relevant volatility measurements this way.
+
+⸻
+
+11. REALIZED VOLATILITY
+
+Calculate realized volatility inside every 15-minute window.
+
+At a minimum calculate:
+
+RV = sqrt(sum(r_t²))
+
+using high-frequency log returns.
+
+Store:
+
+* RV 15-minute
+* RV last 5 minutes
+* RV last 3 minutes
+* RV final 60 seconds
+* RV final 30 seconds
+
+Then compare the current reading to that asset’s historical distribution for the same time-of-day.
+
+Example:
+
+BTC 14:30 ET current RV percentile:
+
+92nd percentile
+
+That should be treated much differently than:
+
+34th percentile
+
+⸻
+
+12. RANGE VOLATILITY
+
+Calculate:
+
+range_pct = (high - low) / open
+
+This captures total movement independent of final direction.
+
+Also calculate rolling ranges:
+
+* 15-minute
+* 10-minute
+* 5-minute
+* 3-minute
+* 60-second
+* 30-second
+
+⸻
+
+13. MAXIMUM SHORT-TERM SHOCK
+
+Calculate the largest absolute movement occurring within:
+
+* 1 second
+* 5 seconds
+* 10 seconds
+* 30 seconds
+* 60 seconds
+
+Example:
+
+max_abs_return_10s
+
+This is important because a window may appear calm overall while containing one extremely dangerous displacement.
+
+⸻
+
+14. VELOCITY
+
+Calculate price velocity.
+
+Example:
+
+velocity_10s = abs(price_now - price_10s_ago) / price_10s_ago
+
+Repeat for:
+
+* 5 sec
+* 10 sec
+* 30 sec
+* 60 sec
+* 180 sec
+
+High velocity should reduce the Stability Score.
+
+⸻
+
+15. ACCELERATION
+
+Velocity alone is not enough.
+
+We need to know whether movement is accelerating.
+
+Example:
+
+Previous 30-second movement:
+3 bps
+
+Current 30-second movement:
+14 bps
+
+This is more dangerous than a market continuously moving at 7 bps.
+
+Create:
+
+volatility_acceleration
+
+and:
+
+price_velocity_acceleration
+
+Rapid increases should trigger defensive behavior.
+
+⸻
+
+16. REVERSAL / WHIPSAW DETECTION
+
+This is extremely important.
+
+A market that moves smoothly in one direction may actually be easier for the existing strategy to handle than a market repeatedly crossing back and forth.
+
+Detect significant directional changes.
+
+Possible methodology:
+
+Define a meaningful price change threshold based on each asset’s volatility.
+
+Count transitions such as:
+
+UP
+→ DOWN
+→ UP
+→ DOWN
+
+within:
+
+* 15 minutes
+* final 5 minutes
+* final 3 minutes
+* final minute
+
+Create:
+
+reversal_count
+
+reversal_rate
+
+final_minute_reversal_count
+
+whipsaw_score
+
+Higher whipsaw = lower stability.
+
+⸻
+
+17. PATH EFFICIENCY RATIO
+
+Calculate:
+
+Efficiency Ratio = abs(close - open) / sum(abs(each incremental move))
+
+Interpretation:
+
+Near 1.0:
+
+Price moved mostly smoothly in one direction.
+
+Near 0:
+
+Price traveled extensively but ended near where it began.
+
+A low efficiency ratio indicates chop/whipsaw.
+
+For this strategy that may be extremely important.
+
+Store:
+
+path_efficiency
+
+⸻
+
+18. TARGET CROSSING BEHAVIOR
+
+Because the existing strategy already monitors distance to the Kalshi target, integrate that information rather than replacing it.
+
+Calculate:
+
+* number of target crossings
+* target crossings final 5 minutes
+* target crossings final 3 minutes
+* target crossings final 60 seconds
+* average duration above target
+* average duration below target
+* maximum distance from target
+* minimum distance from target
+* distance volatility
+* crossing velocity
+
+A market that crosses the target repeatedly should receive a substantial stability penalty.
+
+Example:
+
+Coin is only 0.05% from target but has crossed it eight times in three minutes.
+
+That should be treated dramatically differently from a coin that is 0.05% from the target but has been drifting calmly away from it.
+
+⸻
+
+19. TARGET DISTANCE NORMALIZATION
+
+Raw target distance is not enough.
+
+Calculate:
+
+normalized_target_distance = distance_to_target / expected_short_term_volatility
+
+This answers:
+
+How large is the target distance relative to what this asset normally moves during the remaining time?
+
+Example:
+
+A $50 distance in BTC might sometimes be meaningless.
+
+A $50 distance in another asset could be enormous.
+
+Normalize proximity against:
+
+* asset volatility
+* current volatility
+* seconds remaining
+
+⸻
+
+20. EXPECTED MOVE
+
+Calculate the statistically expected absolute move over the remaining time.
+
+Example:
+
+At 45 seconds remaining:
+
+expected_move_45s
+
+Compare:
+
+distance_to_target / expected_move_45s
+
+Create:
+
+target_safety_multiple
+
+Example:
+
+Target distance:
+$120
+
+Expected 45-second move:
+$20
+
+Safety multiple:
+6.0
+
+Versus:
+
+Target distance:
+$120
+
+Expected 45-second move:
+$95
+
+Safety multiple:
+1.26
+
+These are completely different risk situations.
+
+This should augment the existing proximity sensor.
+
+⸻
+
+21. LIQUIDITY
+
+Where available, collect market liquidity from BOTH:
+
+Underlying asset
+
+and
+
+Kalshi market
+
+For Kalshi track:
+
+* best bid
+* best ask
+* spread
+* depth
+* total visible liquidity near current contract price
+* order-book imbalance
+* recent trades
+* trade frequency
+* abrupt liquidity removal
+
+If Kalshi exposes depth at multiple levels, store it.
+
+⸻
+
+22. ORDER-BOOK IMBALANCE
+
+Where order book data is available:
+
+OBI = (bid_depth - ask_depth) / (bid_depth + ask_depth)
+
+We are not necessarily using OBI to predict direction.
+
+Use it to identify market imbalance and instability.
+
+A rapidly shifting order-book imbalance can signal an unstable environment.
+
+Measure:
+
+OBI
+
+delta_OBI_10s
+
+delta_OBI_30s
+
+OBI_flip_count
+
+⸻
+
+23. SPREAD INSTABILITY
+
+Track spread, not just price.
+
+Calculate:
+
+* median spread
+* current spread
+* maximum spread
+* spread percentile
+* spread expansion
+* rapid spread changes
+
+A sudden widening of spreads often indicates reduced liquidity or increasing uncertainty.
+
+This should reduce the Stability Score.
+
+⸻
+
+24. VOLUME SHOCK
+
+Track abnormal increases in volume.
+
+Calculate:
+
+volume_zscore
+
+relative to the asset/time-of-day baseline.
+
+Also calculate:
+
+volume_acceleration
+
+A massive volume burst should not automatically be interpreted directionally.
+
+Instead it should increase the probability that the current window is abnormal.
+
+⸻
+
+25. CROSS-ASSET STRESS
+
+Crypto assets are correlated.
+
+Monitor at minimum:
+
+* BTC
+* ETH
+* SOL
+* XRP
+* DOGE
+
+even if only one market is being traded.
+
+Build a:
+
+crypto_market_stress_index
+
+Possible inputs:
+
+* BTC short-term volatility
+* ETH short-term volatility
+* percentage of tracked assets experiencing volatility spikes
+* simultaneous large returns
+* simultaneous volume spikes
+* correlation spike
+
+Example:
+
+If DOGE looks calm but BTC, ETH and SOL suddenly become violent, DOGE should not receive a perfect Stability Score.
+
+⸻
+
+26. BTC LEAD/LAG RISK
+
+Test whether large BTC movements statistically precede instability in:
+
+* ETH
+* SOL
+* XRP
+* DOGE
+* other crypto assets
+
+Do NOT assume the relationship.
+
+Measure it empirically.
+
+For example calculate:
+
+Probability of DOGE volatility spike within 30/60/120 seconds following BTC move greater than BTC’s 95th percentile.
+
+If significant, incorporate it as a stability risk feature.
+
+⸻
+
+27. MARKET-WIDE SHOCK DETECTOR
+
+Create emergency rules independent of normal scheduler scoring.
+
+Example triggers:
+
+BTC 30-second move > historical 99th percentile.
+
+Three or more major crypto assets simultaneously exceed 97th percentile volatility.
+
+Spread explodes beyond 99th percentile.
+
+Data feed deviates materially from alternative sources.
+
+Kalshi price feed becomes stale.
+
+Abnormal volume event.
+
+When triggered:
+
+GLOBAL_CRYPTO_HALT = TRUE
+
+Trading should stop temporarily.
+
+The halt should expire only after stability conditions recover for a defined period.
+
+⸻
+
+28. TIME-OF-DAY MODEL
+
+There are 96 fifteen-minute windows per day.
+
+Create statistical profiles for every:
+
+asset × weekday × 15-minute slot
+
+Example:
+
+BTC
+Monday
+09:30–09:45 ET
+
+BTC
+Monday
+09:45–10:00 ET
+
+etc.
+
+But avoid overfitting.
+
+Also maintain broader groups:
+
+asset × 15-minute slot
+
+asset × weekday/weekend × slot
+
+asset × hour
+
+asset × session
+
+This allows hierarchical fallback when sample sizes are small.
+
+⸻
+
+29. TIMEZONE
+
+All user-facing scheduler displays should use:
+
+America/New_York
+
+Store raw timestamps internally in UTC.
+
+Correctly handle daylight-saving changes.
+
+Never use a fixed UTC offset.
+
+⸻
+
+30. HISTORICAL LOOKBACK
+
+Maintain multiple rolling windows.
+
+Recommended initial:
+
+* 7 days
+* 14 days
+* 30 days
+* 60 days
+* 90 days
+
+Potentially add:
+
+* 180 days
+
+The newest data should matter more.
+
+Do NOT let a good window from two months ago overpower persistent deterioration during the last two weeks.
+
+⸻
+
+31. RECENCY WEIGHTING
+
+Use exponential weighting or another explicit recency model.
+
+Example concept:
+
+Recent 7 days:
+highest weight.
+
+8–30 days:
+medium weight.
+
+31–90 days:
+lower weight.
+
+Do not simply calculate lifetime win rate.
+
+This directly addresses the problem where a historical 85% window gradually deteriorates while the old observations keep making it appear safe.
+
+⸻
+
+32. REGIME CHANGE DETECTION
+
+The system must detect when a historically safe window has changed behavior.
+
+Create:
+
+regime_change_score
+
+Possible methods:
+
+* rolling volatility comparison
+* rolling mean shift
+* rolling variance shift
+* CUSUM
+* EWMA
+* Page-Hinkley
+* change-point detection
+
+Minimum implementation:
+
+Compare:
+
+recent_14d_stability
+
+against:
+
+previous_60d_stability
+
+If deterioration exceeds a statistically meaningful threshold:
+
+mark:
+
+REGIME_SHIFT
+
+and reduce confidence in historical scheduling.
+
+⸻
+
+33. DO NOT USE WIN RATE AS THE PRIMARY STABILITY VARIABLE
+
+Trading win rate is useful, but it is contaminated by:
+
+* entry strategy
+* position timing
+* target distance
+* execution quality
+* contract pricing
+* strategy changes
+
+Therefore calculate two independent quantities:
+
+A. Market Stability
+
+What did the underlying market actually do?
+
+B. Strategy Performance
+
+How did our strategy perform?
+
+Do not confuse them.
+
+A window can be stable but the strategy can trade it badly.
+
+A window can be unstable while the bot happens to win several trades.
+
+⸻
+
+34. WINDOW STABILITY SCORE
+
+Generate a score from:
+
+0–100
+
+Where:
+
+100 = exceptionally stable
+
+0 = extremely unstable
+
+Start with an interpretable weighted model rather than black-box AI.
+
+Suggested initial feature families:
+
+25% — Realized volatility
+
+15% — Short-term shock magnitude
+
+15% — Whipsaw/reversal behavior
+
+10% — Volatility acceleration
+
+10% — Target-crossing instability
+
+10% — Liquidity/spread quality
+
+5% — Volume abnormality
+
+5% — Cross-asset stress
+
+5% — Historical time-slot stability
+
+These are initial weights only.
+
+They must be configurable.
+
+They should eventually be optimized using historical results.
+
+⸻
+
+35. SCORE CLASSIFICATION
+
+Initial thresholds:
+
+80–100 = VERY STABLE
+
+65–79 = STABLE
+
+50–64 = CAUTION
+
+35–49 = UNSTABLE
+
+0–34 = EXTREME RISK
+
+Initial trade permission:
+
+>= 65 → RUN
+
+50–64 → CAUTION
+
+< 50 → SKIP
+
+These thresholds must remain configurable.
+
+Do not treat these values as scientifically validated until backtesting has been completed.
+
+⸻
+
+36. CONFIDENCE SCORE
+
+Every Stability Score must also have:
+
+confidence_score
+
+Example:
+
+Stability:
+82
+
+Confidence:
+91
+
+versus:
+
+Stability:
+82
+
+Confidence:
+38
+
+Those should not be treated equally.
+
+Confidence should consider:
+
+* sample size
+* missing data
+* data quality
+* agreement among indicators
+* age of historical observations
+* regime stability
+
+⸻
+
+37. LIVE STABILITY SCORE
+
+Historical schedule alone is insufficient.
+
+Calculate:
+
+Historical Stability Score
+
+“How stable is this time slot normally?”
+
+and:
+
+Live Stability Score
+
+“How stable is the market right now?”
+
+Then calculate:
+
+Composite Stability Score
+
+Example initial weighting:
+
+Composite = 35% Historical + 65% Live
+
+The live score should become increasingly important as the window develops.
+
+⸻
+
+38. PRE-WINDOW SCORE
+
+Before each 15-minute market begins, generate:
+
+PRE_WINDOW_STABILITY
+
+using:
+
+* historical slot behavior
+* recent asset regime
+* previous 5/15/30/60 minute volatility
+* cross-market stress
+* scheduled event risk
+* liquidity
+* current spread
+
+This determines whether the bot should even consider the market.
+
+⸻
+
+39. IN-WINDOW SCORE
+
+Recalculate Stability Score continuously.
+
+Preferred frequency:
+
+every second.
+
+Acceptable:
+
+every 5 seconds.
+
+Never assume a window that started stable remains stable.
+
+Example:
+
+09:00:
+Score 86
+
+09:07:
+Score 78
+
+09:11:
+Score 61
+
+09:13:
+Score 42
+
+The bot should react accordingly.
+
+⸻
+
+40. DYNAMIC HALT
+
+If the Stability Score drops below the configured threshold:
+
+prevent new entries.
+
+Example:
+
+score < 50 → DISABLE NEW TRADES
+
+Optionally:
+
+score < 35 → EMERGENCY WINDOW HALT
+
+Existing positions should follow the current bot’s existing management rules unless explicitly changed later.
+
+⸻
+
+41. FINAL-MINUTE RISK SCORE
+
+Create a separate:
+
+expiration_risk_score
+
+This should heavily weight:
+
+* 60-second volatility
+* 30-second volatility
+* target crossings
+* velocity
+* acceleration
+* spread expansion
+* volume burst
+* order-book instability
+
+This is particularly important because the trading strategy operates near resolution.
+
+⸻
+
+42. MACRO EVENT FILTER
+
+Maintain a calendar of scheduled events capable of disrupting crypto or commodities.
+
+Examples:
+
+* FOMC decisions
+* Federal Reserve press conferences
+* CPI
+* PPI
+* Nonfarm Payrolls
+* unemployment data
+* GDP
+* major Treasury announcements
+* major regulatory announcements where scheduled
+* major commodity inventory releases
+* EIA petroleum reports for oil
+* high-impact geopolitical events where detectable
+
+Create:
+
+EVENT_RISK
+
+Possible classifications:
+
+NONE
+
+LOW
+
+MEDIUM
+
+HIGH
+
+EXTREME
+
+Allow configurable pre/post buffers.
+
+Example:
+
+High-impact release at 8:30 AM ET.
+
+Potential exclusion:
+
+8:15–9:00 AM ET.
+
+Exact buffers should eventually be derived from observed volatility.
+
+⸻
+
+43. NEWS / UNSCHEDULED EVENT DETECTION
+
+If reliable real-time news data is available, optionally create a secondary anomaly detector.
+
+However:
+
+Do not make the first version dependent on AI interpreting news.
+
+The quantitative market data should remain primary.
+
+⸻
+
+44. COMMODITIES MUST HAVE DIFFERENT EVENT LOGIC
+
+Do not copy crypto rules directly to commodities.
+
+For Gold, important drivers may include:
+
+* U.S. macro releases
+* interest-rate expectations
+* USD moves
+* Treasury yields
+* futures session liquidity
+
+For WTI:
+
+* EIA inventory reports
+* OPEC announcements
+* geopolitical events
+* energy-market opening periods
+* futures liquidity
+
+Build per-asset configurations.
+
+⸻
+
+45. DATA QUALITY MONITOR
+
+The system must be capable of recognizing bad data.
+
+Create:
+
+DATA_QUALITY_SCORE
+
+Check for:
+
+* stale timestamps
+* duplicate ticks
+* missing seconds
+* impossible jumps
+* API downtime
+* feed disagreement
+* delayed Kalshi data
+* abnormal price gaps
+
+If data quality becomes insufficient:
+
+DO_NOT_TRADE
+
+Do not infer stability from broken data.
+
+⸻
+
+46. MULTI-SOURCE PRICE DEVIATION
+
+Where possible compare:
+
+CF Benchmark / Kalshi RTI
+
+against:
+
+one or more exchange feeds.
+
+Create:
+
+benchmark_exchange_deviation
+
+A sudden abnormal divergence may indicate:
+
+* exchange-specific movement
+* data error
+* latency
+* temporary dislocation
+
+Large unexplained deviations should reduce confidence or halt trading.
+
+⸻
+
+47. HISTORICAL WINDOW HEATMAP
+
+Create a scheduler UI.
+
+Rows:
+
+Assets.
+
+Columns:
+
+96 daily 15-minute slots.
+
+Example:
+
+Asset	00:00	00:15	00:30	…	23:45
+BTC	82	77	71	…	65
+ETH	78	75	69	…	61
+SOL	73	72	64	…	58
+
+Use color coding:
+
+Green = stable.
+
+Yellow = caution.
+
+Red = unstable.
+
+Dark red = extreme.
+
+Do not base colors on raw win rate alone.
+
+⸻
+
+48. WINDOW DETAIL PAGE
+
+Clicking a heatmap cell should display:
+
+Asset.
+
+Time slot.
+
+Historical Stability Score.
+
+Current Stability Score.
+
+Confidence.
+
+7-day score.
+
+30-day score.
+
+90-day score.
+
+Recent trend.
+
+Win rate.
+
+Number of observations.
+
+Average realized volatility.
+
+95th percentile volatility.
+
+Whipsaw score.
+
+Target crossing statistics.
+
+Final-minute volatility.
+
+Spread statistics.
+
+Volume statistics.
+
+Event risk.
+
+Regime shift warning.
+
+Current recommendation.
+
+⸻
+
+49. EXPLAINABLE DECISIONS
+
+Every RUN / CAUTION / SKIP decision must have a human-readable explanation.
+
+Example:
+
+SKIP BTC 09:30–09:45
+
+Reasons:
+
+* 30-second volatility: 96th percentile
+* whipsaw rate: 91st percentile
+* BTC market stress elevated
+* spread expansion +42%
+* historical slot stability: 48/100
+* CPI release occurred 3 minutes ago
+
+Another example:
+
+RUN ETH 02:15–02:30
+
+Reasons:
+
+* realized volatility: 24th percentile
+* no macro event risk
+* low cross-market stress
+* target crossings: 0
+* spread normal
+* historical stability: 84/100
+* live stability: 88/100
+
+Never output only an unexplained score.
+
+⸻
+
+50. PERFORMANCE DATABASE
+
+For every potential trade opportunity, record:
+
+* whether OLD scheduler allowed it
+* whether NEW scheduler allowed it
+* stability score
+* confidence score
+* live indicators
+* whether bot actually traded
+* entry price
+* amount
+* target distance
+* seconds remaining
+* result
+* profit/loss
+* maximum adverse movement
+* maximum favorable movement
+* market stability after entry
+
+This allows retrospective comparison.
+
+⸻
+
+51. A/B TEST MODE
+
+For initial deployment:
+
+DO NOT immediately allow the new engine to control live trading.
+
+Run:
+
+OLD_MODEL
+
+and:
+
+NEW_STABILITY_MODEL
+
+simultaneously.
+
+For every opportunity record:
+
+Old model:
+TRADE
+
+New model:
+SKIP
+
+Actual result:
+LOSS
+
+or:
+
+Old:
+TRADE
+
+New:
+TRADE
+
+Actual:
+WIN
+
+or:
+
+Old:
+SKIP
+
+New:
+TRADE
+
+Actual:
+WIN
+
+Create performance reports.
+
+⸻
+
+52. COUNTERFACTUAL BACKTEST
+
+Even when no real trade was placed, calculate what would have happened if possible.
+
+This allows us to evaluate missed opportunities and avoided losses.
+
+Store:
+
+hypothetical_old_model_result
+
+hypothetical_new_model_result
+
+where reliable reconstruction exists.
+
+Clearly label hypothetical trades separately from actual trades.
+
+⸻
+
+53. METRICS TO COMPARE
+
+Compare OLD vs NEW model using:
+
+* trades permitted
+* win rate
+* loss rate
+* net P&L
+* expected value
+* maximum drawdown
+* longest losing streak
+* profit factor
+* avoided losses
+* missed wins
+* average stability score of wins
+* average stability score of losses
+* calibration by score band
+
+Most importantly:
+
+Determine whether higher Stability Scores actually correlate with fewer catastrophic losses.
+
+⸻
+
+54. SCORE CALIBRATION
+
+Group historical observations by score.
+
+Example:
+
+90–100
+
+80–89
+
+70–79
+
+60–69
+
+50–59
+
+40–49
+
+<40
+
+Measure actual instability and strategy losses in each bucket.
+
+If the Stability Score is meaningful, lower score ranges should show progressively worse outcomes.
+
+If they do not:
+
+retrain/reweight the formula.
+
+⸻
+
+55. SAMPLE-SIZE PROTECTION
+
+Never declare a window safe based on a handful of samples.
+
+Define:
+
+MIN_SAMPLE_SIZE
+
+Suggested initial target:
+
+At least 30 matching historical windows before treating an exact weekday/time combination as reliable.
+
+If insufficient:
+
+fallback hierarchically.
+
+Example:
+
+Monday 03:15
+→ all weekdays 03:15
+→ all days 03:15
+→ 03:00–04:00 session
+→ asset-wide baseline.
+
+Display which level was used.
+
+⸻
+
+56. BAYESIAN / SHRINKAGE APPROACH
+
+Eventually use Bayesian shrinkage so small sample windows are pulled toward the asset-wide average.
+
+Do not let:
+
+3 wins / 3 observations
+
+display as:
+
+100% SAFE
+
+This is statistically dangerous.
+
+⸻
+
+57. OUTLIER HANDLING
+
+Do not simply delete extreme volatility events.
+
+Those are precisely the events we care about.
+
+Store both:
+
+normal-market statistics
+
+and:
+
+tail-risk statistics.
+
+Calculate:
+
+90th percentile.
+
+95th percentile.
+
+99th percentile.
+
+Maximum observed.
+
+Tail behavior should be heavily represented in stability assessment.
+
+⸻
+
+58. TAIL RISK
+
+A scheduler based only on average volatility will fail.
+
+Calculate probability of:
+
+* 90th percentile move
+* 95th percentile move
+* 99th percentile move
+* target crossing
+* multiple target crossings
+* abnormal final-minute reversal
+
+for every time slot.
+
+⸻
+
+59. STABILITY PROBABILITY
+
+Eventually output:
+
+P(stable window)
+
+rather than only a heuristic score.
+
+Define stability based on empirical criteria such as:
+
+* volatility below defined threshold
+* no extreme price shock
+* reversal count below threshold
+* final-minute instability below threshold
+
+Then use historical data to estimate probability.
+
+Example:
+
+BTC Tuesday 02:15:
+
+P(stable) = 87%
+
+BTC Tuesday 09:30:
+
+P(stable) = 61%
+
+Those numbers must come from actual observations.
+
+Never invent them.
+
+⸻
+
+60. MACHINE LEARNING — PHASE TWO
+
+Do not begin with an opaque neural network.
+
+First build the full data pipeline and interpretable Stability Score.
+
+Once enough observations exist, create a supervised model predicting:
+
+stable / unstable
+
+Possible models:
+
+* logistic regression
+* random forest
+* gradient boosting / XGBoost
+* LightGBM
+
+Use chronological train/test splits.
+
+Do not randomly shuffle time-series data.
+
+Prevent look-ahead bias.
+
+⸻
+
+61. MODEL INPUTS
+
+Potential ML features should include:
+
+* time-of-day
+* weekday
+* realized volatility
+* rolling volatility
+* volatility percentile
+* velocity
+* acceleration
+* whipsaw
+* path efficiency
+* target distance
+* normalized target distance
+* expected move
+* spread
+* spread percentile
+* spread acceleration
+* volume
+* volume z-score
+* order book imbalance
+* BTC stress
+* ETH stress
+* cross-asset stress
+* previous-window volatility
+* previous-hour volatility
+* regime change
+* event risk
+* seconds remaining
+* final-minute behavior where applicable
+
+Direction should not be the primary training target.
+
+⸻
+
+62. AVOID LOOK-AHEAD BIAS
+
+This is mandatory.
+
+A decision made at:
+
+10:14:30
+
+may use only information available through:
+
+10:14:30.
+
+Do not calculate features from price activity occurring after the decision timestamp.
+
+Backtests violating this rule are invalid.
+
+⸻
+
+63. TRANSACTION COSTS
+
+When comparing strategies, include:
+
+* Kalshi fees
+* bid/ask spread
+* execution slippage
+* partial fills where relevant
+
+A theoretical win rate without execution costs is insufficient.
+
+⸻
+
+64. API RATE LIMITING
+
+Build centralized market-data services rather than having every component hit APIs independently.
+
+Implement:
+
+* request queue
+* caching
+* WebSocket streams where available
+* reconnect logic
+* exponential backoff
+* data freshness checks
+* rate-limit protection
+
+⸻
+
+65. FAILURE BEHAVIOR
+
+Fail safely.
+
+If:
+
+API fails.
+
+Market data goes stale.
+
+Database fails.
+
+Time synchronization becomes uncertain.
+
+CF Benchmark feed disappears.
+
+Target is unavailable.
+
+Stability calculation crashes.
+
+Then:
+
+ALLOW_TRADE = FALSE
+
+Never default to trading because the Stability Engine failed.
+
+⸻
+
+66. CONFIGURATION
+
+All major thresholds should live in configuration/database rather than source code.
+
+Examples:
+
+MIN_STABILITY_SCORE
+
+MIN_CONFIDENCE
+
+MAX_VOLATILITY_PERCENTILE
+
+MAX_WHIPSAW_SCORE
+
+MAX_SPREAD_PERCENTILE
+
+EVENT_BUFFER_MINUTES
+
+GLOBAL_HALT_THRESHOLD
+
+MIN_SAMPLE_SIZE
+
+LOOKBACK_DAYS
+
+RECENCY_DECAY
+
+MAX_DATA_AGE_SECONDS
+
+Create administrative controls for these.
+
+⸻
+
+67. LOGGING
+
+Every decision should log:
+
+Timestamp.
+
+Asset.
+
+Window.
+
+Score.
+
+Confidence.
+
+Individual feature scores.
+
+Market state.
+
+Target distance.
+
+Seconds remaining.
+
+Recommendation.
+
+Reason.
+
+Data quality.
+
+Model version.
+
+Configuration version.
+
+This is essential for debugging.
+
+⸻
+
+68. MODEL VERSIONING
+
+Every Stability Score must identify which formula/model generated it.
+
+Example:
+
+stability_v1.0
+
+Later:
+
+stability_v1.1
+
+stability_ml_v2.0
+
+Do not overwrite historical scores when models change.
+
+⸻
+
+69. RESEARCH DASHBOARD
+
+Create a separate research page.
+
+I want to be able to answer questions such as:
+
+“What are BTC’s safest 10 windows?”
+
+“What are BTC’s worst 10?”
+
+“What hours recently deteriorated?”
+
+“What windows improved?”
+
+“Which windows have the lowest final-minute volatility?”
+
+“Which windows experience the most target crossings?”
+
+“Which coins become unstable together?”
+
+“What hours have the lowest tail risk?”
+
+“What conditions preceded our losses?”
+
+“Would the new scheduler have prevented those losses?”
+
+⸻
+
+70. LOSS FORENSICS
+
+Create a page specifically analyzing losing trades.
+
+For every loss show:
+
+* stability score at entry
+* score 60 seconds before entry
+* score 30 seconds before entry
+* score 10 seconds before entry
+* volatility percentile
+* target distance
+* normalized target distance
+* expected move
+* whipsaw
+* target crossings
+* cross-market stress
+* spread
+* volume
+* macro events
+* regime
+* exact market path after entry
+
+Then identify recurring patterns.
+
+The goal is to discover:
+
+What does a losing environment look like BEFORE the loss occurs?
+
+⸻
+
+71. FEATURE IMPORTANCE REPORT
+
+After enough data exists, calculate which features best distinguish stable versus unstable windows and wins versus losses.
+
+Possible result:
+
+Final-minute reversal rate:
+very predictive.
+
+BTC stress:
+moderately predictive.
+
+Raw time-of-day:
+weakly predictive.
+
+Or the opposite.
+
+We want the DATA to determine this.
+
+⸻
+
+72. HISTORICAL DATA INGESTION
+
+We already have approximately three months of collected data from the current system.
+
+Do not discard it.
+
+Create an importer for the existing database/data logs.
+
+Map whatever fields already exist.
+
+Calculate any new metrics possible from the historical raw observations.
+
+If some metrics cannot be reconstructed because second-level data was not stored, mark them unavailable instead of estimating them inaccurately.
+
+⸻
+
+73. NEW DATA COLLECTION
+
+Begin collecting all required new fields immediately.
+
+The new engine should improve continuously as the dataset grows.
+
+Retention:
+
+Prefer permanent retention of aggregated window records.
+
+For 1-second raw data, retain as much as practical.
+
+If storage becomes expensive:
+
+compress/archive old raw observations rather than deleting all useful history.
+
+⸻
+
+74. DATA SOURCES TO INVESTIGATE
+
+Replit Agent should investigate and document actual API feasibility before implementation.
+
+Primary crypto settlement/price data
+
+Kalshi API / CF Benchmarks RTI.
+
+Kalshi market data
+
+Kalshi API:
+
+* markets
+* target/strike
+* quotes
+* order books
+* trades
+* market status
+* timing
+* settlement data where available
+
+Supporting crypto spot data
+
+Use reliable high-liquidity exchange APIs only when useful as secondary context.
+
+Do not assume one exchange represents Kalshi settlement.
+
+Macro calendar
+
+Use a reliable economic-calendar data provider/API.
+
+Required fields:
+
+* event
+* timestamp
+* impact
+* actual
+* forecast
+* previous
+
+Commodity underlying data
+
+Identify the actual settlement/reference source defined by the specific Kalshi contract rules.
+
+Do NOT automatically use a random retail Gold or WTI quote.
+
+The data feed should match the Kalshi market’s underlying reference as closely as technically possible.
+
+⸻
+
+75. CONTRACT RULE DISCOVERY
+
+Before adding a new Kalshi asset:
+
+Automatically or manually verify:
+
+* market rules
+* settlement source
+* settlement period
+* target methodology
+* expiration time
+* relevant price index
+
+Store this information in:
+
+market_definition
+
+Do not assume every 15-minute product resolves identically.
+
+⸻
+
+76. INITIAL DEVELOPMENT PHASES
+
+PHASE 1 — DATA FOUNDATION
+
+Implement:
+
+* CF Benchmark/Kalshi price ingestion
+* Kalshi market ingestion
+* second-level database
+* time synchronization
+* window bucketing
+* data-quality monitoring
+
+No trading changes yet.
+
+PHASE 2 — HISTORICAL STABILITY
+
+Implement:
+
+* volatility
+* range
+* velocity
+* acceleration
+* whipsaw
+* path efficiency
+* target crossings
+* final-minute behavior
+* 96-window heatmap
+
+PHASE 3 — LIVE STABILITY
+
+Implement live:
+
+* Stability Score
+* confidence
+* cross-market stress
+* dynamic updates
+* RUN / CAUTION / SKIP
+
+Still advisory only.
+
+PHASE 4 — A/B TEST
+
+Run existing scheduler versus Stability Engine.
+
+Collect performance.
+
+PHASE 5 — LOSS FORENSICS
+
+Analyze avoided and missed trades.
+
+Tune scoring.
+
+PHASE 6 — CONTROL MODE
+
+Only after sufficient validation:
+
+Allow Stability Engine to block new trades.
+
+Do not permit it to automatically increase trade size.
+
+PHASE 7 — MACHINE LEARNING
+
+Train predictive stability classifier if the dataset supports it.
+
+⸻
+
+77. IMPORTANT: DO NOT OPTIMIZE ONLY FOR WIN RATE
+
+Our actual economic objective should account for the asymmetric payoff structure.
+
+A losing contract can lose nearly the entire position while a winning high-probability contract may earn only a relatively small percentage.
+
+Therefore evaluate:
+
+Expected Value
+
+not merely:
+
+Win Rate
+
+Calculate:
+
+EV = P(win) × average_net_win - P(loss) × average_net_loss
+
+after fees and execution costs.
+
+The Stability Engine is valuable only if it improves long-run risk-adjusted expected value.
+
+⸻
+
+78. RISK RULE
+
+The new Stability Engine must initially have permission to:
+
+reduce trading
+
+or:
+
+prevent trading
+
+It must NOT independently increase stake size merely because a Stability Score is high.
+
+Position-sizing optimization should be a separate future project.
+
+⸻
+
+79. OUTPUT API
+
+Expose an internal endpoint approximately like:
+
+GET /api/stability/{asset}
+
+Example response concept:
+
+{
+  "asset": "BTC",
+  "window": "23:15-23:30",
+  "timezone": "America/New_York",
+  "historical_stability": 81.4,
+  "live_stability": 88.1,
+  "composite_stability": 85.8,
+  "confidence": 92.3,
+  "expiration_risk": 17.4,
+  "data_quality": 99.1,
+  "recommendation": "RUN",
+  "regime_shift": false,
+  "event_risk": "NONE",
+  "reasons": [
+    "Realized volatility at 31st percentile",
+    "No significant acceleration",
+    "Low target crossing rate",
+    "Normal spread",
+    "Low cross-market stress"
+  ]
+}
+
+Exact schema may change.
+
+⸻
+
+80. SCHEDULER DISPLAY
+
+Dashboard should show:
+
+CURRENT TIME
+
+CURRENT 15-MINUTE WINDOW
+
+NEXT WINDOW
+
+For each asset:
+
+BTC — RUN — 87
+
+ETH — RUN — 82
+
+SOL — CAUTION — 61
+
+XRP — SKIP — 43
+
+DOGE — SKIP — 37
+
+Gold — RUN — 79
+
+Clicking an asset shows the explanation.
+
+⸻
+
+81. UPCOMING WINDOW FORECAST
+
+Show next:
+
+* 15 minutes
+* 30 minutes
+* 1 hour
+* 2 hours
+* 4 hours
+
+using historical schedule plus current regime.
+
+Example:
+
+BTC
+
+23:15 — 84
+
+23:30 — 82
+
+23:45 — 77
+
+00:00 — 69
+
+Important:
+
+Clearly distinguish these forecast stability scores from live scores.
+
+⸻
+
+82. DAILY SAFE WINDOW VIEW
+
+Generate something readable like:
+
+BTC
+
+Best historical windows today:
+
+02:15
+
+02:30
+
+03:15
+
+04:45
+
+19:30
+
+Worst:
+
+09:30
+
+10:00
+
+14:00
+
+etc.
+
+But these values must be calculated from our database.
+
+Do not hard-code the examples above.
+
+⸻
+
+83. DETERIORATION ALERT
+
+Create a warning when a previously strong window deteriorates.
+
+Example:
+
+BTC 03:15 ET
+
+90-day stability:
+86
+
+30-day:
+81
+
+14-day:
+69
+
+7-day:
+53
+
+Display:
+
+DETERIORATING
+
+This directly solves one of the key failures of the existing scheduler.
+
+⸻
+
+84. IMPROVEMENT ALERT
+
+Likewise:
+
+90-day:
+54
+
+30-day:
+61
+
+14-day:
+73
+
+7-day:
+82
+
+Display:
+
+IMPROVING
+
+The scheduler should adapt rather than permanently blacklisting historical losers.
+
+⸻
+
+85. MARKET REGIME DASHBOARD
+
+Classify overall environment:
+
+CALM
+
+NORMAL
+
+ELEVATED
+
+HIGH VOLATILITY
+
+EXTREME
+
+Do this separately for:
+
+Crypto.
+
+Gold.
+
+Oil.
+
+This prevents forcing every time slot into the same historical regime.
+
+⸻
+
+86. LIVE OVERRIDE PRINCIPLE
+
+Current conditions always have veto power.
+
+Even if:
+
+Historical Score = 94
+
+if:
+
+live volatility = 99th percentile
+
+cross-market stress = extreme
+
+macro event = imminent
+
+then:
+
+SKIP
+
+Historical safety cannot override obvious real-time danger.
+
+⸻
+
+87. HISTORICAL OVERRIDE PRINCIPLE
+
+Likewise:
+
+Current market may look temporarily calm during a historically dangerous period.
+
+The historical model should not necessarily prohibit trading, but it should reduce confidence and require stronger live evidence.
+
+⸻
+
+88. SUCCESS CRITERIA
+
+The project is successful if, over sufficient live and backtested observations:
+
+The Stability Engine reduces the frequency of large losses.
+
+The windows it identifies as stable actually exhibit lower realized volatility/whipsaw/tail risk.
+
+Higher Stability Scores correlate with better strategy outcomes.
+
+The engine detects deterioration faster than the existing historical scheduler.
+
+The model avoids substantially more losses than profitable opportunities it incorrectly rejects.
+
+Net expected value improves after fees.
+
+Maximum drawdown decreases.
+
+⸻
+
+89. WHAT NOT TO DO
+
+Do NOT:
+
+Hard-code assumptions as facts.
+
+Use 15-minute candles as the only data.
+
+Use lifetime win rate as the main scheduler.
+
+Treat BTC and DOGE identically.
+
+Treat crypto and Gold identically.
+
+Use one exchange as the definitive Kalshi settlement price without documenting the discrepancy.
+
+Delete extreme events from training.
+
+Use future information during backtesting.
+
+Automatically increase bet size because stability appears high.
+
+Replace the existing bot before A/B testing.
+
+Train a complicated AI model before building a reliable dataset.
+
+Return a stability score without explaining why.
+
+Trade when required data is stale or missing.
+
+⸻
+
+90. FIRST DEVELOPMENT TASK FOR REPLIT AGENT
+
+Before changing the existing trading logic, do the following:
+
+1. Audit the existing codebase.
+2. Identify the current proximity sensor.
+3. Identify existing scheduler logic.
+4. Identify existing historical data tables.
+5. Identify all current Kalshi API calls.
+6. Identify available timestamps/resolution in the three-month historical dataset.
+7. Identify which new metrics can already be reconstructed.
+8. Determine the exact Kalshi API endpoints available for CF Benchmarks RTI and market/order-book data.
+9. Design the new database tables.
+10. Implement data collection first.
+11. Build Stability Engine as a separate module.
+12. Do NOT remove or materially modify existing working trading logic.
+
+Suggested architecture:
+
+existing_trading_engine/
+
+existing_scheduler/
+
+stability_engine/
+
+market_data_service/
+
+historical_analysis/
+
+macro_event_service/
+
+stability_api/
+
+stability_dashboard/
+
+backtester/
+
+ab_testing/
+
+loss_forensics/
+
+⸻
+
+FINAL DEVELOPMENT PRINCIPLE
+
+The purpose of this project is not to create a magical predictor.
+
+We are building a quantitative risk detector.
+
+The question is not:
+
+“Will BTC go up or down?”
+
+The question is:
+
+“Does the current 15-minute environment statistically resemble the environments in which this strategy performs safely, or does it resemble environments associated with instability and losses?”
+
+Every engineering decision should serve that question.
+
+Build the dataset first.
+
+Measure actual behavior.
+
+Keep the existing model running.
+
+Build the new model independently.
+
+A/B test them.
+
+Allow the evidence to determine which system is superior.
+
+A couple of important points behind that spec: Kalshi explicitly says the CF Benchmarks RTI feed is available through its API and that crypto expiration uses the 60 one-second observations in the final minute, so I made final-minute behavior a major component instead of treating every minute in the 15-minute interval equally.  Published high-frequency research also supports your broader observation that crypto liquidity and volatility exhibit systematic intraday patterns rather than behaving uniformly throughout the 24-hour day. 
+
+And there’s one addition in here that I think could make a big difference compared with the scheduler you already have: the deterioration/regime-change detector. Instead of a window slowly going from 85% → 80% → 75% → 65% while old wins keep propping up its historical rating, the new engine explicitly compares the last 7/14 days against the prior 30/60/90 days and can downgrade that window before the lifetime percentage collapses. That directly attacks the problem you were describing.
