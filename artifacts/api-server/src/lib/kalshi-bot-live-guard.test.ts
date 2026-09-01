@@ -332,7 +332,7 @@ test("Layer3/wiring: loadBotConfigFromDB delegates to applyStartupModeRestore; b
   const src = readSrc("kalshi-bot-db.ts");
   const fnIdx = src.indexOf("export async function loadBotConfigFromDB(");
   assert.ok(fnIdx !== -1, "loadBotConfigFromDB must be exported");
-  const body = src.slice(fnIdx, fnIdx + 1500);
+  const body = src.slice(fnIdx, fnIdx + 2500);
   assert.ok(
     body.includes("applyStartupModeRestore(saved.mode, process.env.NODE_ENV)"),
     "loadBotConfigFromDB must call applyStartupModeRestore",

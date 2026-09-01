@@ -298,29 +298,12 @@ test("FastLane does not inherit legacy Conviction's gross daily spend throttle",
   );
 });
 
-test("a valid FastLane fill uses the shared stop-loss module like every other mode", () => {
+test("retired legacy stop-loss cannot sell a FastLane live position", () => {
   const loopSource = readFileSync(new URL("./kalshi-bot-loop.ts", import.meta.url), "utf8");
-  const sharedStopLossStart = loopSource.indexOf("Shared stop-loss module");
-  const positionTickStart = loopSource.indexOf(
-    "for (const [sym] of Array.from(openPositions.entries()))",
-    sharedStopLossStart,
-  );
-  assert.ok(sharedStopLossStart >= 0, "shared stop-loss module must exist");
-  assert.ok(
-    positionTickStart > sharedStopLossStart,
-    "shared stop-loss must run before ordinary mode-specific position management",
-  );
-  const stopLossBlock = loopSource.slice(sharedStopLossStart, positionTickStart);
-  assert.match(stopLossBlock, /convictionStopLossFloor/);
-  assert.match(stopLossBlock, /convictionStopLossActivationMinute/);
-  assert.match(stopLossBlock, /convictionStopLossSuppressionMarginPct/);
-  assert.match(stopLossBlock, /NEAR_ZERO_STOP_LOSS_FLOOR/);
-  assert.match(stopLossBlock, /"conviction_stop_loss"/);
-  assert.doesNotMatch(
-    stopLossBlock,
-    /decisionMode\s*===\s*"conviction"|decisionMode\s*===\s*"fastlane"/,
-    "entry decision mode must not gate active-position stop-loss protection",
-  );
+  assert.doesNotMatch(loopSource, /convictionStopLossFloor/);
+  assert.doesNotMatch(loopSource, /convictionStopLossActivationMinute/);
+  assert.doesNotMatch(loopSource, /convictionStopLossSuppressionMarginPct/);
+  assert.doesNotMatch(loopSource, /"conviction_stop_loss"/);
 
   const reconciliationIndex = loopSource.indexOf("reconcileActiveRegularExitIntent(pos.id)");
   const expiryIndex = loopSource.indexOf("Always run window-expiry check");

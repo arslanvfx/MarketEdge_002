@@ -661,7 +661,8 @@ async function _runBotTick(
       // and misfires badly in conviction mode (17% win rate on exits).
       // When disableMidExitForConviction is true (the default), all mid-exit
       // evaluation is suppressed for conviction positions so they always hold
-      // to window expiry. The shared stop-loss above is unaffected.
+      // to window expiry unless the separate Smart Exit module is authorized
+      // to act on the position.
       if (S.config.decisionMode === "conviction" && S.config.disableMidExitForConviction !== false) {
         logger.debug({ sym }, "[kalshi-bot] conviction mode — mid-exit suppressed, holding to expiry");
         return;

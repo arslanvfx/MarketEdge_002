@@ -19,8 +19,6 @@ import {
   getEffectiveConvictionZone,
   getConvictionMinEntryMinute,
   shouldApplyLoopGlobalQuietHours,
-  shouldSuppressConvictionStopLoss,
-  evaluatePositionStopLoss,
   getEtDow,
   isPriceTriggeredDecisionMode,
   type BotConfig, type BotDecision, type CircuitBreakerState, type PriceRegime,
@@ -922,93 +920,6 @@ export async function runBotLoopTick(): Promise<void> {
   // _runBotTick returns early after managing an existing position so the
   // same coin does not immediately re-enter in Phase 4 of this tick.
   if (openPositions.size > 0) {
-    // Shared stop-loss module — entry mode never changes position protection.
-    // A FastLane emergency close handles only a bad initial fill. Once a valid
-    // fill is open, it is managed here with the same floor, activation minute,
-    // near-zero rule, and underlying-price suppression as every other mode.
-    const NEAR_ZERO_STOP_LOSS_FLOOR = 0.05;
-    for (const [sym, pos] of Array.from(openPositions.entries())) {
-      if (positionsWithBlockedExitLifecycle.has(pos.id)) continue;
-      const kd = getKalshiCachedData(sym);
-      const yesPrice = kd?.yesPrice ?? null;
-      const windowOpenedAt = Date.parse(`${pos.windowKey}:00.000Z`);
-      const clockMinutesElapsed = Number.isFinite(windowOpenedAt)
-        ? Math.max(0, (Date.now() - windowOpenedAt) / 60_000)
-        : Number.NaN;
-      const stopLoss = evaluatePositionStopLoss({
-        direction: pos.direction,
-        currentYesPrice: yesPrice,
-        floor: S.config.convictionStopLossFloor,
-        minutesElapsed: clockMinutesElapsed,
-        activationMinute: S.config.convictionStopLossActivationMinute,
-      });
-      if (
-        !stopLoss.triggered
-        || stopLoss.winningSidePrice == null
-        || stopLoss.winningSidePrice <= NEAR_ZERO_STOP_LOSS_FLOOR
-      ) {
-        continue;
-      }
-
-      const liveSpotPrice = getCachedPrediction(sym)?.price ?? null;
-      const kalshiStrike = kd?.value ?? pos.kalshiTarget;
-      const suppressionMargin = S.config.convictionStopLossSuppressionMarginPct ?? 0.02;
-      if (shouldSuppressConvictionStopLoss({
-        direction: pos.direction,
-        livePrice: liveSpotPrice,
-        kalshiStrike,
-        marginPct: suppressionMargin,
-      })) {
-        logger.warn(
-          {
-            sym,
-            decisionMode: S.config.decisionMode,
-            direction: pos.direction,
-            liveSpotPrice,
-            kalshiStrike,
-            suppressionMargin,
-            winningSidePrice: +stopLoss.winningSidePrice.toFixed(4),
-            stopLossFloor: S.config.convictionStopLossFloor,
-          },
-          "[kalshi-bot] stop-loss suppressed — underlying still supports active position",
-        );
-        continue;
-      }
-
-      logger.warn(
-        {
-          sym,
-          decisionMode: S.config.decisionMode,
-          direction: pos.direction,
-          winningSidePrice: +stopLoss.winningSidePrice.toFixed(4),
-          stopLossFloor: S.config.convictionStopLossFloor,
-          activationMinute: S.config.convictionStopLossActivationMinute,
-          clockMinutesElapsed: +clockMinutesElapsed.toFixed(2),
-          entryYesPrice: pos.entryYesPrice,
-        },
-        "[kalshi-bot] shared stop-loss triggered — selling active position",
-      );
-      // Claim local ownership before the asynchronous close. A failed or
-      // ambiguous exit restores the position so its durable lifecycle retries.
-      openPositions.delete(sym);
-      try {
-        await closePosition(
-          pos,
-          yesPrice,
-          kalshiStrike,
-          "conviction_stop_loss",
-          false,
-          { gtcFallback: true },
-        );
-      } catch (err) {
-        logger.error(
-          { err, sym, decisionMode: S.config.decisionMode },
-          "[kalshi-bot] shared stop-loss exit failed — restoring position",
-        );
-        openPositions.set(sym, pos);
-      }
-    }
-
     for (const [sym] of Array.from(openPositions.entries())) {
       const pos = openPositions.get(sym);
       if (pos && positionsWithBlockedExitLifecycle.has(pos.id)) continue;

@@ -5,6 +5,12 @@ description: Durable safety rules for analysis-driven early exits across regular
 
 Smart Exit owns evidence, probability analysis, recommendations, and audit history only. It never owns positions or broker mechanics. Any actionable exit must delegate through the position owner's durable close lifecycle, after exact identity, mode, applied-version, and evidence checks are repeated immediately before submission. Emergency disable must be able to revoke a request after durable claim but before the broker call.
 
+Smart Exit is the sole operator-configurable stop-loss system. Do not add or restore a separate shared/conviction price-floor stop-loss for open positions. The only independent exception is the immediate bad-fill close, which handles an invalid execution rather than managing a valid open position.
+
+**Why:** A hidden legacy price-floor path remained active after the visible Live Smart Stop Loss control was put in shadow/advisory mode. It sold a valid live position near settlement at a large loss while the market ultimately resolved in the held direction.
+
+**How to apply:** Valid open positions may be exited early only through an explicitly authorized Smart Exit owner lifecycle. Keep bad-fill cleanup narrowly scoped to newly confirmed fills that violate the entry floor; never let it evolve into general position management.
+
 The operator-selected built-in policy is itself a complete executable parameter version. A missing calibrated override must fall back to that built-in version rather than block every paper/live exit. When a calibrated override exists, its immutable snapshot, scope, and live eligibility remain mandatory.
 
 A live recommendation must freeze its economic floor and evidence-expiry deadline at decision time. The owner must re-fetch authenticated depth, prove the full quantity remains executable at that immutable winning-side floor, and submit a side-aware bounded FOK limit. Never recompute the floor from mutable config after an await or use an unreferenced aggressive close.

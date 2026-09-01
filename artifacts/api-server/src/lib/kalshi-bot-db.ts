@@ -98,7 +98,18 @@ export async function loadBotConfigFromDB(): Promise<void> {
       .where(eq(botConfigTable.id, "default"))
       .limit(1);
     if (rows.length > 0 && rows[0].config) {
-      const saved = rows[0].config as Partial<BotConfig> & { mode?: BotMode };
+      const savedRecord = { ...(rows[0].config as Record<string, unknown>) };
+      let removedLegacyStopLossConfig = false;
+      for (const key of [
+        "convictionStopLossFloor",
+        "convictionStopLossActivationMinute",
+        "convictionStopLossSuppressionMarginPct",
+      ]) {
+        if (!(key in savedRecord)) continue;
+        delete savedRecord[key];
+        removedLegacyStopLossConfig = true;
+      }
+      const saved = savedRecord as Partial<BotConfig> & { mode?: BotMode };
       S.config = { ...DEFAULT_BOT_CONFIG, ...saved };
       if (saved.mode === "paper" || saved.mode === "live") {
         // applyStartupModeRestore: extracted to engine-core for unit-testability.
@@ -114,6 +125,10 @@ export async function loadBotConfigFromDB(): Promise<void> {
           _persistModeToConfig().catch(() => {});
         }
         logger.info({ mode: S.botMode }, "[kalshi-bot] mode restored from DB");
+      }
+      if (removedLegacyStopLossConfig) {
+        logger.warn("[kalshi-bot] removed retired legacy stop-loss settings from persisted config");
+        _persistModeToConfig().catch(() => {});
       }
 
       // Backfill any mode-specific fields that are null in the stored config.
