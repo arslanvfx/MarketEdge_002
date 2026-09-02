@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   DAILY_PNL_SIMULATION_ROWS_SQL,
   DAILY_TRADING_PNL_SQL,
+  PAPER_TRADING_BALANCE_SQL,
 } from "./kalshi-daily-pnl-query.ts";
 import {
   calculatePnlSimulation,
@@ -28,6 +29,15 @@ test("daily P&L query includes only regular bot and canonical Scalper settlement
   assert.match(DAILY_TRADING_PNL_SQL, /outcome IN \('win', 'loss'\)/);
   assert.doesNotMatch(DAILY_TRADING_PNL_SQL, /kalshi_scalp_contrarian_orders/);
   assert.doesNotMatch(DAILY_TRADING_PNL_SQL, /liveStatsResetAt|paperStatsResetAt/);
+});
+
+test("paper balance uses the same regular and canonical Scalper ownership", () => {
+  assert.match(PAPER_TRADING_BALANCE_SQL, /FROM kalshi_bot_bets/);
+  assert.match(PAPER_TRADING_BALANCE_SQL, /b\.source = 'bot'/);
+  assert.match(PAPER_TRADING_BALANCE_SQL, /FROM kalshi_scalp_orders/);
+  assert.match(PAPER_TRADING_BALANCE_SQL, /o\.mode = 'paper'/);
+  assert.match(PAPER_TRADING_BALANCE_SQL, /account_balance/);
+  assert.doesNotMatch(PAPER_TRADING_BALANCE_SQL, /contrarian|shadow/i);
 });
 
 test("simulation query preserves Eastern boundaries and source isolation", () => {

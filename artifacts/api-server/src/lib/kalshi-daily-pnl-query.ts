@@ -51,6 +51,39 @@ export const DAILY_TRADING_PNL_SQL = `
 `;
 
 /**
+ * Authoritative paper wallet balance. It uses the same settlement ownership as
+ * daily P&L, but spans the configured paper-balance reset boundary instead of
+ * New York midnight.
+ *
+ * $1 = paper starting balance, $2 = paperBalanceResetAt ISO string or null
+ */
+export const PAPER_TRADING_BALANCE_SQL = `
+  WITH regular AS (
+    SELECT COALESCE(SUM(b.pnl), 0) AS pnl
+    FROM kalshi_bot_bets b
+    WHERE b.mode = 'paper'
+      AND b.source = 'bot'
+      AND b.action IN ('exit', 'late_recovery_exit', 'expired')
+      AND b.exited_at IS NOT NULL
+      AND b.exited_at >= COALESCE($2::timestamptz, '-infinity'::timestamptz)
+  ),
+  scalper AS (
+    SELECT COALESCE(SUM(o.pnl), 0) AS pnl
+    FROM kalshi_scalp_orders o
+    WHERE o.mode = 'paper'
+      AND o.outcome IN ('win', 'loss')
+      AND o.pnl IS NOT NULL
+      AND o.settled_at >= COALESCE($2::timestamptz, '-infinity'::timestamptz)
+  )
+  SELECT
+    $1::numeric AS starting_balance,
+    regular.pnl AS regular_pnl,
+    scalper.pnl AS scalper_pnl,
+    $1::numeric + regular.pnl + scalper.pnl AS account_balance
+  FROM regular, scalper
+`;
+
+/**
  * Per-ET-hour P&L breakdown for today. Returns one row per hour (0–23) that
  * has at least one settled bet, with regular and scalper P&L aggregated
  * separately so the frontend can display combined and split views.

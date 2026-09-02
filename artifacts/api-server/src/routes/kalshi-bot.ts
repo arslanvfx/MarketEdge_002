@@ -664,7 +664,12 @@ router.get("/crypto/bot/daily-pnl", async (req, res) => {
     });
     const cfg = getBotState().config;
     const pnlResetAt = mode === "live" ? (cfg.livePnlResetAt ?? null) : (cfg.paperPnlResetAt ?? null);
-    res.json(await getDailyTradingPnl(mode, pnlResetAt));
+    res.json(await getDailyTradingPnl(
+      mode,
+      pnlResetAt,
+      cfg.paperStartingBalance ?? 100,
+      cfg.paperBalanceResetAt ?? null,
+    ));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     res.status(500).json({ error: msg });

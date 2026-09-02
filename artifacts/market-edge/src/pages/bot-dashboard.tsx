@@ -300,6 +300,7 @@ export default function BotDashboard() {
     regularPnl: number;
     scalperPnl: number;
     totalPnl: number;
+    paperBalance: number | null;
   }>({
     queryKey: ["bot-daily-pnl", activeMode],
     queryFn: async () => {
@@ -736,7 +737,13 @@ export default function BotDashboard() {
           {[
             {
               label: status?.mode === "live" ? "Kalshi Balance" : "Paper Balance",
-              value: fmt$(status?.accountBalance), icon: DollarSign, color: "text-sky-400",
+              value: fmt$(
+                activeMode === "paper" && dailyPnlData?.paperBalance != null
+                  ? dailyPnlData.paperBalance
+                  : status?.accountBalance,
+              ),
+              icon: DollarSign,
+              color: "text-sky-400",
             },
             {
               label: `Today's P&L (${activeMode})`,

@@ -43,6 +43,7 @@ import {
   ensureRegularOrderIntentMigrations,
   hasActiveRegularExitIntent,
 } from "./kalshi-regular-order-intent";
+import { getPaperTradingBalance } from "./kalshi-daily-pnl";
 import { AsyncSerialQueue } from "./async-serial-queue";
 import {
   createSerializedAsyncOperation,
@@ -555,29 +556,17 @@ export async function loadPaperBalanceFromDB(): Promise<void> {
   }
   try {
     const startingBalance = S.config.paperStartingBalance ?? 100;
-    const resetAt = S.config.paperBalanceResetAt ? new Date(S.config.paperBalanceResetAt) : null;
-
-    const conditions = [
-      isNotNull(kalshiBotBetsTable.exitedAt),
-      eq(kalshiBotBetsTable.mode, "paper"),
-      sql`${kalshiBotBetsTable.action} IN ('exit', 'late_recovery_exit', 'expired')`,
-    ];
-    if (resetAt) {
-      conditions.push(sql`${kalshiBotBetsTable.exitedAt} >= ${resetAt.toISOString()}`);
-    }
-
-    const rows = await db
-      .select({ pnl: kalshiBotBetsTable.pnl })
-      .from(kalshiBotBetsTable)
-      .where(and(...conditions));
-
-    let pnlSum = 0;
-    for (const r of rows) {
-      pnlSum += r.pnl != null ? parseFloat(String(r.pnl)) : 0;
-    }
-    S.accountBalance = startingBalance + pnlSum;
+    const resetAt = S.config.paperBalanceResetAt ?? null;
+    const balance = await getPaperTradingBalance(startingBalance, resetAt);
+    S.accountBalance = balance.accountBalance;
     logger.info(
-      { startingBalance, pnlSum, accountBalance: S.accountBalance, resetAt },
+      {
+        startingBalance,
+        regularPnl: balance.regularPnl,
+        scalperPnl: balance.scalperPnl,
+        accountBalance: S.accountBalance,
+        resetAt,
+      },
       "[kalshi-bot] paper balance loaded from DB",
     );
   } catch (err) {

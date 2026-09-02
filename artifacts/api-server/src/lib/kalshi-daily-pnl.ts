@@ -4,6 +4,7 @@ import {
   DAILY_HOURLY_PNL_SQL,
   DAILY_PNL_SIMULATION_ROWS_SQL,
   DAILY_TRADING_PNL_SQL,
+  PAPER_TRADING_BALANCE_SQL,
 } from "./kalshi-daily-pnl-query.ts";
 import {
   calculatePnlSimulation,
@@ -21,10 +22,51 @@ export interface DailyTradingPnl {
   regularPnl: number;
   scalperPnl: number;
   totalPnl: number;
+  paperBalance: number | null;
 }
 
-export async function getDailyTradingPnl(mode: BotMode, pnlResetAt?: string | null): Promise<DailyTradingPnl> {
-  const result = await pool.query(DAILY_TRADING_PNL_SQL, [mode, pnlResetAt ?? null]);
+export interface PaperTradingBalance {
+  startingBalance: number;
+  regularPnl: number;
+  scalperPnl: number;
+  accountBalance: number;
+}
+
+export async function getPaperTradingBalance(
+  startingBalance: number,
+  balanceResetAt?: string | null,
+): Promise<PaperTradingBalance> {
+  const result = await pool.query(PAPER_TRADING_BALANCE_SQL, [
+    startingBalance,
+    balanceResetAt ?? null,
+  ]);
+  const row = result.rows[0];
+  if (!row) throw new Error("Paper trading balance query returned no row");
+
+  const values = {
+    startingBalance: Number(row["starting_balance"]),
+    regularPnl: Number(row["regular_pnl"]),
+    scalperPnl: Number(row["scalper_pnl"]),
+    accountBalance: Number(row["account_balance"]),
+  };
+  if (Object.values(values).some((value) => !Number.isFinite(value))) {
+    throw new Error("Paper trading balance query returned invalid totals");
+  }
+  return values;
+}
+
+export async function getDailyTradingPnl(
+  mode: BotMode,
+  pnlResetAt?: string | null,
+  paperStartingBalance = 100,
+  paperBalanceResetAt?: string | null,
+): Promise<DailyTradingPnl> {
+  const [result, paperWallet] = await Promise.all([
+    pool.query(DAILY_TRADING_PNL_SQL, [mode, pnlResetAt ?? null]),
+    mode === "paper"
+      ? getPaperTradingBalance(paperStartingBalance, paperBalanceResetAt)
+      : Promise.resolve(null),
+  ]);
   const row = result.rows[0];
   if (!row) {
     throw new Error("Daily trading P&L query returned no row");
@@ -48,6 +90,7 @@ export async function getDailyTradingPnl(mode: BotMode, pnlResetAt?: string | nu
     regularPnl,
     scalperPnl,
     totalPnl: regularPnl + scalperPnl,
+    paperBalance: paperWallet?.accountBalance ?? null,
   };
 }
 

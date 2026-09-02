@@ -234,6 +234,8 @@ export function setBotMode(mode: BotMode): void {
     getCachedKalshiBalance()
       .then(bal => { S.accountBalance = bal; })
       .catch(() => {});
+  } else if (mode === "paper") {
+    loadPaperBalanceFromDB().catch(() => {});
   }
 }
 
