@@ -791,6 +791,7 @@ function selectCommodityOracleSamples(
   nowMs: number,
 ): CadencedSamplesResult {
   const byPublishTime = new Map<number, FreefallSample>();
+  let previousPublishedAt: number | null = null;
   for (const sample of relevant) {
     const publishedAt = sample.oraclePublishedAtMs;
     if (
@@ -799,6 +800,17 @@ function selectCommodityOracleSamples(
       || (sample.oracleAgeMs as number) < 0
       || (sample.oracleAgeMs as number) > 5_000
     ) return { ok: false, reason: "freefall_unavailable_oracle_stale", samplesUsed: 0 };
+    if (
+      previousPublishedAt != null
+      && (sample.oraclePublishedAtMs as number) < previousPublishedAt
+    ) {
+      return {
+        ok: false,
+        reason: "freefall_unavailable_oracle_out_of_order",
+        samplesUsed: byPublishTime.size,
+      };
+    }
+    previousPublishedAt = sample.oraclePublishedAtMs as number;
     // Repeated polling receipts never become extra cadence observations.
     byPublishTime.set(publishedAt as number, sample);
   }
@@ -998,7 +1010,11 @@ export function checkFreefallGuard(input: FreefallGuardInput): FreefallGuardResu
   }
 
   for (let index = 1; index < relevant.length; index += 1) {
-    if (relevant[index].at <= relevant[index - 1].at) {
+    const movedBackward = relevant[index].at < relevant[index - 1].at;
+    const repeatedLocalTimestamp =
+      relevant[index].at === relevant[index - 1].at
+      && !input.authoritativeCommodityCadence;
+    if (movedBackward || repeatedLocalTimestamp) {
       return unavailable("freefall_unavailable_out_of_order", relevant.length);
     }
   }

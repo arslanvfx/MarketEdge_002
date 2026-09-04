@@ -13,6 +13,8 @@ const WS_SIGNING_PATH = "/trade-api/ws/v2";
 const CONNECT_TIMEOUT_MS = 10_000;
 const PING_INTERVAL_MS = 20_000;
 const DEFAULT_FRESHNESS_MS = 5_000;
+const PUBLICATION_HISTORY_MS = 60_000;
+const PUBLICATION_HISTORY_LIMIT = 300;
 const INDEX_IDS = Object.values(CF_BENCHMARKS_CRYPTO_FEEDS).map((feed) => feed.streamIndexId);
 const PRODUCT_TO_INDEX = new Map(
   Object.values(CF_BENCHMARKS_CRYPTO_FEEDS).map((feed) => [feed.product, feed.streamIndexId]),
@@ -43,6 +45,7 @@ export class KalshiCfBenchmarksValueService {
   private connectionGeneration = 0;
   private warmupAbort: AbortController | null = null;
   private readonly latest = new Map<string, KalshiCfBenchmarksValueEvidence>();
+  private readonly history = new Map<string, KalshiCfBenchmarksValueEvidence[]>();
 
   start(): void {
     if (this.started) return;
@@ -68,6 +71,7 @@ export class KalshiCfBenchmarksValueService {
     this.socket = null;
     if (socket) socket.terminate();
     this.latest.clear();
+    this.history.clear();
   }
 
   getFreshEvidence(product: string, nowMs = Date.now(), maxAgeMs = DEFAULT_FRESHNESS_MS): KalshiCfBenchmarksTickerEvidence {
@@ -99,6 +103,37 @@ export class KalshiCfBenchmarksValueService {
       websocketSequence: evidence.websocketSequence,
       average60s: evidence.average60s,
     };
+  }
+
+  /**
+   * Return every authenticated publication still relevant to an execution
+   * guard. The one-second bot sampler can otherwise observe only the last frame
+   * received between ticks and silently discard genuine intermediate updates.
+   */
+  getFreshEvidenceHistory(
+    product: string,
+    nowMs = Date.now(),
+    maxAgeMs = DEFAULT_FRESHNESS_MS,
+  ): KalshiCfBenchmarksTickerEvidence[] {
+    const latest = this.getFreshEvidence(product, nowMs, maxAgeMs);
+    const indexId = PRODUCT_TO_INDEX.get(product)!;
+    const retained = (this.history.get(indexId) ?? [])
+      .filter((evidence) =>
+        evidence.provenance === "websocket"
+        && evidence.sourceTsMs >= nowMs - PUBLICATION_HISTORY_MS
+        && evidence.sourceTsMs <= latest.publishedAtMs
+      );
+    if (retained.length === 0) return [latest];
+    return retained.map((evidence) => ({
+      price: evidence.price,
+      publishedAtMs: evidence.sourceTsMs,
+      receivedAtMs: evidence.receivedAtMs,
+      sourceSequence: evidence.sourceSequence,
+      source: "kalshi_cfbenchmarks",
+      sourceIndex: indexId,
+      websocketSequence: evidence.websocketSequence,
+      average60s: evidence.average60s,
+    }));
   }
 
   getStatus(nowMs = Date.now()) {
@@ -198,9 +233,27 @@ export class KalshiCfBenchmarksValueService {
         || (evidence.sourceTsMs === previous.sourceTsMs && evidence.websocketSequence <= previous.websocketSequence)
       )) return;
       this.latest.set(evidence.indexId, evidence);
+      const history = this.history.get(evidence.indexId) ?? [];
+      const last = history[history.length - 1];
+      if (last?.sourceTsMs === evidence.sourceTsMs) {
+        // A higher websocket sequence can correct the same provider
+        // publication, but must not manufacture an additional observation.
+        history[history.length - 1] = evidence;
+      } else {
+        history.push(evidence);
+      }
+      const historyCutoff = evidence.sourceTsMs - PUBLICATION_HISTORY_MS;
+      while (
+        history.length > PUBLICATION_HISTORY_LIMIT
+        || (history[0]?.sourceTsMs ?? evidence.sourceTsMs) < historyCutoff
+      ) {
+        history.shift();
+      }
+      this.history.set(evidence.indexId, history);
       this.lastFailureReason = null;
     } catch (err) {
       this.latest.clear();
+      this.history.clear();
       this.lastFailureReason = `malformed cfbenchmarks_value frame: ${errorMessage(err)}`;
       logger.warn({ err }, "[kalshi-cfbenchmarks-value] invalid frame; crypto evidence invalidated");
     }
@@ -314,6 +367,7 @@ export class KalshiCfBenchmarksValueService {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.connectTimer = this.pingTimer = null;
     this.latest.clear();
+    this.history.clear();
     try { ws.terminate(); } catch {}
     this.fail(reason);
     this.scheduleReconnect();
@@ -355,4 +409,15 @@ export function getKalshiCfBenchmarksValueEvidence(
   maxAgeMs = DEFAULT_FRESHNESS_MS,
 ): KalshiCfBenchmarksTickerEvidence {
   return kalshiCfBenchmarksValueService.getFreshEvidence(product, Date.now(), maxAgeMs);
+}
+
+export function getKalshiCfBenchmarksValueEvidenceHistory(
+  product: string,
+  maxAgeMs = DEFAULT_FRESHNESS_MS,
+): KalshiCfBenchmarksTickerEvidence[] {
+  return kalshiCfBenchmarksValueService.getFreshEvidenceHistory(
+    product,
+    Date.now(),
+    maxAgeMs,
+  );
 }

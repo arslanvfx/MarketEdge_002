@@ -207,6 +207,23 @@ test("unavailable samples fail closed even before the final two minutes", () => 
   assert.equal(result.deferredUnavailable, false);
 });
 
+test("an empty production feed fails closed with the exact no-samples reason", () => {
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    samples: [],
+    side: "yes",
+    nowMs: NOW,
+    windowStartMs: 0,
+    closeTimeMs: NOW + 120_000,
+    targetPrice: TARGET,
+    hasProduct: true,
+    consecutiveSeconds: 3,
+    authoritativePublicationCadence: true,
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "freefall_unavailable_no_samples");
+  assert.equal(result.guardResult?.evaluable, false);
+});
+
 test("stale spot evidence fails closed with structured evidence", () => {
   const result = evaluateRegularFreefallPreSubmitGuard({
     samples: [100, 100.1, 100.2, 100.3, 100.4, 100.5].map((price, index) => ({
@@ -370,6 +387,93 @@ test("Pyth cadence fails closed while warming or stale", () => {
     { offset: -6_000, price: 100.2 },
   ]);
   assert.equal(staleOracle.reason, "freefall_unavailable_oracle_stale");
+});
+
+test("authoritative publication gaps remain fail-closed after history continuity repair", () => {
+  const gap = evaluatePyth([
+    { offset: -12_000, price: 100 },
+    { offset: -5_000, price: 100.1 },
+    { offset: 0, price: 100.2 },
+  ]);
+  assert.equal(gap.allowed, false);
+  assert.equal(gap.reason, "freefall_unavailable_oracle_gap");
+  assert.equal(gap.guardResult?.evaluable, false);
+});
+
+test("out-of-order authoritative publications remain fail-closed", () => {
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    samples: [
+      {
+        price: 100,
+        ts: NOW - 4_000,
+        oraclePublishedAtMs: NOW - 4_000,
+        oracleAgeMs: 0,
+      },
+      {
+        price: 100.1,
+        ts: NOW - 2_000,
+        oraclePublishedAtMs: NOW - 1_000,
+        oracleAgeMs: 0,
+      },
+      {
+        price: 100.2,
+        ts: NOW,
+        oraclePublishedAtMs: NOW - 2_000,
+        oracleAgeMs: 2_000,
+      },
+    ],
+    side: "yes",
+    nowMs: NOW,
+    windowStartMs: 0,
+    closeTimeMs: NOW + 120_000,
+    targetPrice: TARGET,
+    hasProduct: true,
+    consecutiveSeconds: 3,
+    authoritativePublicationCadence: true,
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "freefall_unavailable_oracle_out_of_order");
+  assert.equal(result.guardResult?.evaluable, false);
+});
+
+test("distinct publications delivered between sampler ticks remain fully evaluable", () => {
+  const result = evaluateRegularFreefallPreSubmitGuard({
+    samples: [
+      {
+        price: 100,
+        ts: NOW - 5_990,
+        oraclePublishedAtMs: NOW - 6_000,
+        oracleAgeMs: 10,
+        sourceSequence: "BRTI:1",
+      },
+      {
+        price: 100.1,
+        ts: NOW - 2_990,
+        oraclePublishedAtMs: NOW - 3_000,
+        oracleAgeMs: 10,
+        sourceSequence: "BRTI:2",
+      },
+      {
+        price: 100.2,
+        ts: NOW - 90,
+        oraclePublishedAtMs: NOW - 100,
+        oracleAgeMs: 10,
+        sourceSequence: "BRTI:3",
+      },
+    ],
+    side: "yes",
+    nowMs: NOW,
+    windowStartMs: 0,
+    closeTimeMs: NOW + 120_000,
+    targetPrice: TARGET,
+    hasProduct: true,
+    consecutiveSeconds: 3,
+    authoritativePublicationCadence: true,
+  });
+  assert.equal(result.allowed, true);
+  assert.equal(result.guardResult?.evaluable, true);
+  assert.equal(result.guardResult?.evaluatedSamples.length, 3);
+  assert.equal(result.guardResult?.favorableTrendConfirmed, true);
 });
 
 test("Pyth adverse reversal blocks on distinct publications", () => {

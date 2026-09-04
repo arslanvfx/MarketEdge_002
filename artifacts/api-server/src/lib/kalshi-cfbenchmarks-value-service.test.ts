@@ -61,6 +61,62 @@ test("same-publication websocket updates never replace a newer CF sequence", () 
   assert.equal(internals.latest.get("ZECUSD_RTI")?.websocketSequence, 12);
 });
 
+test("CF history preserves every distinct authenticated publication between sampler ticks", () => {
+  const service = new KalshiCfBenchmarksValueService();
+  const socket = {};
+  const now = Date.now();
+  const internals = service as unknown as {
+    started: boolean;
+    socket: object;
+    connectionGeneration: number;
+    onMessage(data: Buffer, socket: object, generation: number): void;
+  };
+  internals.started = true;
+  internals.socket = socket;
+  internals.connectionGeneration = 4;
+
+  internals.onMessage(cfFrame(20, now - 4_000, "824.40"), socket, 4);
+  internals.onMessage(cfFrame(21, now - 2_000, "824.50"), socket, 4);
+  internals.onMessage(cfFrame(22, now - 100, "824.60"), socket, 4);
+
+  const history = service.getFreshEvidenceHistory("ZEC-USD", now, 5_000);
+  assert.deepEqual(
+    history.map((evidence) => evidence.sourceSequence),
+    [
+      `ZECUSD_RTI:${now - 4_000}:824.40`,
+      `ZECUSD_RTI:${now - 2_000}:824.50`,
+      `ZECUSD_RTI:${now - 100}:824.60`,
+    ],
+  );
+  assert.deepEqual(
+    history.map((evidence) => evidence.receivedAtMs),
+    [now - 3_990, now - 1_990, now - 90],
+  );
+});
+
+test("CF history replaces a corrected same-time publication instead of double-counting it", () => {
+  const service = new KalshiCfBenchmarksValueService();
+  const socket = {};
+  const now = Date.now();
+  const internals = service as unknown as {
+    started: boolean;
+    socket: object;
+    connectionGeneration: number;
+    onMessage(data: Buffer, socket: object, generation: number): void;
+  };
+  internals.started = true;
+  internals.socket = socket;
+  internals.connectionGeneration = 5;
+
+  internals.onMessage(cfFrame(30, now - 100, "824.60"), socket, 5);
+  internals.onMessage(cfFrame(31, now - 100, "824.61"), socket, 5);
+
+  const history = service.getFreshEvidenceHistory("ZEC-USD", now, 5_000);
+  assert.equal(history.length, 1);
+  assert.equal(history[0].price, 824.61);
+  assert.equal(history[0].websocketSequence, 31);
+});
+
 test("public event warmup cannot satisfy an execution-critical evidence read", () => {
   const service = new KalshiCfBenchmarksValueService();
   const now = Date.now();

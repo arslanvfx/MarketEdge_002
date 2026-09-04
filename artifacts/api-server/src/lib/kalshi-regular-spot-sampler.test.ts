@@ -107,6 +107,62 @@ test("repeated Kalshi CF publication identity is not counted as a fresh sample",
   assert.equal(samples.get("ZEC")[0].websocketSequence, 17);
 });
 
+test("one sampler tick retains every authenticated publication returned by the feed history", async () => {
+  const samples = new Map();
+  const nowMs = 904_000;
+  const evidence = [
+    {
+      price: 824.4,
+      publishedAtMs: 900_000,
+      receivedAtMs: 900_010,
+      sourceSequence: "ZECUSD_RTI:900000:824.40",
+      source: "kalshi_cfbenchmarks",
+      sourceIndex: "ZECUSD_RTI",
+      websocketSequence: 20,
+    },
+    {
+      price: 824.5,
+      publishedAtMs: 902_000,
+      receivedAtMs: 902_010,
+      sourceSequence: "ZECUSD_RTI:902000:824.50",
+      source: "kalshi_cfbenchmarks",
+      sourceIndex: "ZECUSD_RTI",
+      websocketSequence: 21,
+    },
+    {
+      price: 824.6,
+      publishedAtMs: 903_900,
+      receivedAtMs: 903_910,
+      sourceSequence: "ZECUSD_RTI:903900:824.60",
+      source: "kalshi_cfbenchmarks",
+      sourceIndex: "ZECUSD_RTI",
+      websocketSequence: 22,
+    },
+  ];
+
+  await collectRegularEntrySpotSample({
+    product: { symbol: "ZEC", product: "ZEC-USD" },
+    fetchFresh: async () => evidence,
+    samples,
+    nowMs,
+  });
+  await collectRegularEntrySpotSample({
+    product: { symbol: "ZEC", product: "ZEC-USD" },
+    fetchFresh: async () => evidence,
+    samples,
+    nowMs: nowMs + 500,
+  });
+
+  assert.deepEqual(
+    samples.get("ZEC").map((sample: { sourceSequence: string }) => sample.sourceSequence),
+    evidence.map((sample) => sample.sourceSequence),
+  );
+  assert.deepEqual(
+    samples.get("ZEC").map((sample: { ts: number }) => sample.ts),
+    evidence.map((sample) => sample.receivedAtMs),
+  );
+});
+
 test("samples are current-window-only and bounded", async () => {
   const nowMs = 1_800_000;
   const samples = new Map<string, Array<{ price: number; ts: number }>>([
@@ -185,5 +241,6 @@ test("conviction spot sampling coalesces per symbol without global head-of-line 
   assert.match(source, /spotSamplerHandle = setInterval/);
   assert.match(source, /clearInterval\(spotSamplerHandle\)/);
   assert.match(source, /spotSamplesInFlight\.clear\(\)/);
-  assert.match(source, /getTickerFreshEvidence\(product\)/);
+  assert.match(source, /getTickerFreshEvidenceHistory/);
+  assert.match(source, /collectRegularEntrySpotSample\(/);
 });

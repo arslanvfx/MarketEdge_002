@@ -33,7 +33,8 @@ import { kalshiTargetCache, fetchKalshiTarget, fetchOrderbookPrices, KALSHI_SERI
 // shared cache never has a transient null gap visible to other readers.
 import { S, convictionAbortCooldown, convictionAbortCooldownMs, CONVICTION_ABORT_COOLDOWN_MS, CONVICTION_OB_CACHE_TTL_MS, convictionFiredThisWindow, convictionPriceTicks, callConvictionZoneEntry, convictionObCache } from "./kalshi-bot-state";
 import { deriveConvictionZone, getEffectiveConvictionZone, isPriceTriggeredDecisionMode } from "./kalshi-bot-engine";
-import { CRYPTO_COINS, getTickerFreshEvidence } from "./crypto-data";
+import { CRYPTO_COINS, getTickerFreshEvidenceHistory } from "./crypto-data";
+import { collectRegularEntrySpotSample } from "./kalshi-regular-spot-sampler-core";
 import { logger } from "./logger";
 import {
   prewarmRegularAccountSnapshot,
@@ -53,6 +54,7 @@ import {
 } from "./kalshi-regular-spot-telemetry";
 
 const POLL_INTERVAL_MS = 1_000;
+const SPOT_SAMPLE_WINDOW_MS = 15 * 60_000;
 export const CONVICTION_LIVE_PRICE_TTL_MS = 1_500; // data older than this is considered stale
 const HEALTH_LOG_INTERVAL_MS = 60_000; // periodic tick-feed health summary
 
@@ -132,49 +134,39 @@ function isActiveGeneration(generation: number): boolean {
 
 async function refreshSpotTick(sym: string, product: string, generation: number): Promise<void> {
   const h = healthFor(sym);
+  const requestedWindowStartMs =
+    Math.floor(Date.now() / SPOT_SAMPLE_WINDOW_MS) * SPOT_SAMPLE_WINDOW_MS;
   recordRegularSpotFetchAttempt(sym, product, Date.now());
   try {
-    const evidence = await getTickerFreshEvidence(product);
-    if (!isActiveGeneration(generation)) return;
-    if (Number.isFinite(evidence.price) && evidence.price > 0) {
+    const symbolSamples = new Map([
+      [sym, [...(convictionPriceTicks.get(sym) ?? [])]],
+    ]);
+    await collectRegularEntrySpotSample({
+      product: { symbol: sym, product },
+      fetchFresh: getTickerFreshEvidenceHistory,
+      samples: symbolSamples,
+      nowMs: Date.now(),
+      receiptClock: Date.now,
+    });
+    if (
+      !isActiveGeneration(generation)
+      || Math.floor(Date.now() / SPOT_SAMPLE_WINDOW_MS) * SPOT_SAMPLE_WINDOW_MS
+        !== requestedWindowStartMs
+    ) return;
+    const ticks = symbolSamples.get(sym) ?? [];
+    const latest = ticks[ticks.length - 1];
+    if (latest) {
       const receivedAt = Date.now();
-      const ticks = convictionPriceTicks.get(sym) ?? [];
-      if (
-        evidence.sourceSequence
-        && ticks.some((tick) => tick.sourceSequence === evidence.sourceSequence)
-      ) return;
-      ticks.push(evidence.publishedAtMs == null
-        ? {
-          price: evidence.price,
-          ts: receivedAt,
-          sourceSequence: evidence.sourceSequence,
-          source: evidence.source,
-          sourceIndex: evidence.sourceIndex,
-          websocketSequence: evidence.websocketSequence,
-        }
-        : {
-          price: evidence.price,
-          ts: receivedAt,
-          oraclePublishedAtMs: evidence.publishedAtMs,
-          oracleAgeMs: receivedAt - evidence.publishedAtMs,
-          sourceSequence: evidence.sourceSequence,
-          source: evidence.source,
-          sourceIndex: evidence.sourceIndex,
-          websocketSequence: evidence.websocketSequence,
-        });
-      // Keep ~5 min of history at 1 s cadence; the guard filters to the
-      // last few seconds via timestamp but deep history costs little.
-      if (ticks.length > 300) ticks.splice(0, ticks.length - 300);
       convictionPriceTicks.set(sym, ticks);
       recordRegularSpotFetchSuccess({
         symbol: sym,
         product,
         atMs: receivedAt,
-        publishedAtMs: evidence.publishedAtMs,
+        publishedAtMs: latest.oraclePublishedAtMs ?? null,
       });
       h.okCount++;
       h.consecutiveFails = 0;
-      h.lastOkAt = Date.now();
+      h.lastOkAt = receivedAt;
     } else {
       // Invalid price (0/NaN) counts as a feed failure — no tick pushed.
       h.failCount++;

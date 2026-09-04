@@ -46,11 +46,23 @@ test("regular spot telemetry distinguishes unavailable evidence from adverse mov
 
   const snapshot = getRegularSpotTelemetrySnapshot(new Map([
     ["GOLD", [
-      { oraclePublishedAtMs: 10_500 },
-      { oraclePublishedAtMs: 12_500 },
+      {
+        ts: 10_600,
+        oraclePublishedAtMs: 10_500,
+        sourceSequence: "gold:10500",
+      },
+      {
+        ts: 12_600,
+        oraclePublishedAtMs: 12_500,
+        sourceSequence: "gold:12500",
+      },
     ]],
   ]), 13_000).GOLD;
   assert.equal(snapshot.sampleCount, 2);
+  assert.equal(snapshot.distinctPublicationCount, 2);
+  assert.equal(snapshot.latestReceiptAtMs, 12_600);
+  assert.equal(snapshot.latestReceiptAgeMs, 400);
+  assert.equal(snapshot.retainedCoverageMs, 2_000);
   assert.equal(snapshot.latestPublicationAgeMs, 500);
   assert.equal(snapshot.fetchFailureReason, null);
   assert.equal(snapshot.consecutiveFailures, 0);

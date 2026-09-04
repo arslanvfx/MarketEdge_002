@@ -20,6 +20,10 @@ interface MutableRegularSpotTelemetry {
 
 export interface RegularSpotTelemetrySnapshot extends MutableRegularSpotTelemetry {
   sampleCount: number;
+  distinctPublicationCount: number;
+  latestReceiptAtMs: number | null;
+  latestReceiptAgeMs: number | null;
+  retainedCoverageMs: number | null;
   latestPublicationAgeMs: number | null;
 }
 
@@ -101,17 +105,36 @@ export function recordRegularSpotCandidateDecision(input: {
 }
 
 export function getRegularSpotTelemetrySnapshot(
-  samples: Map<string, Array<{ oraclePublishedAtMs?: number | null }>>,
+  samples: Map<string, Array<{
+    ts?: number | null;
+    oraclePublishedAtMs?: number | null;
+    sourceSequence?: string | null;
+  }>>,
   nowMs = Date.now(),
 ): Record<string, RegularSpotTelemetrySnapshot> {
   return Object.fromEntries([...state.entries()].map(([symbol, value]) => {
     const symbolSamples = samples.get(symbol) ?? [];
+    const oldestSample = symbolSamples[0];
     const latestSample = symbolSamples[symbolSamples.length - 1];
     const latestPublicationAtMs =
       latestSample?.oraclePublishedAtMs ?? value.latestPublicationAtMs;
     return [symbol, {
       ...value,
       sampleCount: symbolSamples.length,
+      distinctPublicationCount: new Set(symbolSamples.map((sample) =>
+        sample.sourceSequence
+        ?? (sample.oraclePublishedAtMs == null
+          ? null
+          : `published:${sample.oraclePublishedAtMs}`)
+      ).filter((identity): identity is string => identity != null)).size,
+      latestReceiptAtMs: latestSample?.ts ?? null,
+      latestReceiptAgeMs: latestSample?.ts == null
+        ? null
+        : Math.max(0, nowMs - latestSample.ts),
+      retainedCoverageMs:
+        latestSample?.ts == null || oldestSample?.ts == null
+          ? null
+          : Math.max(0, latestSample.ts - oldestSample.ts),
       latestPublicationAtMs,
       latestPublicationAgeMs: latestPublicationAtMs == null
         ? null

@@ -16,6 +16,7 @@ export interface RegularSpotProduct {
 export interface RegularSpotEvidence {
   price: number;
   publishedAtMs: number | null;
+  receivedAtMs?: number | null;
   sourceSequence?: string | null;
   source?: string;
   sourceIndex?: string | null;
@@ -57,7 +58,9 @@ export function isRegularSpotSampleOwnerActive(input: {
 
 export async function collectRegularEntrySpotSample(input: {
   product: RegularSpotProduct;
-  fetchFresh: (product: string) => Promise<RegularSpotEvidence | number>;
+  fetchFresh: (
+    product: string,
+  ) => Promise<RegularSpotEvidence | RegularSpotEvidence[] | number>;
   samples: Map<string, RegularSpotSample[]>;
   nowMs: number;
   receiptClock?: () => number;
@@ -66,10 +69,22 @@ export async function collectRegularEntrySpotSample(input: {
   const fetched = await input.fetchFresh(product);
   const receivedAt = input.receiptClock?.() ?? input.nowMs;
   const windowStartMs = Math.floor(receivedAt / WINDOW_MS) * WINDOW_MS;
-  const evidence = typeof fetched === "number"
-    ? { price: fetched, publishedAtMs: null }
-    : fetched;
-  if (!Number.isFinite(evidence.price) || evidence.price <= 0) return;
+  const evidenceBatch = (Array.isArray(fetched) ? fetched : [fetched])
+    .map((evidence) => typeof evidence === "number"
+      ? { price: evidence, publishedAtMs: null }
+      : evidence)
+    .filter((evidence) => Number.isFinite(evidence.price) && evidence.price > 0)
+    .sort((a, b) => {
+      const aReceivedAt = Number.isFinite(a.receivedAtMs)
+        ? Number(a.receivedAtMs)
+        : receivedAt;
+      const bReceivedAt = Number.isFinite(b.receivedAtMs)
+        ? Number(b.receivedAtMs)
+        : receivedAt;
+      return aReceivedAt - bReceivedAt
+        || Number(a.publishedAtMs ?? 0) - Number(b.publishedAtMs ?? 0);
+    });
+  if (evidenceBatch.length === 0) return;
   const key = symbol.toUpperCase();
   const existing = (input.samples.get(key) ?? [])
     .filter((sample) =>
@@ -77,34 +92,45 @@ export async function collectRegularEntrySpotSample(input: {
       && sample.ts >= windowStartMs
       && sample.ts <= receivedAt
     );
-  if (
-    evidence.sourceSequence
-    && existing.some((sample) => sample.sourceSequence === evidence.sourceSequence)
-  ) {
-    input.samples.set(key, existing);
-    return;
-  }
-  const sourceMetadata = {
-    ...(evidence.sourceSequence != null ? { sourceSequence: evidence.sourceSequence } : {}),
-    ...(evidence.source != null ? { source: evidence.source } : {}),
-    ...(evidence.sourceIndex != null ? { sourceIndex: evidence.sourceIndex } : {}),
-    ...(evidence.websocketSequence != null
-      ? { websocketSequence: evidence.websocketSequence }
-      : {}),
-  };
-  existing.push(evidence.publishedAtMs == null
-    ? {
-      price: evidence.price,
-      ts: receivedAt,
-      ...sourceMetadata,
+  for (const evidence of evidenceBatch) {
+    const sampleReceivedAt = Number.isFinite(evidence.receivedAtMs)
+      ? Number(evidence.receivedAtMs)
+      : receivedAt;
+    if (sampleReceivedAt < windowStartMs || sampleReceivedAt > receivedAt + 1_000) {
+      continue;
     }
-    : {
-      price: evidence.price,
-      ts: receivedAt,
-      oraclePublishedAtMs: evidence.publishedAtMs,
-      oracleAgeMs: receivedAt - evidence.publishedAtMs,
-      ...sourceMetadata,
-    });
+    if (
+      evidence.sourceSequence
+      && existing.some((sample) => sample.sourceSequence === evidence.sourceSequence)
+    ) {
+      continue;
+    }
+    const sourceMetadata = {
+      ...(evidence.sourceSequence != null ? { sourceSequence: evidence.sourceSequence } : {}),
+      ...(evidence.source != null ? { source: evidence.source } : {}),
+      ...(evidence.sourceIndex != null ? { sourceIndex: evidence.sourceIndex } : {}),
+      ...(evidence.websocketSequence != null
+        ? { websocketSequence: evidence.websocketSequence }
+        : {}),
+    };
+    existing.push(evidence.publishedAtMs == null
+      ? {
+        price: evidence.price,
+        ts: sampleReceivedAt,
+        ...sourceMetadata,
+      }
+      : {
+        price: evidence.price,
+        ts: sampleReceivedAt,
+        oraclePublishedAtMs: evidence.publishedAtMs,
+        oracleAgeMs: sampleReceivedAt - evidence.publishedAtMs,
+        ...sourceMetadata,
+      });
+  }
+  existing.sort((a, b) =>
+    a.ts - b.ts
+    || Number(a.oraclePublishedAtMs ?? 0) - Number(b.oraclePublishedAtMs ?? 0)
+  );
   if (existing.length > REGULAR_SPOT_SAMPLE_LIMIT) {
     existing.splice(0, existing.length - REGULAR_SPOT_SAMPLE_LIMIT);
   }
@@ -113,7 +139,9 @@ export async function collectRegularEntrySpotSample(input: {
 
 export async function collectRegularEntrySpotSamples(input: {
   products: readonly RegularSpotProduct[];
-  fetchFresh: (product: string) => Promise<RegularSpotEvidence | number>;
+  fetchFresh: (
+    product: string,
+  ) => Promise<RegularSpotEvidence | RegularSpotEvidence[] | number>;
   samples: Map<string, RegularSpotSample[]>;
   nowMs: number;
   /** Defaults to nowMs for deterministic callers; production supplies Date.now. */

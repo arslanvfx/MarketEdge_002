@@ -39,8 +39,14 @@ import {
   isPythProduct,
   type CoinDef,
 } from "./market-defs";
-import { getKalshiPythValueEvidence } from "./kalshi-pyth-value-service";
-import { getKalshiCfBenchmarksValueEvidence } from "./kalshi-cfbenchmarks-value-service";
+import {
+  getKalshiPythValueEvidence,
+  getKalshiPythValueEvidenceHistory,
+} from "./kalshi-pyth-value-service";
+import {
+  getKalshiCfBenchmarksValueEvidence,
+  getKalshiCfBenchmarksValueEvidenceHistory,
+} from "./kalshi-cfbenchmarks-value-service";
 import { selectPythWindowClose } from "./pyth-window-close.ts";
 
 // Commodity underlying data is an application-wide market-data dependency,
@@ -226,6 +232,8 @@ export interface FreshTickerEvidence {
   price: number;
   /** Authoritative source event time when the provider exposes one. */
   publishedAtMs: number | null;
+  /** When this process received the authoritative provider publication. */
+  receivedAtMs?: number | null;
   /** Provider update identity (Pyth price fingerprint or Coinbase trade id). */
   sourceSequence?: string | null;
   source?: "kalshi_pyth" | "kalshi_cfbenchmarks" | "coinbase";
@@ -304,6 +312,7 @@ async function fetchKalshiCommodityLiveEvidence(
     const evidence: FreshTickerEvidence = {
       price,
       publishedAtMs,
+      receivedAtMs: Date.now(),
       sourceSequence: `${eventTicker}:${publishedAtMs}:${price}`,
       source: "kalshi_pyth",
       sourceIndex: pythSymbol(product),
@@ -438,6 +447,35 @@ export async function getTickerFreshEvidence(
     product,
     PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S * 1_000,
   );
+}
+
+/**
+ * Execution-critical publication history. Unlike polling a latest-value
+ * snapshot, this preserves every authenticated provider update that arrived
+ * between one-second bot ticks.
+ */
+export async function getTickerFreshEvidenceHistory(
+  product: string,
+  signal?: AbortSignal,
+): Promise<FreshTickerEvidence[]> {
+  if (signal?.aborted) throw new Error(`fresh evidence history fetch aborted for ${product}`);
+  const maxAgeMs = PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S * 1_000;
+  if (isPythProduct(product)) {
+    try {
+      return getKalshiPythValueEvidenceHistory(product, maxAgeMs).map((evidence) => ({
+        ...evidence,
+        source: "kalshi_pyth" as const,
+        sourceIndex: pythSymbol(product),
+      }));
+    } catch (error) {
+      if (!KALSHI_LIVE_DATA_PRODUCTS.has(product)) throw error;
+      return [await fetchKalshiCommodityLiveEvidence(
+        product,
+        PYTH_AUTHORITATIVE_SPOT_MAX_AGE_S,
+      )];
+    }
+  }
+  return getKalshiCfBenchmarksValueEvidenceHistory(product, maxAgeMs);
 }
 
 export async function getCandles(product: string): Promise<Candle[]> {

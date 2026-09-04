@@ -150,4 +150,5 @@
 - [FastLane Conviction mode](fastlane-conviction-mode.md) — isolated price-only IOC mode; optional proximity/freefall guards and lifecycle safety stay explicit.
 - [Operator-owned risk caps](operator-owned-risk-caps.md) — financial caps accept any finite non-negative operator value; do not impose arbitrary UI or API ceilings.
 - [Kalshi CF crypto feed identity](kalshi-cf-crypto-feed-identity.md) — settlement-rule IDs and websocket IDs differ; preserve publication identity and reject retired-socket evidence.
+- [Authoritative publication continuity](authoritative-publication-continuity.md) — retain bounded provider history; latest-only snapshots lose genuine updates between sampler ticks.
 - [Kalshi TBD target markets](kalshi-tbd-target-markets.md) — select current 15m contracts by close time even before floor_strike appears; show quotes, but keep target-dependent trading blocked.

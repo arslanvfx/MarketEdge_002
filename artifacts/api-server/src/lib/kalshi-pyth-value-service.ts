@@ -13,6 +13,8 @@ const WS_SIGNING_PATH = "/trade-api/ws/v2";
 const CONNECT_TIMEOUT_MS = 10_000;
 const PING_INTERVAL_MS = 20_000;
 const DEFAULT_FRESHNESS_MS = 5_000;
+const PUBLICATION_HISTORY_MS = 60_000;
+const PUBLICATION_HISTORY_LIMIT = 300;
 
 const UNDERLYINGS = Object.values(PYTH_COMMODITY_FEEDS)
   .map((feed) => feed.symbol);
@@ -39,7 +41,9 @@ export class KalshiPythValueService {
   private nextId = 1;
   private connectedAt: number | null = null;
   private lastFailureReason: string | null = null;
+  private connectionGeneration = 0;
   private readonly latest = new Map<string, KalshiPythValueEvidence>();
+  private readonly history = new Map<string, KalshiPythValueEvidence[]>();
 
   start(): void {
     if (this.started) return;
@@ -54,6 +58,7 @@ export class KalshiPythValueService {
 
   stop(): void {
     this.started = false;
+    this.connectionGeneration += 1;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.connectTimer) clearTimeout(this.connectTimer);
     if (this.pingTimer) clearInterval(this.pingTimer);
@@ -64,6 +69,7 @@ export class KalshiPythValueService {
     this.socket = null;
     if (socket) socket.terminate();
     this.latest.clear();
+    this.history.clear();
   }
 
   getFreshEvidence(
@@ -94,6 +100,32 @@ export class KalshiPythValueService {
       receivedAtMs: evidence.receivedAtMs,
       sourceSequence: evidence.sourceSequence,
     };
+  }
+
+  /**
+   * Preserve every authenticated Pyth publication delivered between bot
+   * sampling ticks. Repeated local reads remain one observation because the
+   * publication identity is retained end to end.
+   */
+  getFreshEvidenceHistory(
+    product: string,
+    nowMs = Date.now(),
+    maxAgeMs = DEFAULT_FRESHNESS_MS,
+  ): KalshiPythTickerEvidence[] {
+    const latest = this.getFreshEvidence(product, nowMs, maxAgeMs);
+    const underlying = PRODUCT_TO_UNDERLYING.get(product)!;
+    const retained = (this.history.get(underlying) ?? [])
+      .filter((evidence) =>
+        evidence.sourceTsMs >= nowMs - PUBLICATION_HISTORY_MS
+        && evidence.sourceTsMs <= latest.publishedAtMs
+      );
+    if (retained.length === 0) return [latest];
+    return retained.map((evidence) => ({
+      price: evidence.price,
+      publishedAtMs: evidence.sourceTsMs,
+      receivedAtMs: evidence.receivedAtMs,
+      sourceSequence: evidence.sourceSequence,
+    }));
   }
 
   getStatus(nowMs = Date.now()) {
@@ -129,6 +161,7 @@ export class KalshiPythValueService {
     }
     try {
       const ws = new WebSocket(WS_URL, { headers });
+      const connectionGeneration = ++this.connectionGeneration;
       this.socket = ws;
       this.connectTimer = setTimeout(() => {
         if (this.socket === ws && ws.readyState !== WebSocket.OPEN) {
@@ -136,6 +169,7 @@ export class KalshiPythValueService {
         }
       }, CONNECT_TIMEOUT_MS);
       ws.on("open", () => {
+        if (!this.isCurrentConnection(ws, connectionGeneration)) return;
         if (this.connectTimer) clearTimeout(this.connectTimer);
         this.connectTimer = null;
         this.reconnectAttempt = 0;
@@ -163,8 +197,12 @@ export class KalshiPythValueService {
           "[kalshi-pyth-value] authenticated commodity stream connected",
         );
       });
-      ws.on("pong", () => { this.alive = true; });
-      ws.on("message", (data) => this.onMessage(data));
+      ws.on("pong", () => {
+        if (this.isCurrentConnection(ws, connectionGeneration)) this.alive = true;
+      });
+      ws.on("message", (data) =>
+        this.onMessage(data, ws, connectionGeneration)
+      );
       ws.on("error", (err) => this.restart(ws, `socket error: ${errorMessage(err)}`));
       ws.on("close", (code, reason) =>
         this.onClose(ws, `closed ${code}: ${reason.toString()}`));
@@ -175,7 +213,12 @@ export class KalshiPythValueService {
     }
   }
 
-  private onMessage(data: WebSocket.RawData): void {
+  private onMessage(
+    data: WebSocket.RawData,
+    ws: WebSocket = this.socket as WebSocket,
+    connectionGeneration = this.connectionGeneration,
+  ): void {
+    if (!this.isCurrentConnection(ws, connectionGeneration)) return;
     try {
       const raw = JSON.parse(data.toString()) as unknown;
       const event = raw as { type?: unknown; msg?: { msg?: unknown; code?: unknown } };
@@ -196,15 +239,39 @@ export class KalshiPythValueService {
       const previous = this.latest.get(evidence.underlyingTicker);
       if (previous && evidence.sourceTsMs < previous.sourceTsMs) return;
       this.latest.set(evidence.underlyingTicker, evidence);
+      const history = this.history.get(evidence.underlyingTicker) ?? [];
+      const last = history[history.length - 1];
+      if (last?.sourceTsMs === evidence.sourceTsMs) {
+        history[history.length - 1] = evidence;
+      } else {
+        history.push(evidence);
+      }
+      const historyCutoff = evidence.sourceTsMs - PUBLICATION_HISTORY_MS;
+      while (
+        history.length > PUBLICATION_HISTORY_LIMIT
+        || (history[0]?.sourceTsMs ?? evidence.sourceTsMs) < historyCutoff
+      ) {
+        history.shift();
+      }
+      this.history.set(evidence.underlyingTicker, history);
       this.lastFailureReason = null;
     } catch (err) {
       // A malformed publication means the frame's ticker identity cannot be
       // trusted. Clear all retained commodity evidence so no recent cached
       // value remains usable during a protocol/schema integrity failure.
       this.latest.clear();
+      this.history.clear();
       this.lastFailureReason = `malformed pyth_value frame: ${errorMessage(err)}`;
       logger.warn({ err }, "[kalshi-pyth-value] invalid frame ignored");
     }
+  }
+
+  private isCurrentConnection(
+    ws: WebSocket,
+    connectionGeneration: number,
+  ): boolean {
+    return this.socket === ws
+      && this.connectionGeneration === connectionGeneration;
   }
 
   private restart(ws: WebSocket, reason: string): void {
@@ -216,6 +283,7 @@ export class KalshiPythValueService {
     this.connectTimer = null;
     this.pingTimer = null;
     this.latest.clear();
+    this.history.clear();
     try {
       ws.terminate();
     } catch {
@@ -234,6 +302,7 @@ export class KalshiPythValueService {
     this.connectTimer = null;
     this.pingTimer = null;
     this.latest.clear();
+    this.history.clear();
     this.fail(reason);
     this.scheduleReconnect();
   }
@@ -264,4 +333,15 @@ export function getKalshiPythValueEvidence(
   maxAgeMs = DEFAULT_FRESHNESS_MS,
 ): KalshiPythTickerEvidence {
   return kalshiPythValueService.getFreshEvidence(product, Date.now(), maxAgeMs);
+}
+
+export function getKalshiPythValueEvidenceHistory(
+  product: string,
+  maxAgeMs = DEFAULT_FRESHNESS_MS,
+): KalshiPythTickerEvidence[] {
+  return kalshiPythValueService.getFreshEvidenceHistory(
+    product,
+    Date.now(),
+    maxAgeMs,
+  );
 }

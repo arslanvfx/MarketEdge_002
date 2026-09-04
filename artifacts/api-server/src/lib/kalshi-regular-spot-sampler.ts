@@ -1,4 +1,4 @@
-import { CRYPTO_COINS, getTickerFreshEvidence } from "./crypto-data";
+import { CRYPTO_COINS, getTickerFreshEvidenceHistory } from "./crypto-data";
 import { convictionPriceTicks } from "./kalshi-bot-state";
 import { logger } from "./logger";
 import {
@@ -51,7 +51,7 @@ async function sampleOnce(): Promise<void> {
       try {
         await collectRegularEntrySpotSample({
           product,
-          fetchFresh: getTickerFreshEvidence,
+          fetchFresh: getTickerFreshEvidenceHistory,
           samples: symbolSamples,
           nowMs,
           receiptClock: Date.now,
